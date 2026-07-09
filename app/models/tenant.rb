@@ -2,7 +2,8 @@ class Tenant < ApplicationRecord
   has_many :users, dependent: :destroy
   has_many :channels, dependent: :destroy
   has_many :products, dependent: :destroy
-  has_many :orders, dependent: :destroy
+  has_many :orders,        dependent: :destroy
+  has_many :order_refunds, dependent: :destroy
   has_many :imports, dependent: :destroy
   has_many :integrations,          dependent: :destroy
   has_many :integration_mappings,  dependent: :destroy

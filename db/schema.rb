@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_07_09_150432) do
+ActiveRecord::Schema[7.2].define(version: 2026_07_09_200003) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -161,8 +161,30 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_09_150432) do
     t.decimal "discount", precision: 10, scale: 2, default: "0.0"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.boolean "is_gift", default: false, null: false
+    t.decimal "nf_unit_price", precision: 10, scale: 2, default: "0.0", null: false
     t.index ["order_id"], name: "index_order_items_on_order_id"
     t.index ["product_id"], name: "index_order_items_on_product_id"
+  end
+
+  create_table "order_refunds", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "order_id", null: false
+    t.bigint "integration_id"
+    t.string "external_id"
+    t.decimal "amount", precision: 10, scale: 2, default: "0.0", null: false
+    t.string "reason"
+    t.string "status", default: "pending", null: false
+    t.datetime "refunded_at"
+    t.jsonb "metadata", default: {}, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["integration_id"], name: "index_order_refunds_on_integration_id"
+    t.index ["order_id"], name: "index_order_refunds_on_order_id"
+    t.index ["refunded_at"], name: "index_order_refunds_on_refunded_at"
+    t.index ["status"], name: "index_order_refunds_on_status"
+    t.index ["tenant_id", "external_id"], name: "index_order_refunds_on_tenant_id_and_external_id"
+    t.index ["tenant_id"], name: "index_order_refunds_on_tenant_id"
   end
 
   create_table "orders", force: :cascade do |t|
@@ -188,8 +210,15 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_09_150432) do
     t.datetime "ordered_at"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.string "order_type", default: "sale", null: false
+    t.decimal "refund_amount", precision: 10, scale: 2, default: "0.0", null: false
+    t.string "nf_number"
+    t.decimal "nf_gross_value", precision: 10, scale: 2, default: "0.0", null: false
+    t.decimal "nf_discount", precision: 10, scale: 2, default: "0.0", null: false
+    t.decimal "nf_freight", precision: 10, scale: 2, default: "0.0", null: false
     t.index ["channel_id"], name: "index_orders_on_channel_id"
     t.index ["tenant_id", "external_id"], name: "index_orders_on_tenant_id_and_external_id"
+    t.index ["tenant_id", "order_type"], name: "index_orders_on_tenant_id_and_order_type"
     t.index ["tenant_id", "ordered_at"], name: "index_orders_on_tenant_id_and_ordered_at"
     t.index ["tenant_id"], name: "index_orders_on_tenant_id"
   end
@@ -259,6 +288,9 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_09_150432) do
   add_foreign_key "integrations", "tenants"
   add_foreign_key "order_items", "orders"
   add_foreign_key "order_items", "products"
+  add_foreign_key "order_refunds", "integrations"
+  add_foreign_key "order_refunds", "orders"
+  add_foreign_key "order_refunds", "tenants"
   add_foreign_key "orders", "channels"
   add_foreign_key "orders", "tenants"
   add_foreign_key "pricing_rules", "channels"

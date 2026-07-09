@@ -52,12 +52,18 @@ module Integrations
           customer_name:    @normalized[:customer_name],
           customer_tag:     @normalized[:customer_tag],
           state:            @normalized[:state],
+          order_type:       @normalized[:order_type] || "sale",
+          refund_amount:    @normalized[:refund_amount].to_f,
+          nf_number:        @normalized[:nf_number],
+          nf_gross_value:   @normalized[:nf_gross_value].to_f,
+          nf_discount:      @normalized[:nf_discount].to_f,
+          nf_freight:       @normalized[:nf_freight].to_f,
           gross_value:      @normalized[:gross_value].to_f,
           freight:          @normalized[:freight].to_f,
           discount:         @normalized[:discount].to_f,
           items_qty:        @normalized[:items].sum { |i| (i[:quantity] || 1).to_i },
           ordered_at:       @normalized[:ordered_at] || Time.current,
-          # Placeholders — recalculated after items are created
+          # Placeholders — recalculated after items are upserted
           cost_price:       0,
           commission:       0,
           operational_cost: 0
@@ -74,13 +80,15 @@ module Integrations
           upsert_product_mapping(product, item_data) if product && @integration
 
           order.order_items.create!(
-            product:    product,
-            sku:        item_data[:sku],
-            name:       item_data[:name],
-            quantity:   item_data[:quantity],
-            unit_price: item_data[:unit_price].to_f,
-            unit_cost:  item_data[:unit_cost].to_f,
-            discount:   item_data[:discount].to_f
+            product:       product,
+            sku:           item_data[:sku],
+            name:          item_data[:name],
+            quantity:      item_data[:quantity],
+            unit_price:    item_data[:unit_price].to_f,
+            unit_cost:     item_data[:unit_cost].to_f,
+            discount:      item_data[:discount].to_f,
+            is_gift:       item_data[:is_gift] || false,
+            nf_unit_price: item_data[:nf_unit_price].to_f
           )
         end
       end
@@ -94,12 +102,15 @@ module Integrations
         if product.new_record?
           product.assign_attributes(
             name:       item_data[:name].presence || sku,
-            cost_price: item_data[:unit_cost].to_f,
+            cost_price: item_data[:is_gift] ? 0 : item_data[:unit_cost].to_f,
             active:     true
           )
         else
-          product.name       = item_data[:name] if item_data[:name].present? && product.name.blank?
-          product.cost_price = item_data[:unit_cost].to_f if item_data[:unit_cost].to_f > 0
+          product.name = item_data[:name] if item_data[:name].present? && product.name.blank?
+          # Never overwrite cost from a gift item
+          unless item_data[:is_gift]
+            product.cost_price = item_data[:unit_cost].to_f if item_data[:unit_cost].to_f > 0
+          end
         end
 
         product.save!
@@ -116,11 +127,11 @@ module Integrations
           external_id:   external_id
         )
         mapping.assign_attributes(
-          mappable:      product,
-          external_code: item_data[:sku],
-          status:        "active",
+          mappable:       product,
+          external_code:  item_data[:sku],
+          status:         "active",
           last_synced_at: Time.current,
-          metadata:      mapping.metadata.merge(
+          metadata:       mapping.metadata.merge(
             "provider"  => @provider,
             "item_name" => item_data[:name]
           )
@@ -129,15 +140,17 @@ module Integrations
       end
 
       def recalculate_costs(order, channel)
-        items = order.order_items.reload
+        items     = order.order_items.reload
+        non_gifts = items.reject(&:is_gift)
 
-        cost_price = items.sum { |i| i.quantity * i.unit_cost.to_f }
+        # Brindes não somam no custo da venda principal
+        cost_price = non_gifts.sum { |i| i.quantity * i.unit_cost.to_f }
 
         commission_pct   = channel.commission_pct.to_f / 100.0
         commission_fixed = channel.commission_fixed.to_f
         commission = (order.gross_value * commission_pct) + commission_fixed
 
-        operational_cost = items.sum do |item|
+        operational_cost = non_gifts.sum do |item|
           next 0 unless item.product_id
           ChannelOperationalCost.find_by(product_id: item.product_id, channel: channel)&.cost.to_f
         end
@@ -147,7 +160,7 @@ module Integrations
           commission:       commission.round(2),
           operational_cost: operational_cost
         )
-        # margin is recalculated via before_save :calculate_margin on order.save!
+        # margin e margin_pct recalculados via before_save :calculate_margin
       end
 
       def upsert_order_mapping(order)

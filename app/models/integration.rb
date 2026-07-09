@@ -13,6 +13,7 @@ class Integration < ApplicationRecord
   has_many :integration_mappings,  dependent: :destroy
   has_many :integration_sync_logs, dependent: :nullify
   has_many :integration_events,    dependent: :nullify
+  has_many :order_refunds,         dependent: :nullify
 
   scope :active,      -> { where(active: true) }
   scope :by_provider, ->(p) { where(provider: p) }

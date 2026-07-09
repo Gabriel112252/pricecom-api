@@ -19,7 +19,7 @@ module Api
 
       def show
         order = current_tenant.orders
-          .includes(:channel, order_items: :product, integration_mappings: :integration)
+          .includes(:channel, :order_refunds, order_items: :product, integration_mappings: :integration)
           .find(params[:id])
 
         render json: show_json(order)
@@ -52,14 +52,23 @@ module Api
           channel_name:     order.channel&.name,
           external_id:      order.external_id,
           order_number:     order.order_number,
+          order_type:       order.order_type,
           gross_value:      order.gross_value,
           cost_price:       order.cost_price,
           freight:          order.freight,
           discount:         order.discount,
           commission:       order.commission,
           operational_cost: order.operational_cost,
+          refund_amount:    order.refund_amount,
           margin:           order.margin,
           margin_pct:       order.margin_pct,
+          net_gross_value:  order.net_gross_value,
+          net_margin:       order.net_margin,
+          net_margin_pct:   order.net_margin_pct,
+          nf_number:        order.nf_number,
+          nf_gross_value:   order.nf_gross_value,
+          nf_discount:      order.nf_discount,
+          nf_freight:       order.nf_freight,
           status:           order.status,
           customer_name:    order.customer_name,
           items_qty:        order.items_qty,
@@ -75,20 +84,23 @@ module Api
           payment_method: order.payment_method,
           weight_kg:      order.weight_kg,
           items:          order.order_items.map { |i| item_json(i) },
-          mappings:       order.integration_mappings.map { |m| mapping_json(m) }
+          mappings:       order.integration_mappings.map { |m| mapping_json(m) },
+          refunds:        order.order_refunds.map { |r| refund_json(r) }
         )
       end
 
       def item_json(item)
         {
-          id:         item.id,
-          product_id: item.product_id,
-          sku:        item.sku,
-          name:       item.name,
-          quantity:   item.quantity,
-          unit_price: item.unit_price,
-          unit_cost:  item.unit_cost,
-          discount:   item.discount
+          id:            item.id,
+          product_id:    item.product_id,
+          sku:           item.sku,
+          name:          item.name,
+          quantity:      item.quantity,
+          unit_price:    item.unit_price,
+          unit_cost:     item.unit_cost,
+          discount:      item.discount,
+          is_gift:       item.is_gift,
+          nf_unit_price: item.nf_unit_price
         }
       end
 
@@ -99,6 +111,18 @@ module Api
           external_type:  mapping.external_type,
           status:         mapping.status,
           last_synced_at: mapping.last_synced_at
+        }
+      end
+
+      def refund_json(refund)
+        {
+          id:           refund.id,
+          external_id:  refund.external_id,
+          amount:       refund.amount,
+          reason:       refund.reason,
+          status:       refund.status,
+          refunded_at:  refund.refunded_at,
+          created_at:   refund.created_at
         }
       end
 

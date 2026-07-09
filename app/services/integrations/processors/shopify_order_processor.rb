@@ -1,7 +1,8 @@
 module Integrations
   module Processors
     class ShopifyOrderProcessor
-      Result = Integrations::EventProcessor::Result
+      PROVIDER = "shopify"
+      Result   = Integrations::EventProcessor::Result
 
       def self.call(event)
         new(event).call
@@ -22,11 +23,49 @@ module Integrations
           )
         end
 
+        if normalized[:order_type] == "refund"
+          handle_refund(normalized)
+        else
+          handle_order(normalized)
+        end
+      end
+
+      private
+
+      def handle_refund(normalized)
+        upsert = Integrations::Orders::UpsertRefund.call(
+          tenant:      @event.tenant,
+          normalized:  normalized,
+          integration: @event.integration,
+          provider:    PROVIDER
+        )
+
+        unless upsert.success?
+          return Result.new(
+            outcome:       :error,
+            error_message: upsert.error_message,
+            metadata:      { external_id: normalized[:external_id] }
+          )
+        end
+
+        Result.new(
+          outcome:       :success,
+          error_message: nil,
+          metadata: {
+            refund_id:     upsert.refund.id,
+            order_id:      upsert.order.id,
+            external_id:   normalized[:external_id],
+            refund_amount: upsert.refund.amount
+          }
+        )
+      end
+
+      def handle_order(normalized)
         upsert = Integrations::Orders::UpsertOrder.call(
           tenant:      @event.tenant,
           normalized:  normalized,
           integration: @event.integration,
-          provider:    "shopify"
+          provider:    PROVIDER
         )
 
         unless upsert.success?

@@ -32,23 +32,33 @@ module Api
           Arel.sql("COALESCE(SUM(discount), 0)"),
           Arel.sql("COALESCE(SUM(commission), 0)"),
           Arel.sql("COALESCE(SUM(operational_cost), 0)"),
-          Arel.sql("COALESCE(SUM(margin), 0)")
+          Arel.sql("COALESCE(SUM(margin), 0)"),
+          Arel.sql("COALESCE(SUM(refund_amount), 0)")
         )
 
-        orders_count, gross, cost, freight, discount, commission, op_cost, margin = agg
+        orders_count, gross, cost, freight, discount, commission, op_cost, margin, refund = agg
 
-        margin_pct = gross.to_f > 0 ? (margin.to_f / gross.to_f * 100).round(2) : 0
+        gross_f  = gross.to_f
+        margin_f = margin.to_f
+        refund_f = refund.to_f
+
+        net_gross  = (gross_f - refund_f).round(2)
+        net_margin = (margin_f - refund_f).round(2)
 
         {
           orders_count:     orders_count,
-          gross_value:      gross.to_f.round(2),
+          gross_value:      gross_f.round(2),
           cost_price:       cost.to_f.round(2),
           freight:          freight.to_f.round(2),
           discount:         discount.to_f.round(2),
           commission:       commission.to_f.round(2),
           operational_cost: op_cost.to_f.round(2),
-          margin:           margin.to_f.round(2),
-          margin_pct:       margin_pct
+          margin:           margin_f.round(2),
+          margin_pct:       gross_f > 0 ? (margin_f / gross_f * 100).round(2) : 0,
+          refund_amount:    refund_f.round(2),
+          net_gross_value:  net_gross,
+          net_margin:       net_margin,
+          net_margin_pct:   gross_f > 0 ? (net_margin / gross_f * 100).round(2) : 0
         }
       end
 
@@ -61,18 +71,30 @@ module Api
             Arel.sql("channels.name"),
             Arel.sql("COUNT(orders.id)"),
             Arel.sql("COALESCE(SUM(orders.gross_value), 0)"),
-            Arel.sql("COALESCE(SUM(orders.margin), 0)")
+            Arel.sql("COALESCE(SUM(orders.margin), 0)"),
+            Arel.sql("COALESCE(SUM(orders.refund_amount), 0)")
           )
 
-        rows.map do |channel_id, channel_name, count, gross, margin|
-          margin_pct = gross.to_f > 0 ? (margin.to_f / gross.to_f * 100).round(2) : 0
+        rows.map do |channel_id, channel_name, count, gross, margin, refund|
+          gross_f     = gross.to_f
+          margin_f    = margin.to_f
+          refund_f    = refund.to_f
+          net_gross   = (gross_f - refund_f).round(2)
+          net_margin  = (margin_f - refund_f).round(2)
+          margin_pct     = gross_f > 0 ? (margin_f / gross_f * 100).round(2) : 0
+          net_margin_pct = gross_f > 0 ? (net_margin / gross_f * 100).round(2) : 0
+
           {
-            channel_id:   channel_id,
-            channel_name: channel_name,
-            orders_count: count,
-            gross_value:  gross.to_f.round(2),
-            margin:       margin.to_f.round(2),
-            margin_pct:   margin_pct
+            channel_id:     channel_id,
+            channel_name:   channel_name,
+            orders_count:   count,
+            gross_value:    gross_f.round(2),
+            margin:         margin_f.round(2),
+            margin_pct:     margin_pct,
+            refund_amount:  refund_f.round(2),
+            net_gross_value: net_gross,
+            net_margin:     net_margin,
+            net_margin_pct: net_margin_pct
           }
         end
       end
@@ -99,7 +121,9 @@ module Api
 
       def build_low_margin(scope)
         scope
-          .order(margin_pct: :asc)
+          .order(Arel.sql(
+            "CASE WHEN gross_value > 0 THEN (margin - refund_amount) / gross_value * 100 ELSE 0 END ASC"
+          ))
           .limit(10)
           .map { |o| order_summary_json(o) }
       end
@@ -113,14 +137,18 @@ module Api
 
       def order_summary_json(order, with_status: false)
         result = {
-          id:            order.id,
-          channel_name:  order.channel&.name,
-          order_number:  order.order_number,
-          customer_name: order.customer_name,
-          gross_value:   order.gross_value.to_f.round(2),
-          margin:        order.margin.to_f.round(2),
-          margin_pct:    order.margin_pct.to_f,
-          ordered_at:    order.ordered_at
+          id:             order.id,
+          channel_name:   order.channel&.name,
+          order_number:   order.order_number,
+          customer_name:  order.customer_name,
+          order_type:     order.order_type,
+          gross_value:    order.gross_value.to_f.round(2),
+          refund_amount:  order.refund_amount.to_f.round(2),
+          margin:         order.margin.to_f.round(2),
+          margin_pct:     order.margin_pct.to_f,
+          net_margin:     order.net_margin,
+          net_margin_pct: order.net_margin_pct,
+          ordered_at:     order.ordered_at
         }
         result[:status] = order.status if with_status
         result
