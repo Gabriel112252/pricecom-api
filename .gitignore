@@ -1,0 +1,6 @@
+
+# Rails local runtime
+/log/*
+!/log/.keep
+/tmp/*
+!/tmp/.keep
