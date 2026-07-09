@@ -10,9 +10,34 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_07_09_200003) do
+ActiveRecord::Schema[7.2].define(version: 2026_07_09_200004) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
+
+  create_table "audit_conflicts", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "order_id"
+    t.bigint "product_id"
+    t.string "conflict_type", null: false
+    t.string "severity", default: "medium", null: false
+    t.string "status", default: "open", null: false
+    t.decimal "expected_value", precision: 10, scale: 2, default: "0.0", null: false
+    t.decimal "actual_value", precision: 10, scale: 2, default: "0.0", null: false
+    t.decimal "difference", precision: 10, scale: 2, default: "0.0", null: false
+    t.string "source", default: "auto", null: false
+    t.text "notes"
+    t.datetime "resolved_at"
+    t.jsonb "metadata", default: {}, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["created_at"], name: "index_audit_conflicts_on_created_at"
+    t.index ["order_id"], name: "index_audit_conflicts_on_order_id"
+    t.index ["product_id"], name: "index_audit_conflicts_on_product_id"
+    t.index ["tenant_id", "conflict_type"], name: "index_audit_conflicts_on_tenant_id_and_conflict_type"
+    t.index ["tenant_id", "severity"], name: "index_audit_conflicts_on_tenant_id_and_severity"
+    t.index ["tenant_id", "status"], name: "index_audit_conflicts_on_tenant_id_and_status"
+    t.index ["tenant_id"], name: "index_audit_conflicts_on_tenant_id"
+  end
 
   create_table "channel_operational_costs", force: :cascade do |t|
     t.bigint "product_id", null: false
@@ -273,6 +298,9 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_09_200003) do
     t.index ["tenant_id"], name: "index_users_on_tenant_id"
   end
 
+  add_foreign_key "audit_conflicts", "orders"
+  add_foreign_key "audit_conflicts", "products"
+  add_foreign_key "audit_conflicts", "tenants"
   add_foreign_key "channel_operational_costs", "channels"
   add_foreign_key "channel_operational_costs", "products"
   add_foreign_key "channels", "tenants"

@@ -42,6 +42,9 @@ Rails.application.routes.draw do
       # Integration Sync Logs (read-only)
       resources :integration_sync_logs, only: [:index, :show]
 
+      # Audit Conflicts
+      resources :audit_conflicts, only: [:index, :show, :update]
+
       # Dashboard
       get "dashboard/summary", to: "dashboard#summary"
 

@@ -9,7 +9,8 @@ module Api
           by_channel:        build_by_channel(base),
           by_status:         build_by_status(base),
           low_margin_orders: build_low_margin(base),
-          recent_orders:     build_recent(base)
+          recent_orders:     build_recent(base),
+          audit:             build_audit
         }
       end
 
@@ -133,6 +134,46 @@ module Api
           .order(ordered_at: :desc, created_at: :desc)
           .limit(10)
           .map { |o| order_summary_json(o, with_status: true) }
+      end
+
+      def build_audit
+        open_scope = current_tenant.audit_conflicts.where(status: "open")
+
+        severity_counts = open_scope.group(:severity).count
+
+        by_type = open_scope.group(:conflict_type).count.map do |conflict_type, count|
+          { conflict_type: conflict_type, open_count: count }
+        end
+
+        recent_open = open_scope
+          .includes(:order, :product)
+          .order(created_at: :desc)
+          .limit(10)
+          .map { |c| audit_conflict_json(c) }
+
+        {
+          open_count:     severity_counts.values.sum,
+          critical_count: severity_counts["critical"] || 0,
+          high_count:     severity_counts["high"]     || 0,
+          medium_count:   severity_counts["medium"]   || 0,
+          low_count:      severity_counts["low"]      || 0,
+          by_type:        by_type,
+          recent_open:    recent_open
+        }
+      end
+
+      def audit_conflict_json(conflict)
+        {
+          id:            conflict.id,
+          conflict_type: conflict.conflict_type,
+          severity:      conflict.severity,
+          order_id:      conflict.order_id,
+          order_number:  conflict.order&.order_number,
+          product_id:    conflict.product_id,
+          product_sku:   conflict.product&.sku,
+          difference:    conflict.difference,
+          created_at:    conflict.created_at
+        }
       end
 
       def order_summary_json(order, with_status: false)

@@ -31,6 +31,7 @@ module Integrations
         ActiveRecord::Base.transaction do
           refund = upsert_refund(order)
           update_order(order)
+          run_conflict_detection(order)
           Result.new(ok: true, refund: refund, order: order, error_message: nil)
         end
       rescue ActiveRecord::RecordInvalid => e
@@ -78,6 +79,12 @@ module Integrations
           refund_amount: total_refunded,
           status:        new_status
         )
+      end
+
+      def run_conflict_detection(order)
+        Audits::DetectOrderConflicts.call(order)
+      rescue => e
+        Rails.logger.error("[Integrations::Orders::UpsertRefund] Audits::DetectOrderConflicts failed for order_id=#{order.id}: #{e.message}")
       end
     end
   end

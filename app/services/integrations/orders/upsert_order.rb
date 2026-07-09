@@ -26,6 +26,7 @@ module Integrations
           recalculate_costs(order, channel)
           order.save!
           upsert_order_mapping(order)
+          run_conflict_detection(order)
           Result.new(ok: true, order: order, error_message: nil)
         end
       rescue ActiveRecord::RecordInvalid => e
@@ -178,6 +179,12 @@ module Integrations
           last_synced_at: Time.current
         )
         mapping.save!
+      end
+
+      def run_conflict_detection(order)
+        Audits::DetectOrderConflicts.call(order)
+      rescue => e
+        Rails.logger.error("[Integrations::Orders::UpsertOrder] Audits::DetectOrderConflicts failed for order_id=#{order.id}: #{e.message}")
       end
     end
   end

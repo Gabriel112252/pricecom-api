@@ -9,6 +9,7 @@ class Tenant < ApplicationRecord
   has_many :integration_mappings,  dependent: :destroy
   has_many :integration_sync_logs, dependent: :destroy
   has_many :integration_events,    dependent: :destroy
+  has_many :audit_conflicts, dependent: :destroy
 
   validates :name, presence: true
   validates :slug, presence: true, uniqueness: true
