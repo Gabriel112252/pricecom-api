@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_07_09_200004) do
+ActiveRecord::Schema[7.2].define(version: 2026_07_09_200007) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -64,6 +64,93 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_09_200004) do
     t.datetime "updated_at", null: false
     t.index ["tenant_id", "platform"], name: "index_channels_on_tenant_id_and_platform"
     t.index ["tenant_id"], name: "index_channels_on_tenant_id"
+  end
+
+  create_table "financial_settlement_items", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "financial_settlement_id", null: false
+    t.bigint "order_id"
+    t.string "external_id"
+    t.string "external_order_id"
+    t.string "transaction_type", default: "sale"
+    t.decimal "gross_amount", precision: 12, scale: 2, default: "0.0"
+    t.decimal "fee_amount", precision: 12, scale: 2, default: "0.0"
+    t.decimal "discount_amount", precision: 12, scale: 2, default: "0.0"
+    t.decimal "refund_amount", precision: 12, scale: 2, default: "0.0"
+    t.decimal "chargeback_amount", precision: 12, scale: 2, default: "0.0"
+    t.decimal "net_amount", precision: 12, scale: 2, default: "0.0"
+    t.decimal "expected_amount", precision: 12, scale: 2, default: "0.0"
+    t.decimal "difference_amount", precision: 12, scale: 2, default: "0.0"
+    t.string "status", default: "unmatched"
+    t.datetime "transaction_date"
+    t.date "payout_date"
+    t.jsonb "metadata", default: {}
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["external_order_id"], name: "index_financial_settlement_items_on_external_order_id"
+    t.index ["financial_settlement_id", "status"], name: "idx_financial_settlement_items_on_settlement_id_and_status"
+    t.index ["financial_settlement_id"], name: "index_financial_settlement_items_on_financial_settlement_id"
+    t.index ["metadata"], name: "index_financial_settlement_items_on_metadata", using: :gin
+    t.index ["order_id"], name: "index_financial_settlement_items_on_order_id"
+    t.index ["tenant_id", "status"], name: "index_financial_settlement_items_on_tenant_id_and_status"
+    t.index ["tenant_id"], name: "index_financial_settlement_items_on_tenant_id"
+    t.index ["transaction_date"], name: "index_financial_settlement_items_on_transaction_date"
+  end
+
+  create_table "financial_settlements", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "financial_source_id", null: false
+    t.bigint "integration_id"
+    t.bigint "channel_id"
+    t.string "external_id"
+    t.date "period_start"
+    t.date "period_end"
+    t.decimal "gross_amount", precision: 12, scale: 2, default: "0.0"
+    t.decimal "fee_amount", precision: 12, scale: 2, default: "0.0"
+    t.decimal "discount_amount", precision: 12, scale: 2, default: "0.0"
+    t.decimal "refund_amount", precision: 12, scale: 2, default: "0.0"
+    t.decimal "chargeback_amount", precision: 12, scale: 2, default: "0.0"
+    t.decimal "net_amount", precision: 12, scale: 2, default: "0.0"
+    t.date "expected_payout_date"
+    t.date "actual_payout_date"
+    t.string "status", default: "pending"
+    t.jsonb "metadata", default: {}
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["channel_id"], name: "index_financial_settlements_on_channel_id"
+    t.index ["external_id"], name: "index_financial_settlements_on_external_id"
+    t.index ["financial_source_id", "status"], name: "index_financial_settlements_on_financial_source_id_and_status"
+    t.index ["financial_source_id"], name: "index_financial_settlements_on_financial_source_id"
+    t.index ["integration_id"], name: "index_financial_settlements_on_integration_id"
+    t.index ["metadata"], name: "index_financial_settlements_on_metadata", using: :gin
+    t.index ["tenant_id", "expected_payout_date"], name: "idx_financial_settlements_on_tenant_id_and_expected_payout_date"
+    t.index ["tenant_id", "period_start"], name: "index_financial_settlements_on_tenant_id_and_period_start"
+    t.index ["tenant_id", "status"], name: "index_financial_settlements_on_tenant_id_and_status"
+    t.index ["tenant_id"], name: "index_financial_settlements_on_tenant_id"
+  end
+
+  create_table "financial_sources", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "integration_id"
+    t.bigint "channel_id"
+    t.string "provider", null: false
+    t.string "name", null: false
+    t.string "source_type", default: "gateway", null: false
+    t.string "status", default: "active", null: false
+    t.jsonb "settings", default: {}, null: false
+    t.jsonb "credentials", default: {}, null: false
+    t.boolean "active", default: true, null: false
+    t.datetime "last_synced_at"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["channel_id"], name: "index_financial_sources_on_channel_id"
+    t.index ["integration_id"], name: "index_financial_sources_on_integration_id"
+    t.index ["settings"], name: "index_financial_sources_on_settings", using: :gin
+    t.index ["tenant_id", "provider", "name"], name: "index_financial_sources_on_tenant_id_and_provider_and_name", unique: true
+    t.index ["tenant_id", "provider"], name: "index_financial_sources_on_tenant_id_and_provider"
+    t.index ["tenant_id", "source_type"], name: "index_financial_sources_on_tenant_id_and_source_type"
+    t.index ["tenant_id", "status"], name: "index_financial_sources_on_tenant_id_and_status"
+    t.index ["tenant_id"], name: "index_financial_sources_on_tenant_id"
   end
 
   create_table "imports", force: :cascade do |t|
@@ -304,6 +391,16 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_09_200004) do
   add_foreign_key "channel_operational_costs", "channels"
   add_foreign_key "channel_operational_costs", "products"
   add_foreign_key "channels", "tenants"
+  add_foreign_key "financial_settlement_items", "financial_settlements"
+  add_foreign_key "financial_settlement_items", "orders"
+  add_foreign_key "financial_settlement_items", "tenants"
+  add_foreign_key "financial_settlements", "channels"
+  add_foreign_key "financial_settlements", "financial_sources"
+  add_foreign_key "financial_settlements", "integrations"
+  add_foreign_key "financial_settlements", "tenants"
+  add_foreign_key "financial_sources", "channels"
+  add_foreign_key "financial_sources", "integrations"
+  add_foreign_key "financial_sources", "tenants"
   add_foreign_key "imports", "channels"
   add_foreign_key "imports", "tenants"
   add_foreign_key "integration_events", "integrations"

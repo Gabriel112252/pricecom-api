@@ -9,13 +9,15 @@ class AuditConflict < ApplicationRecord
     nf_discount_mismatch
     nf_freight_mismatch
     refund_without_cancellation
+    settlement_amount_mismatch
+    missing_settlement
   ].freeze
 
   SEVERITIES = %w[low medium high critical].freeze
   STATUSES   = %w[open resolved ignored].freeze
   SOURCES    = %w[auto manual].freeze
 
-  validates :conflict_type, presence: true
+  validates :conflict_type, presence: true, inclusion: { in: CONFLICT_TYPES }
   validates :severity, inclusion: { in: SEVERITIES }
   validates :status,   inclusion: { in: STATUSES }
   validates :source,   inclusion: { in: SOURCES }

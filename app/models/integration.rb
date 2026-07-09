@@ -14,6 +14,8 @@ class Integration < ApplicationRecord
   has_many :integration_sync_logs, dependent: :nullify
   has_many :integration_events,    dependent: :nullify
   has_many :order_refunds,         dependent: :nullify
+  has_many :financial_sources,     dependent: :nullify
+  has_many :financial_settlements, dependent: :nullify
 
   scope :active,      -> { where(active: true) }
   scope :by_provider, ->(p) { where(provider: p) }

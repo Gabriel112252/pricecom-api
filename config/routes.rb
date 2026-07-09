@@ -45,8 +45,20 @@ Rails.application.routes.draw do
       # Audit Conflicts
       resources :audit_conflicts, only: [:index, :show, :update]
 
+      # Financial Sources
+      resources :financial_sources, only: [:index, :show]
+
+      # Financial Settlements
+      resources :financial_settlements, only: [:index, :show, :create] do
+        collection do
+          post :import
+          get  :template
+        end
+      end
+
       # Dashboard
-      get "dashboard/summary", to: "dashboard#summary"
+      get "dashboard/summary",   to: "dashboard#summary"
+      get "dashboard/financial", to: "dashboard#financial"
 
       # Integration Health
       get "integration_health", to: "integration_health#index"
