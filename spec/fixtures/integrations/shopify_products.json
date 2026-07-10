@@ -1,0 +1,21 @@
+{
+  "products": [
+    {
+      "id": 632910392,
+      "title": "IPod Nano - 8GB",
+      "vendor": "Apple",
+      "variants": [
+        { "id": 808950810, "sku": "IPOD2008PINK", "price": "199.00", "inventory_quantity": 10 },
+        { "id": 808950811, "sku": "IPOD2008GREEN", "price": "199.00", "inventory_quantity": 5 }
+      ]
+    },
+    {
+      "id": 632910393,
+      "title": "Capa de Silicone",
+      "vendor": "Apple",
+      "variants": [
+        { "id": 808950820, "sku": "CASE-SIL-001", "price": "49.90", "inventory_quantity": 25 }
+      ]
+    }
+  ]
+}

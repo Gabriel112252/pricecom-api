@@ -1,0 +1,65 @@
+{
+  "data": [
+    {
+      "id": 12345678,
+      "merchant_id": 1,
+      "name": "Camiseta Premium",
+      "slug": "camiseta-premium",
+      "sku": "CAM-001",
+      "active": true,
+      "has_variations": true,
+      "total_in_stock": 40,
+      "skus": {
+        "data": [
+          {
+            "id": 987001,
+            "product_id": 12345678,
+            "sku": "CAM-001-P-AZUL",
+            "price_sale": 79.9,
+            "price_discount": 69.9,
+            "availability": 15,
+            "total_in_stock": 15
+          },
+          {
+            "id": 987002,
+            "product_id": 12345678,
+            "sku": "CAM-001-M-AZUL",
+            "price_sale": 79.9,
+            "availability": 25,
+            "total_in_stock": 25
+          }
+        ]
+      }
+    },
+    {
+      "id": 12345679,
+      "merchant_id": 1,
+      "name": "Caneca Simples",
+      "sku": "CAN-001",
+      "active": true,
+      "has_variations": false,
+      "total_in_stock": 10,
+      "skus": {
+        "data": [
+          {
+            "id": 987010,
+            "product_id": 12345679,
+            "sku": "CAN-001",
+            "price_sale": 29.9,
+            "availability": 10,
+            "total_in_stock": 10
+          }
+        ]
+      }
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "total": 2,
+      "count": 2,
+      "per_page": 50,
+      "current_page": 1,
+      "total_pages": 1
+    }
+  }
+}

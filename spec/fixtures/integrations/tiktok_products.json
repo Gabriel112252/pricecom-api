@@ -1,0 +1,29 @@
+{
+  "code": 0,
+  "message": "Success",
+  "request_id": "req-abc-123",
+  "data": {
+    "products": [
+      {
+        "id": "1729999999",
+        "title": "Fone Bluetooth X",
+        "skus": [
+          {
+            "id": "sku-001",
+            "seller_sku": "FONE-BT-X-PRETO",
+            "price": { "amount": "89.90", "currency": "BRL" },
+            "inventory": [{ "warehouse_id": "wh1", "quantity": 30 }]
+          },
+          {
+            "id": "sku-002",
+            "seller_sku": "FONE-BT-X-BRANCO",
+            "price": { "amount": "89.90", "currency": "BRL" },
+            "inventory": [{ "warehouse_id": "wh1", "quantity": 12 }]
+          }
+        ]
+      }
+    ],
+    "next_page_token": "",
+    "total_count": 1
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "seller_id": 123456,
+  "results": ["MLB111", "MLB222"],
+  "paging": { "total": 2, "offset": 0, "limit": 50 }
+}

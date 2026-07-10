@@ -1,0 +1,22 @@
+{
+  "error": "",
+  "message": "",
+  "response": {
+    "item_list": [
+      {
+        "item_id": 1001,
+        "item_sku": "SHOPEE-SKU-1",
+        "item_name": "Produto Shopee 1",
+        "price_info": [{ "current_price": 45.5 }],
+        "stock_info_v2": { "summary_info": { "total_available_stock": 12 } }
+      },
+      {
+        "item_id": 1002,
+        "item_sku": "SHOPEE-SKU-2",
+        "item_name": "Produto Shopee 2",
+        "price_info": [{ "current_price": 22.0 }],
+        "stock_info_v2": { "summary_info": { "total_available_stock": 5 } }
+      }
+    ]
+  }
+}

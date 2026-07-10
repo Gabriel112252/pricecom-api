@@ -1,0 +1,13 @@
+{
+  "error": "",
+  "message": "",
+  "request_id": "req-abc",
+  "response": {
+    "item": [
+      { "item_id": 1001, "item_status": "NORMAL" },
+      { "item_id": 1002, "item_status": "NORMAL" }
+    ],
+    "total_count": 2,
+    "has_next_page": false
+  }
+}

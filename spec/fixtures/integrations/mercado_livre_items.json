@@ -1,0 +1,23 @@
+[
+  {
+    "code": 200,
+    "body": {
+      "id": "MLB111",
+      "title": "Camiseta Azul",
+      "price": 59.9,
+      "available_quantity": 20,
+      "seller_custom_field": "CAM-AZUL-M",
+      "attributes": []
+    }
+  },
+  {
+    "code": 200,
+    "body": {
+      "id": "MLB222",
+      "title": "Boné Vermelho",
+      "price": 39.9,
+      "available_quantity": 8,
+      "attributes": [{ "id": "SELLER_SKU", "value_name": "BONE-VERM" }]
+    }
+  }
+]
