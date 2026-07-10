@@ -65,7 +65,9 @@ ENTRYPOINT ["/rails/bin/docker-entrypoint"]
 # (e.g. CMD ["bundle", "exec", "sidekiq"] for the worker service in Easypanel —
 # db:prepare only runs when the command is exactly "./bin/rails server", see
 # bin/docker-entrypoint, so the worker never re-runs migrations).
-EXPOSE 3000
+EXPOSE 80
+
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=5 \
-  CMD curl -f http://localhost:3000/up || exit 1
-CMD ["./bin/rails", "server"]
+  CMD curl -f http://localhost:80/up || exit 1
+
+CMD ["./bin/rails", "server", "-b", "0.0.0.0", "-p", "80"]
