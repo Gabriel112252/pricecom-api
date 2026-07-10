@@ -12,8 +12,10 @@ module Api
         per   = [[params.fetch(:per_page, PER_PAGE_DEFAULT).to_i, 1].max, PER_PAGE_MAX].min
         paged = products.page(params[:page]).per(per)
 
+        channels_by_product = channels_by_product_id(paged)
+
         render json: {
-          products: paged.map { |p| index_json(p) },
+          products: paged.map { |p| index_json(p, channels_by_product[p.id] || []) },
           meta:     pagination_meta(paged)
         }
       end
@@ -66,7 +68,20 @@ module Api
           scope = scope.where("sku ILIKE :q OR name ILIKE :q", q: term)
         end
 
+        if params[:channel].present?
+          scope = scope.joins(:channel_product_listings)
+                       .where(channel_product_listings: { channel: params[:channel] })
+                       .distinct
+        end
+
         scope
+      end
+
+      def channels_by_product_id(paged)
+        ChannelProductListing
+          .where(product_id: paged.map(&:id))
+          .pluck(:product_id, :channel)
+          .each_with_object(Hash.new { |h, k| h[k] = [] }) { |(product_id, channel), h| h[product_id] << channel }
       end
 
       def compute_kit_sales_qty(items_in_period, product)
@@ -98,14 +113,15 @@ module Api
         params.permit(:sku, :name, :cost_price, :active, :is_kit)
       end
 
-      def index_json(product)
+      def index_json(product, channels = nil)
         {
           id:         product.id,
           sku:        product.sku,
           name:       product.name,
           cost_price: product.cost_price,
           active:     product.active,
-          is_kit:     product.is_kit
+          is_kit:     product.is_kit,
+          channels:   channels || product.channel_product_listings.distinct.pluck(:channel)
         }
       end
 
