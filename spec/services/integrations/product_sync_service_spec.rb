@@ -125,7 +125,7 @@ RSpec.describe Integrations::ProductSyncService do
 
   describe "a channel with role=consumidor_pedido" do
     it "is skipped entirely — no HTTP call, no ChannelProductListing created" do
-      source = tenant.channel_credentials.create!(channel: "yampi", status: "active", role: "fonte_estoque", credentials: { alias: "a", token: "t", secret_key: "s" })
+      source = tenant.channel_credentials.create!(channel: "yampi", status: "active", role: "fonte_estoque", credentials: { alias: "a", token: "t", secret_key: "s", webhook_secret: "wh" })
       channel_credential.update!(role: "consumidor_pedido", stock_source_channel: source)
 
       # No stub_products call — if the service tried to hit the network,

@@ -25,12 +25,14 @@ module Integrations
     }.freeze
 
     # Which ChannelCredential#credentials key holds the value each provider
-    # signs webhooks with. Shopify's webhook signing secret (the app's
-    # Client Secret) is distinct from the access_token used for API calls,
-    # so it needs its own credential field — see ChannelCredential::REQUIRED_FIELDS.
+    # signs webhooks with. Shopify's and Yampi's webhook signing secret is
+    # generated on a separate Webhooks screen and is distinct from the
+    # secret_key/access_token used for API calls, so each needs its own
+    # credential field — see ChannelCredential::REQUIRED_FIELDS. TikTok has
+    # no separate webhook secret; it reuses app_secret.
     SECRET_FIELDS = {
       "shopify" => "webhook_secret",
-      "yampi"   => "secret_key",
+      "yampi"   => "webhook_secret",
       "tiktok"  => "app_secret"
     }.freeze
 

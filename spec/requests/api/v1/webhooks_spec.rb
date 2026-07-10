@@ -56,14 +56,20 @@ RSpec.describe "Webhooks", type: :request do
     before do
       tenant.channel_credentials.create!(
         channel: "yampi", status: "active",
-        credentials: { alias: "loja", token: "tok", secret_key: "yampi-secret" }
+        credentials: { alias: "loja", token: "tok", secret_key: "yampi-api-secret", webhook_secret: "yampi-webhook-secret" }
       )
     end
 
-    it "accepts a correctly signed payload" do
-      signature = Base64.strict_encode64(OpenSSL::HMAC.digest("sha256", "yampi-secret", body))
+    it "accepts a payload signed with the webhook secret (not the API secret_key)" do
+      signature = Base64.strict_encode64(OpenSSL::HMAC.digest("sha256", "yampi-webhook-secret", body))
       post_webhook("yampi", headers: { "X-Yampi-Hmac-Sha256" => signature })
       expect(response).to have_http_status(:accepted)
+    end
+
+    it "rejects a payload signed with the API secret_key instead of the webhook secret" do
+      signature = Base64.strict_encode64(OpenSSL::HMAC.digest("sha256", "yampi-api-secret", body))
+      post_webhook("yampi", headers: { "X-Yampi-Hmac-Sha256" => signature })
+      expect(response).to have_http_status(:unauthorized)
     end
 
     it "rejects an invalid signature" do

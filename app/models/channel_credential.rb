@@ -10,11 +10,13 @@ class ChannelCredential < ApplicationRecord
 
   # Required credential keys per channel — drives both validation and the
   # frontend's dynamic credential form.
+  # webhook_secret (Yampi and Shopify) is generated on each platform's
+  # dedicated Webhooks screen — a different value from the API secret_key /
+  # access_token used for product sync — and is the only thing
+  # WebhookSignatureVerifier can check inbound webhooks against (see that
+  # class for details).
   REQUIRED_FIELDS = {
-    "yampi"        => %w[alias token secret_key],
-    # webhook_secret is Shopify's app Client Secret — distinct from
-    # access_token, and the only thing WebhookSignatureVerifier can check
-    # inbound Shopify webhooks against (see that class for details).
+    "yampi"        => %w[alias token secret_key webhook_secret],
     "shopify"      => %w[shop_domain access_token webhook_secret],
     "tiktok"       => %w[app_key app_secret access_token],
     "mercadolivre" => %w[user_id access_token],
