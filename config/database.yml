@@ -18,4 +18,7 @@ test:
 production:
   <<: *default
   database: pricecom_production
-  url: <%= ENV["DATABASE_URL"] %>
+  host: <%= ENV["DB_HOST"] %>
+  port: <%= ENV["DB_PORT"] %>
+  username: <%= ENV["DB_USERNAME"] %>
+  password: <%= ENV["DB_PASSWORD"] %>
