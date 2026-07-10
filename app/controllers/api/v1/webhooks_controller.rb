@@ -2,10 +2,12 @@ module Api
   module V1
     # Endpoint público — não requer JWT.
     # Tenant identificado via header X-Tenant-Slug ou query param tenant_slug.
-    # TODO: adicionar verificação de assinatura por provider (HMAC) antes de produção.
+    # Assinatura HMAC verificada por provider antes de processar qualquer
+    # payload — ver Integrations::WebhookSignatureVerifier.
     class WebhooksController < ApplicationController
       skip_before_action :authenticate_request!
       before_action :set_tenant_from_request!
+      before_action :verify_signature!
 
       def receive
         provider     = params[:provider].to_s.downcase
@@ -56,6 +58,27 @@ module Api
         unless @current_tenant
           render json: { error: "Tenant não encontrado" }, status: :not_found
         end
+      end
+
+      # Reads the signature header straight off the request — NOT off
+      # redacted_headers, which deliberately scrubs signature values before
+      # they're persisted for logging (see Integrations::HeaderRedactor).
+      def verify_signature!
+        provider = params[:provider].to_s.downcase
+        return unless Integrations::WebhookSignatureVerifier.verifiable?(provider)
+
+        header_name  = Integrations::WebhookSignatureVerifier::SIGNATURE_HEADERS.fetch(provider)
+        secret_field = Integrations::WebhookSignatureVerifier::SECRET_FIELDS.fetch(provider)
+        credential   = current_tenant.channel_credentials.find_by(channel: provider)
+
+        valid = Integrations::WebhookSignatureVerifier.verify?(
+          provider:     provider,
+          raw_body:     request.raw_post,
+          header_value: request.headers[header_name],
+          secret:       credential ? credential.credentials.to_h[secret_field] : nil
+        )
+
+        render json: { error: "Assinatura inválida" }, status: :unauthorized unless valid
       end
 
       def parsed_json_payload
