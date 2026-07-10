@@ -1,7 +1,8 @@
 class AuditConflict < ApplicationRecord
   belongs_to :tenant
-  belongs_to :order,   optional: true
-  belongs_to :product, optional: true
+  belongs_to :order,       optional: true
+  belongs_to :product,     optional: true
+  belongs_to :resolved_by, class_name: "User", optional: true
 
   CONFLICT_TYPES = %w[
     missing_cost

@@ -19,7 +19,11 @@ module Api
       SQL
 
       def index
-        conflicts = apply_filters(current_tenant.audit_conflicts.includes(:order, :product))
+        # Scoped by every filter except status, so tab counters reflect the
+        # active type/severity/channel/search filters regardless of which tab is open.
+        scoped = apply_filters(current_tenant.audit_conflicts.includes(:order, :product, :resolved_by), except: :status)
+        conflicts = params[:status].present? ? scoped.where(status: params[:status]) : scoped
+        conflicts = conflicts
           .order(Arel.sql(STATUS_ORDER_SQL))
           .order(Arel.sql(SEVERITY_ORDER_SQL))
           .order(created_at: :desc)
@@ -29,13 +33,14 @@ module Api
 
         render json: {
           audit_conflicts: paged.map { |c| index_json(c) },
-          meta:            pagination_meta(paged)
+          meta:            pagination_meta(paged),
+          status_counts:   status_counts(scoped)
         }
       end
 
       def show
         conflict = current_tenant.audit_conflicts
-          .includes(:product, order: :channel)
+          .includes(:product, :resolved_by, order: :channel)
           .find(params[:id])
 
         render json: show_json(conflict)
@@ -55,8 +60,10 @@ module Api
 
       private
 
-      def apply_filters(scope)
-        scope = scope.where(status:        params[:status])        if params[:status].present?
+      def apply_filters(scope, except: [])
+        except = Array(except)
+
+        scope = scope.where(status:        params[:status])        if params[:status].present? && !except.include?(:status)
         scope = scope.where(conflict_type: params[:conflict_type])  if params[:conflict_type].present?
         scope = scope.where(severity:      params[:severity])       if params[:severity].present?
         scope = scope.where(order_id:      params[:order_id])       if params[:order_id].present?
@@ -65,7 +72,26 @@ module Api
         scope = scope.where("audit_conflicts.created_at >= ?", params[:date_from]) if params[:date_from].present?
         scope = scope.where("audit_conflicts.created_at <= ?", params[:date_to])   if params[:date_to].present?
 
+        if params[:channel].present? || params[:q].present?
+          scope = scope.left_joins(:order, :product)
+        end
+
+        scope = scope.where(orders: { channel_id: params[:channel] }) if params[:channel].present?
+
+        if params[:q].present?
+          term = "%#{params[:q]}%"
+          scope = scope.where(
+            "orders.order_number ILIKE :q OR products.name ILIKE :q OR products.sku ILIKE :q OR audit_conflicts.notes ILIKE :q",
+            q: term
+          )
+        end
+
         scope
+      end
+
+      def status_counts(scoped)
+        counts = scoped.group(:status).count
+        AuditConflict::STATUSES.index_with { |status| counts[status] || 0 }
       end
 
       # Nunca permite alterar expected_value/actual_value/difference via API.
@@ -76,27 +102,31 @@ module Api
       def apply_status_transition(conflict, new_status)
         if new_status == "open"
           conflict.resolved_at = nil
-        elsif %w[resolved ignored].include?(new_status) && conflict.resolved_at.nil?
+          conflict.resolved_by = nil
+        elsif %w[resolved ignored].include?(new_status)
           conflict.resolved_at = Time.current
+          conflict.resolved_by = current_user
         end
       end
 
       def index_json(conflict)
         {
-          id:             conflict.id,
-          conflict_type:  conflict.conflict_type,
-          severity:       conflict.severity,
-          status:         conflict.status,
-          order_id:       conflict.order_id,
-          order_number:   conflict.order&.order_number,
-          product_id:     conflict.product_id,
-          product_sku:    conflict.product&.sku,
-          expected_value: conflict.expected_value,
-          actual_value:   conflict.actual_value,
-          difference:     conflict.difference,
-          source:         conflict.source,
-          created_at:     conflict.created_at,
-          resolved_at:    conflict.resolved_at
+          id:               conflict.id,
+          conflict_type:    conflict.conflict_type,
+          severity:         conflict.severity,
+          status:           conflict.status,
+          order_id:         conflict.order_id,
+          order_number:     conflict.order&.order_number,
+          product_id:       conflict.product_id,
+          product_sku:      conflict.product&.sku,
+          expected_value:   conflict.expected_value,
+          actual_value:     conflict.actual_value,
+          difference:       conflict.difference,
+          source:           conflict.source,
+          created_at:       conflict.created_at,
+          resolved_at:      conflict.resolved_at,
+          resolved_by_id:   conflict.resolved_by_id,
+          resolved_by_name: conflict.resolved_by&.name
         }
       end
 
