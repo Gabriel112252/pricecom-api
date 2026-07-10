@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_07_09_200007) do
+ActiveRecord::Schema[7.2].define(version: 2026_07_10_010001) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -30,13 +30,30 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_09_200007) do
     t.jsonb "metadata", default: {}, null: false
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.bigint "resolved_by_id"
     t.index ["created_at"], name: "index_audit_conflicts_on_created_at"
     t.index ["order_id"], name: "index_audit_conflicts_on_order_id"
     t.index ["product_id"], name: "index_audit_conflicts_on_product_id"
+    t.index ["resolved_by_id"], name: "index_audit_conflicts_on_resolved_by_id"
     t.index ["tenant_id", "conflict_type"], name: "index_audit_conflicts_on_tenant_id_and_conflict_type"
     t.index ["tenant_id", "severity"], name: "index_audit_conflicts_on_tenant_id_and_severity"
     t.index ["tenant_id", "status"], name: "index_audit_conflicts_on_tenant_id_and_status"
     t.index ["tenant_id"], name: "index_audit_conflicts_on_tenant_id"
+  end
+
+  create_table "channel_credentials", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.string "channel", null: false
+    t.jsonb "credentials", default: {}, null: false
+    t.string "status", default: "pending", null: false
+    t.datetime "last_synced_at"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.integer "role", default: 2, null: false
+    t.bigint "stock_source_channel_id"
+    t.index ["stock_source_channel_id"], name: "index_channel_credentials_on_stock_source_channel_id"
+    t.index ["tenant_id", "channel"], name: "index_channel_credentials_on_tenant_id_and_channel", unique: true
+    t.index ["tenant_id"], name: "index_channel_credentials_on_tenant_id"
   end
 
   create_table "channel_operational_costs", force: :cascade do |t|
@@ -49,6 +66,23 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_09_200007) do
     t.index ["channel_id"], name: "index_channel_operational_costs_on_channel_id"
     t.index ["product_id", "channel_id"], name: "index_channel_operational_costs_on_product_id_and_channel_id", unique: true
     t.index ["product_id"], name: "index_channel_operational_costs_on_product_id"
+  end
+
+  create_table "channel_product_listings", force: :cascade do |t|
+    t.bigint "product_id", null: false
+    t.bigint "tenant_id", null: false
+    t.string "channel", null: false
+    t.string "external_id"
+    t.string "external_sku"
+    t.decimal "stock_qty", precision: 12, scale: 3
+    t.decimal "price", precision: 10, scale: 2
+    t.jsonb "raw_payload", default: {}
+    t.datetime "synced_at"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["product_id"], name: "index_channel_product_listings_on_product_id"
+    t.index ["tenant_id", "channel", "external_id"], name: "idx_on_tenant_id_channel_external_id_a1d176e2c8", unique: true
+    t.index ["tenant_id"], name: "index_channel_product_listings_on_tenant_id"
   end
 
   create_table "channels", force: :cascade do |t|
@@ -262,6 +296,17 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_09_200007) do
     t.index ["tenant_id"], name: "index_integrations_on_tenant_id"
   end
 
+  create_table "kit_components", force: :cascade do |t|
+    t.bigint "kit_product_id", null: false
+    t.bigint "component_product_id", null: false
+    t.decimal "quantity", precision: 10, scale: 3, default: "1.0", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["component_product_id"], name: "index_kit_components_on_component_product_id"
+    t.index ["kit_product_id", "component_product_id"], name: "index_kit_components_on_kit_and_component", unique: true
+    t.index ["kit_product_id"], name: "index_kit_components_on_kit_product_id"
+  end
+
   create_table "order_items", force: :cascade do |t|
     t.bigint "order_id", null: false
     t.bigint "product_id"
@@ -328,6 +373,7 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_09_200007) do
     t.decimal "nf_gross_value", precision: 10, scale: 2, default: "0.0", null: false
     t.decimal "nf_discount", precision: 10, scale: 2, default: "0.0", null: false
     t.decimal "nf_freight", precision: 10, scale: 2, default: "0.0", null: false
+    t.datetime "stock_deducted_at"
     t.index ["channel_id"], name: "index_orders_on_channel_id"
     t.index ["tenant_id", "external_id"], name: "index_orders_on_tenant_id_and_external_id"
     t.index ["tenant_id", "order_type"], name: "index_orders_on_tenant_id_and_order_type"
@@ -358,6 +404,7 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_09_200007) do
     t.boolean "active", default: true
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.boolean "is_kit", default: false, null: false
     t.index ["tenant_id", "sku"], name: "index_products_on_tenant_id_and_sku", unique: true
     t.index ["tenant_id"], name: "index_products_on_tenant_id"
   end
@@ -369,7 +416,9 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_09_200007) do
     t.boolean "active", default: true
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.string "tv_token"
     t.index ["slug"], name: "index_tenants_on_slug", unique: true
+    t.index ["tv_token"], name: "index_tenants_on_tv_token", unique: true
   end
 
   create_table "users", force: :cascade do |t|
@@ -377,7 +426,7 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_09_200007) do
     t.string "name", null: false
     t.string "email", null: false
     t.string "password_digest", null: false
-    t.string "role", default: "member"
+    t.string "role", default: "operador", null: false
     t.boolean "active", default: true
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
@@ -388,8 +437,13 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_09_200007) do
   add_foreign_key "audit_conflicts", "orders"
   add_foreign_key "audit_conflicts", "products"
   add_foreign_key "audit_conflicts", "tenants"
+  add_foreign_key "audit_conflicts", "users", column: "resolved_by_id"
+  add_foreign_key "channel_credentials", "channel_credentials", column: "stock_source_channel_id"
+  add_foreign_key "channel_credentials", "tenants"
   add_foreign_key "channel_operational_costs", "channels"
   add_foreign_key "channel_operational_costs", "products"
+  add_foreign_key "channel_product_listings", "products"
+  add_foreign_key "channel_product_listings", "tenants"
   add_foreign_key "channels", "tenants"
   add_foreign_key "financial_settlement_items", "financial_settlements"
   add_foreign_key "financial_settlement_items", "orders"
@@ -411,6 +465,8 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_09_200007) do
   add_foreign_key "integration_sync_logs", "tenants"
   add_foreign_key "integrations", "channels"
   add_foreign_key "integrations", "tenants"
+  add_foreign_key "kit_components", "products", column: "component_product_id"
+  add_foreign_key "kit_components", "products", column: "kit_product_id"
   add_foreign_key "order_items", "orders"
   add_foreign_key "order_items", "products"
   add_foreign_key "order_refunds", "integrations"
