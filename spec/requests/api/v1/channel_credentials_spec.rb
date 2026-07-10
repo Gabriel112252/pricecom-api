@@ -65,4 +65,55 @@ RSpec.describe "Channel Credentials", type: :request do
       expect(response).to have_http_status(:ok)
     end
   end
+
+  # Regression: connecting a channel (creating/updating a ChannelCredential)
+  # used to leave the older `channels` table untouched, so Order#channel_id
+  # had nothing to resolve to — order ingestion (webhook/backfill) failed
+  # with "Canal não encontrado para provider 'yampi'" for 2290 real orders
+  # even though Yampi was connected and syncing products normally. See
+  # Channel.ensure_for! and ChannelCredentialsController#connect.
+  describe "POST /api/v1/integrations/:channel/connect" do
+    def stub_yampi_auth
+      stub_request(:get, "https://api.dooki.com.br/v2/loja/catalog/products")
+        .with(query: hash_including("page" => "1", "per_page" => "1"))
+        .to_return(status: 200, body: { data: [] }.to_json, headers: { "Content-Type" => "application/json" })
+    end
+
+    it "creates the matching Channel the first time a new channel is connected" do
+      stub_yampi_auth
+      expect(tenant.channels.where(platform: "yampi")).to be_empty
+
+      post "/api/v1/integrations/yampi/connect", headers: auth_headers(admin),
+        params: { credentials: { alias: "loja", token: "t", secret_key: "s", webhook_secret: "wh" } }
+
+      expect(response).to have_http_status(:ok)
+      channel = tenant.channels.find_by(platform: "yampi")
+      expect(channel).to be_present
+      expect(channel.name).to eq("Yampi")
+    end
+
+    it "does not duplicate the Channel when one already exists (e.g. created manually, or from a prior connect)" do
+      existing = tenant.channels.create!(name: "Yampi (Loja Principal)", platform: "yampi")
+      stub_yampi_auth
+
+      post "/api/v1/integrations/yampi/connect", headers: auth_headers(admin),
+        params: { credentials: { alias: "loja", token: "t", secret_key: "s", webhook_secret: "wh" } }
+
+      expect(response).to have_http_status(:ok)
+      expect(tenant.channels.where(platform: "yampi").count).to eq(1)
+      expect(tenant.channels.find_by(platform: "yampi")).to eq(existing) # unchanged, not replaced
+    end
+
+    it "still creates the Channel even when re-connecting fails authentication" do
+      stub_request(:get, "https://api.dooki.com.br/v2/loja/catalog/products")
+        .with(query: hash_including("page" => "1"))
+        .to_return(status: 401, body: { message: "Unauthenticated" }.to_json)
+
+      post "/api/v1/integrations/yampi/connect", headers: auth_headers(admin),
+        params: { credentials: { alias: "loja", token: "bad", secret_key: "s", webhook_secret: "wh" } }
+
+      expect(response).to have_http_status(:unprocessable_entity)
+      expect(tenant.channels.find_by(platform: "yampi")).to be_present
+    end
+  end
 end

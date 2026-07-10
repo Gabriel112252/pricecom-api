@@ -24,6 +24,16 @@ module Api
           return render json: { errors: credential.errors.full_messages }, status: :unprocessable_entity
         end
 
+        # A ChannelCredential alone doesn't give Order#channel_id anything to
+        # point at — Channel is the older, separate table that's been driving
+        # orders/pricing/commission since Etapa 1. Without this, order
+        # ingestion (webhook or backfill) fails with "Canal não encontrado"
+        # even though the channel looks fully connected and syncing products
+        # fine. See Channel.ensure_for! and the one-off
+        # channels:backfill_missing rake task for tenants connected before
+        # this fix existed.
+        Channel.ensure_for!(current_tenant, credential.channel)
+
         # Verify right away rather than making the user wait for the next
         # scheduled sync to find out the credentials don't work.
         begin
