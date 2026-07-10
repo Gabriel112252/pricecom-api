@@ -9,4 +9,10 @@ user = User.find_or_create_by!(email: "admin@hidrabene.com", tenant: tenant) do 
   u.role     = "admin"
 end
 
-puts "Seed concluído: tenant=#{tenant.slug}, user=#{user.email}"
+operador = User.find_or_create_by!(email: "operador@hidrabene.com", tenant: tenant) do |u|
+  u.name     = "Operador Teste"
+  u.password = "password123"
+  u.role     = "operador"
+end
+
+puts "Seed concluído: tenant=#{tenant.slug}, user=#{user.email}, operador de teste=#{operador.email}"

@@ -30,6 +30,16 @@ class ApplicationController < ActionController::API
     @current_tenant
   end
 
+  # Guard for write/config endpoints — use as a `before_action`:
+  #   before_action :require_admin!, only: [:update]
+  # Read endpoints (index/show) are left open to any authenticated user
+  # unless a controller has a specific reason to restrict reading too.
+  def require_admin!
+    return if current_user.admin?
+
+    render json: { error: "Acesso restrito a administradores" }, status: :forbidden
+  end
+
   def unauthorized(e)
     render json: { error: e.message }, status: :unauthorized
   end
