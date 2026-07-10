@@ -1,0 +1,13 @@
+{
+  "data": [
+    { "sku": "CAM-001-P-AZUL", "cost": 60.00, "tax_rate": 8.5 },
+    { "sku": "CAN-001", "cost": 12.00, "tax_rate": 6.0 }
+  ],
+  "meta": {
+    "pagination": {
+      "total": 2,
+      "current_page": 1,
+      "total_pages": 1
+    }
+  }
+}

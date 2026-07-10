@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_07_10_010001) do
+ActiveRecord::Schema[7.2].define(version: 2026_07_10_020003) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -98,6 +98,17 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_10_010001) do
     t.datetime "updated_at", null: false
     t.index ["tenant_id", "platform"], name: "index_channels_on_tenant_id_and_platform"
     t.index ["tenant_id"], name: "index_channels_on_tenant_id"
+  end
+
+  create_table "data_source_configs", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.string "data_type", null: false
+    t.string "source", null: false
+    t.boolean "enabled", default: true
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["tenant_id", "data_type"], name: "index_data_source_configs_on_tenant_id_and_data_type", unique: true
+    t.index ["tenant_id"], name: "index_data_source_configs_on_tenant_id"
   end
 
   create_table "financial_settlement_items", force: :cascade do |t|
@@ -374,6 +385,8 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_10_010001) do
     t.decimal "nf_discount", precision: 10, scale: 2, default: "0.0", null: false
     t.decimal "nf_freight", precision: 10, scale: 2, default: "0.0", null: false
     t.datetime "stock_deducted_at"
+    t.decimal "real_freight_cost", precision: 10, scale: 2
+    t.decimal "tax_amount", precision: 10, scale: 2
     t.index ["channel_id"], name: "index_orders_on_channel_id"
     t.index ["tenant_id", "external_id"], name: "index_orders_on_tenant_id_and_external_id"
     t.index ["tenant_id", "order_type"], name: "index_orders_on_tenant_id_and_order_type"
@@ -405,6 +418,7 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_10_010001) do
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
     t.boolean "is_kit", default: false, null: false
+    t.decimal "tax_rate", precision: 5, scale: 2
     t.index ["tenant_id", "sku"], name: "index_products_on_tenant_id_and_sku", unique: true
     t.index ["tenant_id"], name: "index_products_on_tenant_id"
   end
@@ -445,6 +459,7 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_10_010001) do
   add_foreign_key "channel_product_listings", "products"
   add_foreign_key "channel_product_listings", "tenants"
   add_foreign_key "channels", "tenants"
+  add_foreign_key "data_source_configs", "tenants"
   add_foreign_key "financial_settlement_items", "financial_settlements"
   add_foreign_key "financial_settlement_items", "orders"
   add_foreign_key "financial_settlement_items", "tenants"

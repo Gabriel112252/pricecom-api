@@ -46,11 +46,26 @@ Rails.application.routes.draw do
       # its `/integrations/:id` show route doesn't shadow `GET /integrations/channels`.
       scope "integrations" do
         get   "channels",         to: "channel_credentials#index"
+
+        # idworks (ERP) and Pagar.me (financial gateway) — literal paths,
+        # declared before the dynamic ":channel/connect" below so they
+        # aren't swallowed by it (":channel" matches any string, including
+        # "idworks"/"pagarme").
+        post  "idworks/connect", to: "idworks#connect"
+        post  "idworks/sync",    to: "idworks#sync"
+        post  "pagarme/connect", to: "pagarme#connect"
+        post  "pagarme/sync",    to: "pagarme#sync"
+
         post  ":channel/connect", to: "channel_credentials#connect"
         post  ":channel/sync",    to: "channel_credentials#sync"
         patch ":channel/role",    to: "channel_credentials#update_role"
         post  "yampi/backfill_orders", to: "channel_credentials#backfill_orders"
       end
+
+      # Data source configs — which connected source feeds cost/freight/tax/
+      # payment_reconciliation (see DataSourceConfig)
+      get   "data_source_configs",             to: "data_source_configs#index"
+      patch "data_source_configs/:data_type",  to: "data_source_configs#update"
 
       # Integrations
       resources :integrations

@@ -1,0 +1,49 @@
+{
+  "data": [
+    {
+      "id": "or_28dN9w7CLU79kDjL",
+      "code": "YAMPI-555001",
+      "amount": 19990,
+      "currency": "BRL",
+      "closed": true,
+      "status": "paid",
+      "created_at": "2026-06-15T16:01:09Z",
+      "charges": [
+        {
+          "id": "ch_gmnW101c9YTvQVLB",
+          "code": "YAMPI-555001",
+          "amount": 19990,
+          "status": "paid",
+          "currency": "BRL",
+          "payment_method": "credit_card",
+          "paid_at": "2026-06-15T16:01:11Z",
+          "created_at": "2026-06-15T16:01:09Z"
+        }
+      ]
+    },
+    {
+      "id": "or_dW6vZoJfLhw3Rb10",
+      "code": "YAMPI-555002",
+      "amount": 2990,
+      "currency": "BRL",
+      "closed": true,
+      "status": "failed",
+      "created_at": "2026-06-16T15:58:23Z",
+      "charges": [
+        {
+          "id": "ch_nM5PkjcyLUa6Nr1w",
+          "code": "YAMPI-555002",
+          "amount": 2990,
+          "status": "failed",
+          "currency": "BRL",
+          "payment_method": "credit_card",
+          "created_at": "2026-06-16T15:58:23Z"
+        }
+      ]
+    }
+  ],
+  "paging": {
+    "total": 2,
+    "next": null
+  }
+}
