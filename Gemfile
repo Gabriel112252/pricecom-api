@@ -3,7 +3,7 @@ source "https://rubygems.org"
 # API
 gem "rails", "~> 7.2"
 gem "pg", "~> 1.1"
-gem "puma", "~> 6.0"
+gem "puma", "~> 8.0"
 gem "rack-cors"
 
 # Auth
