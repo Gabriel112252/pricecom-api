@@ -27,6 +27,7 @@ module Integrations
           order.save!
           upsert_order_mapping(order)
           run_conflict_detection(order)
+          run_stock_deduction(order)
           Result.new(ok: true, order: order, error_message: nil)
         end
       rescue ActiveRecord::RecordInvalid => e
@@ -185,6 +186,12 @@ module Integrations
         Audits::DetectOrderConflicts.call(order)
       rescue => e
         Rails.logger.error("[Integrations::Orders::UpsertOrder] Audits::DetectOrderConflicts failed for order_id=#{order.id}: #{e.message}")
+      end
+
+      def run_stock_deduction(order)
+        Integrations::OrderStockDeductionService.call(order)
+      rescue => e
+        Rails.logger.error("[Integrations::Orders::UpsertOrder] OrderStockDeductionService failed for order_id=#{order.id}: #{e.message}")
       end
     end
   end

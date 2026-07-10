@@ -57,7 +57,7 @@ module Integrations
 
       def extract_customer_name
         customer = @p["customer"] || {}
-        [customer["first_name"], customer["last_name"]].compact.join(" ").presence ||
+        [ customer["first_name"], customer["last_name"] ].compact.join(" ").presence ||
           customer["name"].to_s
       end
 
