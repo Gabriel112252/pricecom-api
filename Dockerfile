@@ -62,5 +62,10 @@ USER 1000:1000
 ENTRYPOINT ["/rails/bin/docker-entrypoint"]
 
 # Start the server by default, this can be overwritten at runtime
+# (e.g. CMD ["bundle", "exec", "sidekiq"] for the worker service in Easypanel —
+# db:prepare only runs when the command is exactly "./bin/rails server", see
+# bin/docker-entrypoint, so the worker never re-runs migrations).
 EXPOSE 3000
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=5 \
+  CMD curl -f http://localhost:3000/up || exit 1
 CMD ["./bin/rails", "server"]
