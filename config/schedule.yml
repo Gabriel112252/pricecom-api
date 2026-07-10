@@ -1,0 +1,7 @@
+# Loaded by sidekiq-cron — see config/initializers/sidekiq.rb.
+# Runs the dispatcher every 15 minutes; it fans out one ProductSyncJob per
+# active ChannelCredential (see Integrations::ScheduleProductSyncsJob).
+product_sync_dispatch:
+  cron: "*/15 * * * *"
+  class: "Integrations::ScheduleProductSyncsJob"
+  queue: integrations

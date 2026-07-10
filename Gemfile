@@ -19,6 +19,9 @@ gem "kaminari"
 gem "active_model_serializers"
 gem "roo"
 
+# Channel integrations (Yampi/Shopify/TikTok product sync)
+gem "faraday"
+
 # Windows does not include zoneinfo files, so bundle the tzinfo-data gem
 gem "tzinfo-data", platforms: %i[ windows jruby ]
 

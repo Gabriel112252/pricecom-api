@@ -7,7 +7,7 @@ class Channel < ApplicationRecord
   has_many :financial_sources, dependent: :nullify
   has_many :financial_settlements, dependent: :nullify
 
-  PLATFORMS = %w[tiktok shopify yampi mercadolivre].freeze
+  PLATFORMS = %w[tiktok shopify yampi mercadolivre shopee].freeze
   validates :platform, inclusion: { in: PLATFORMS }
   validates :name, presence: true
 end

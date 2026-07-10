@@ -1,0 +1,141 @@
+module Api
+  module V1
+    class ChannelCredentialsController < ApplicationController
+      before_action :validate_channel!, only: [ :connect, :sync, :update_role ]
+      before_action :require_admin!, only: [ :connect, :update_role ]
+
+      # GET /api/v1/integrations/channels
+      def index
+        credentials = current_tenant.channel_credentials.index_by(&:channel)
+        logs_by_channel = recent_logs_by_channel
+
+        render json: ChannelCredential::CHANNELS.map { |channel|
+          channel_json(channel, credentials[channel], logs_by_channel[channel] || [])
+        }
+      end
+
+      # POST /api/v1/integrations/:channel/connect
+      def connect
+        credential = current_tenant.channel_credentials.find_or_initialize_by(channel: params[:channel])
+        credential.credentials = credential_params
+        credential.status = "pending"
+
+        unless credential.save
+          return render json: { errors: credential.errors.full_messages }, status: :unprocessable_entity
+        end
+
+        # Verify right away rather than making the user wait for the next
+        # scheduled sync to find out the credentials don't work.
+        begin
+          adapter_class = Integrations::ProductSyncService::ADAPTERS.fetch(credential.channel)
+          adapter_class.new(credential.credentials).authenticate
+          credential.update!(status: "active")
+        rescue Integrations::AuthenticationError, Integrations::ApiError, Integrations::RateLimitError => e
+          credential.update!(status: "error")
+          return render json: { errors: [ e.message ] }, status: :unprocessable_entity
+        end
+
+        render json: channel_json(credential.channel, credential, [])
+      end
+
+      # PATCH /api/v1/integrations/:channel/role
+      # Configures whether this channel owns real stock (fonte_estoque /
+      # ambos) or only places orders against another channel's inventory
+      # (consumidor_pedido, e.g. Yampi checkout backed by Shopify).
+      def update_role
+        credential = current_tenant.channel_credentials.find_by(channel: params[:channel])
+        unless credential
+          return render json: { error: "Canal ainda não conectado" }, status: :unprocessable_entity
+        end
+
+        credential.role = params[:role] if params[:role].present?
+        credential.stock_source_channel = resolve_stock_source(params[:stock_source_channel])
+
+        if credential.save
+          render json: channel_json(credential.channel, credential, recent_logs_for(credential))
+        else
+          render json: { errors: credential.errors.full_messages }, status: :unprocessable_entity
+        end
+      end
+
+      # POST /api/v1/integrations/:channel/sync
+      def sync
+        credential = current_tenant.channel_credentials.find_by(channel: params[:channel])
+
+        if credential.nil? || credential.status == "pending"
+          return render json: { error: "Canal ainda não conectado" }, status: :unprocessable_entity
+        end
+
+        result = Integrations::ProductSyncService.call(credential)
+        credential.reload
+
+        render json: {
+          success: result.success?,
+          synced_count: result.synced_count,
+          error_message: result.error_message,
+          channel: channel_json(credential.channel, credential, recent_logs_for(credential))
+        }
+      end
+
+      private
+
+      def validate_channel!
+        return if ChannelCredential::CHANNELS.include?(params[:channel])
+
+        render json: { error: "Canal inválido" }, status: :not_found
+      end
+
+      def credential_params
+        params.require(:credentials).permit!.to_h
+      end
+
+      def resolve_stock_source(channel_param)
+        return nil if channel_param.blank?
+
+        current_tenant.channel_credentials.find_by(channel: channel_param)
+      end
+
+      def recent_logs_by_channel
+        IntegrationSyncLog
+          .where(tenant: current_tenant, action: "product_sync")
+          .order(created_at: :desc)
+          .limit(100)
+          .group_by { |log| log.metadata["channel"] }
+          .transform_values { |logs| logs.first(5).map { |l| log_json(l) } }
+      end
+
+      def recent_logs_for(credential)
+        IntegrationSyncLog
+          .where(tenant: current_tenant, action: "product_sync")
+          .where("metadata->>'channel_credential_id' = ?", credential.id.to_s)
+          .order(created_at: :desc)
+          .limit(5)
+          .map { |l| log_json(l) }
+      end
+
+      def channel_json(channel, credential, logs)
+        {
+          id:                   credential&.id,
+          channel:              channel,
+          status:               credential&.status || "pending",
+          required_fields:      ChannelCredential::REQUIRED_FIELDS.fetch(channel),
+          last_synced_at:       credential&.last_synced_at,
+          role:                 credential&.role,
+          stock_source_channel: credential&.stock_source_channel&.channel,
+          recent_logs:          logs
+        }
+      end
+
+      def log_json(log)
+        {
+          id:            log.id,
+          status:        log.status,
+          error_message: log.error_message,
+          synced_count:  log.metadata["synced_count"],
+          started_at:    log.started_at,
+          finished_at:   log.finished_at
+        }
+      end
+    end
+  end
+end
