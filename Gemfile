@@ -11,11 +11,11 @@ gem "bcrypt", "~> 3.1.7"
 gem "jwt"
 
 # Background jobs
-gem "sidekiq", "~> 7.3"
+gem "sidekiq", "~> 8.0"
 gem "sidekiq-cron"
 
 # Background jobs
-gem "sidekiq", "~> 7.3"
+gem "sidekiq", "~> 8.0"
 gem "sidekiq-cron"
 gem "connection_pool", "~> 2.5"
 
