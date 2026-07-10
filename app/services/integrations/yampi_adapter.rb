@@ -47,6 +47,42 @@ module Integrations
       (sku["availability"] || sku["total_in_stock"]).to_i
     end
 
+    # Pulls every order created in [since, now] for a one-off backfill (see
+    # Integrations::Yampi::BackfillOrdersService). Each raw order hash is
+    # already shaped exactly as Integrations::Normalizers::YampiOrderNormalizer
+    # expects (verified against docs.yampi.com.br/api-reference/pedidos/
+    # pedido/listar-pedidos on 2026-07-10) — no separate normalize_order
+    # method here, since the shared normalizer is what both the webhook and
+    # this backfill are required to funnel through.
+    #
+    # Pagination is assumed to follow the same page/per_page + meta.pagination
+    # contract already confirmed working for /catalog/products — the Orders
+    # endpoint's own docs only explicitly document a `limit` param and don't
+    # rule this shape out, but this hasn't been confirmed against a live
+    # store's order history. Verify against real traffic before relying on
+    # it pulling more than one page.
+    def fetch_orders(since:, until_date: Time.current)
+      date_filter = "created_at:#{since.to_date.iso8601}|#{until_date.to_date.iso8601}"
+      orders = []
+      page = 1
+
+      loop do
+        body = with_rate_limit_retry do
+          get("/orders", page: page, per_page: PER_PAGE, include: "items,customer,status", date: date_filter)
+        end
+        page_orders = body["data"] || []
+        orders.concat(page_orders)
+
+        pagination = body.dig("meta", "pagination") || {}
+        total_pages = pagination["total_pages"].to_i
+        break if total_pages <= page || page_orders.empty?
+
+        page += 1
+      end
+
+      orders
+    end
+
     def normalize_product(raw)
       {
         external_id:   raw["id"].to_s,

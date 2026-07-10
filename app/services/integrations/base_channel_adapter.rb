@@ -5,6 +5,14 @@ module Integrations
   # Integrations::ProductSyncService never needs to know which channel
   # it's talking to.
   class BaseChannelAdapter
+    # Multi-page pulls (e.g. a 30-day order backfill) are far more likely to
+    # hit a rate limit mid-pagination than the single-shot calls the other
+    # adapter methods make, so unlike the rest of this class, this one
+    # retries transparently — honoring the channel's own Retry-After when
+    # given (see RateLimitError), falling back to exponential backoff
+    # otherwise — instead of letting the caller see the error at all.
+    MAX_RATE_LIMIT_RETRIES = 3
+
     def initialize(credentials)
       @credentials = credentials.to_h.with_indifferent_access
     end
@@ -74,6 +82,19 @@ module Integrations
       BigDecimal(value.to_s)
     rescue ArgumentError
       nil
+    end
+
+    def with_rate_limit_retry
+      attempts = 0
+      begin
+        yield
+      rescue RateLimitError => e
+        attempts += 1
+        raise if attempts > MAX_RATE_LIMIT_RETRIES
+
+        sleep(e.retry_after || (2**attempts))
+        retry
+      end
     end
   end
 end

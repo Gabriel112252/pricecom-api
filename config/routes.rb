@@ -49,6 +49,7 @@ Rails.application.routes.draw do
         post  ":channel/connect", to: "channel_credentials#connect"
         post  ":channel/sync",    to: "channel_credentials#sync"
         patch ":channel/role",    to: "channel_credentials#update_role"
+        post  "yampi/backfill_orders", to: "channel_credentials#backfill_orders"
       end
 
       # Integrations

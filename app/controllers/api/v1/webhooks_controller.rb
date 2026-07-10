@@ -111,14 +111,26 @@ module Api
           payload["order_id"]&.to_s ||
           payload["resource_id"]&.to_s ||
           payload.dig("order", "id")&.to_s ||
+          resource_hash(payload)&.dig("id")&.to_s ||
           SecureRandom.uuid
       end
 
+      # NOTE: Yampi's webhook envelope puts the full order object under
+      # "resource" ({event, time, merchant, resource: {...}} — see
+      # docs.yampi.com.br/api-reference/introduction-webhook), whereas this
+      # was originally written assuming "resource" holds a type name string
+      # (e.g. "order") like some other providers use it. Only treat it as a
+      # type name when it actually is a string, so a Yampi Hash falls
+      # through to inferring the type from the event name instead.
       def extract_external_type(payload, event_type = "")
-        payload["resource"] ||
+        (payload["resource"] if payload["resource"].is_a?(String)) ||
           payload["entity"] ||
           payload["object"] ||
           infer_type_from_event(event_type)
+      end
+
+      def resource_hash(payload)
+        payload["resource"] if payload["resource"].is_a?(Hash)
       end
 
       def infer_type_from_event(event_type)

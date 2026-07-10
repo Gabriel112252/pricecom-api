@@ -4,8 +4,16 @@ module Integrations
       CANCEL_KEYWORDS = %w[cancel canceled cancelled cancelado].freeze
       REFUND_KEYWORDS = %w[refund refunded estorno reembolso chargeback].freeze
 
+      # Yampi webhook deliveries envelope the order under a top-level
+      # "resource" key ({event, time, merchant, resource: {...order...}}) —
+      # see docs.yampi.com.br/api-reference/introduction-webhook. A backfill
+      # pull from the Orders API returns the order hash directly (no
+      # envelope), so only unwrap when "resource" is actually a Hash — a
+      # bare payload must never be mistaken for one just because some other
+      # provider happens to use a "resource" key for something else.
       def self.call(event)
-        new(event.payload, event.event_type).normalize
+        payload = event.payload["resource"].is_a?(Hash) ? event.payload["resource"] : event.payload
+        new(payload, event.event_type).normalize
       end
 
       def initialize(payload, event_type = "")
@@ -34,13 +42,19 @@ module Integrations
           nf_discount:    to_f(@p["nf_discount"]    || @p.dig("invoice", "discount")),
           nf_freight:     to_f(@p["nf_freight"]     || @p.dig("invoice", "freight")),
           refund_reason:  @p["refund_reason"] || @p["reason"] || @p.dig("refund", "reason"),
-          gross_value:    to_f(@p["total"] || @p["total_value"]),
-          freight:        to_f(@p["total_freight"] || @p["freight_value"]),
+          # value_total/value_shipment/value_discount are the real Yampi API field
+          # names (both the Orders endpoint and the webhook "resource" — see
+          # docs.yampi.com.br/api-reference/pedidos and introduction-webhook);
+          # total/total_freight/etc are kept as fallbacks in case a differently
+          # shaped payload ever shows up.
+          gross_value:    to_f(@p["total"] || @p["total_value"] || @p["value_total"]),
+          freight:        to_f(@p["total_freight"] || @p["freight_value"] || @p["value_shipment"]),
           discount:       to_f(
             @p["discount"] ||
             @p["total_discount"] ||
             @p["discount_value"] ||
             @p["discounts_total"] ||
+            @p["value_discount"] ||
             @p.dig("totals", "discount")
           ),
           ordered_at:     parse_date(@p["created_at"]),
@@ -56,8 +70,10 @@ module Integrations
 
       def extract_status
         @p.dig("status", "alias") ||
+          @p.dig("status", "data", "alias") ||
           @p.dig("status", "name") ||
-          @p["status"]&.to_s ||
+          @p.dig("status", "data", "name") ||
+          (@p["status"].to_s if @p["status"].is_a?(String)) ||
           "unknown"
       end
 
@@ -69,36 +85,70 @@ module Integrations
       end
 
       def extract_customer_name
-        customer = @p["customer"] || {}
+        customer = unwrap_data(@p["customer"])
         [ customer["first_name"], customer["last_name"] ].compact.join(" ").presence ||
           customer["name"].to_s
       end
 
       def extract_customer_tag
-        tags = Array(@p.dig("customer", "tags") || @p["tags"])
+        tags = Array(unwrap_data(@p["customer"])["tags"] || @p["tags"])
         tags.any? { |t| t.to_s.downcase.include?("recorr") } ? "recorrente" : "novo"
       end
 
       def extract_state
-        @p.dig("shipping_address", "state") ||
-          @p.dig("address", "state") ||
+        unwrap_data(@p["shipping_address"])["state"] ||
+          extract_state_from_address ||
           @p["state"].to_s
+      end
+
+      # Yampi's Orders API returns `address` as an array (one entry per
+      # saved address, per docs.yampi.com.br/api-reference/pedidos), each
+      # keyed by "uf" rather than "state" — a plain Hash#dig chain across
+      # that array raises TypeError, so the array has to be unwrapped
+      # explicitly before reading either key.
+      def extract_state_from_address
+        address = @p["address"]
+        address = address.first if address.is_a?(Array)
+        return nil unless address.is_a?(Hash)
+
+        address["state"] || address["uf"]
+      end
+
+      # Unwraps Yampi's common `{ "data" => { ... } }` embed shape (used for
+      # customer/shipping_address/status/sku in both the webhook "resource"
+      # and the Orders API) down to the actual attributes hash.
+      def unwrap_data(value)
+        return {} unless value.is_a?(Hash)
+
+        value["data"].is_a?(Hash) ? value["data"] : value
       end
 
       def extract_items
         items = @p["items"] || @p["order_items"] || []
-        items.map do |i|
+        items = items["data"] if items.is_a?(Hash)
+
+        Array(items).map do |i|
           {
-            sku:           i["sku"].to_s,
-            name:          i["name"].to_s,
+            # item_sku is the real Yampi field for the SKU code; "sku" is a
+            # nested sub-object ({ "data" => { "title" => ... } }) holding
+            # the SKU's display name, not a code — only use it as a code
+            # fallback if it's actually a bare String (some other shape).
+            sku:           (i["item_sku"] || (i["sku"].is_a?(String) ? i["sku"] : nil)).to_s,
+            name:          extract_item_name(i),
             quantity:      (i["quantity"] || i["qty"] || 1).to_i,
             unit_price:    to_f(i["original_price"] || i["unit_price"] || i["price"]),
-            unit_cost:     to_f(i["cost_price"] || i["unit_cost"]),
+            unit_cost:     to_f(i["cost_price"] || i["unit_cost"] || i["price_cost"]),
             discount:      to_f(i["total_discount"] || i["discount"]),
             is_gift:       extract_item_gift(i, name_key: "name", price_key: "original_price"),
             nf_unit_price: to_f(i["nf_unit_price"] || i.dig("invoice", "unit_price"))
           }
         end
+      end
+
+      # The Orders API/webhook embed the SKU's display name under
+      # sku.data.title rather than a flat "name" on the item itself.
+      def extract_item_name(item)
+        (item["name"].presence || unwrap_data(item["sku"])["title"]).to_s
       end
 
       def extract_item_gift(item, name_key: "name", price_key: "price")

@@ -100,4 +100,60 @@ RSpec.describe Integrations::YampiAdapter do
       expect(raws.map { |r| r["sku"] }).to include("CAM-001-P-AZUL", "EXTRA-1")
     end
   end
+
+  describe "#fetch_orders" do
+    let(:orders_url) { "https://api.dooki.com.br/v2/minha-loja/orders" }
+    let(:orders_fixture) { File.read(Rails.root.join("spec/fixtures/integrations/yampi_orders.json")) }
+
+    it "sends the created_at date filter for the requested window" do
+      stub_request(:get, orders_url)
+        .with(query: hash_including("date" => "created_at:2026-05-16|2026-06-15"))
+        .to_return(status: 200, body: orders_fixture, headers: { "Content-Type" => "application/json" })
+
+      orders = adapter.fetch_orders(since: Time.zone.parse("2026-05-16"), until_date: Time.zone.parse("2026-06-15"))
+
+      expect(orders.map { |o| o["id"] }).to eq([ 1000001, 1000002 ])
+    end
+
+    it "paginates until total_pages is reached, same as fetch_products" do
+      page1 = JSON.parse(orders_fixture)
+      page1["meta"]["pagination"] = page1["meta"]["pagination"].merge("current_page" => 1, "total_pages" => 2)
+      page2 = { "data" => [ { "id" => 1000003, "number" => 555003 } ],
+                "meta" => { "pagination" => { "current_page" => 2, "total_pages" => 2 } } }
+      json_headers = { "Content-Type" => "application/json" }
+
+      stub_request(:get, orders_url).with(query: hash_including("page" => "1")).to_return(status: 200, body: page1.to_json, headers: json_headers)
+      stub_request(:get, orders_url).with(query: hash_including("page" => "2")).to_return(status: 200, body: page2.to_json, headers: json_headers)
+
+      orders = adapter.fetch_orders(since: 30.days.ago)
+
+      expect(orders.map { |o| o["id"] }).to include(1000001, 1000002, 1000003)
+    end
+
+    it "retries transparently on a 429 and succeeds once the rate limit clears" do
+      call_count = 0
+      stub_request(:get, orders_url).with(query: hash_including("page" => "1")).to_return do
+        call_count += 1
+        if call_count == 1
+          { status: 429, body: { message: "Too Many Requests" }.to_json, headers: { "Retry-After" => "0" } }
+        else
+          { status: 200, body: orders_fixture, headers: { "Content-Type" => "application/json" } }
+        end
+      end
+      allow(adapter).to receive(:sleep)
+
+      orders = adapter.fetch_orders(since: 30.days.ago)
+
+      expect(call_count).to eq(2)
+      expect(orders.map { |o| o["id"] }).to eq([ 1000001, 1000002 ])
+    end
+
+    it "gives up and raises after exceeding the retry budget" do
+      stub_request(:get, orders_url).with(query: hash_including("page" => "1"))
+        .to_return(status: 429, body: { message: "Too Many Requests" }.to_json, headers: { "Retry-After" => "0" })
+      allow(adapter).to receive(:sleep)
+
+      expect { adapter.fetch_orders(since: 30.days.ago) }.to raise_error(Integrations::RateLimitError)
+    end
+  end
 end

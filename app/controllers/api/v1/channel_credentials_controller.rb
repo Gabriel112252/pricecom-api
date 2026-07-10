@@ -2,7 +2,7 @@ module Api
   module V1
     class ChannelCredentialsController < ApplicationController
       before_action :validate_channel!, only: [ :connect, :sync, :update_role ]
-      before_action :require_admin!, only: [ :connect, :update_role ]
+      before_action :require_admin!, only: [ :connect, :update_role, :backfill_orders ]
 
       # GET /api/v1/integrations/channels
       def index
@@ -75,6 +75,30 @@ module Api
           error_message: result.error_message,
           channel: channel_json(credential.channel, credential, recent_logs_for(credential))
         }
+      end
+
+      # POST /api/v1/integrations/yampi/backfill_orders
+      # One-off pull of Yampi orders from the last N days (default 30) —
+      # see Integrations::Yampi::BackfillOrdersService. Distinct from #sync,
+      # which is the recurring product/stock sync.
+      def backfill_orders
+        credential = current_tenant.channel_credentials.find_by(channel: "yampi")
+
+        if credential.nil? || credential.status == "pending"
+          return render json: { error: "Yampi ainda não está conectada" }, status: :unprocessable_entity
+        end
+
+        days   = params[:days].presence || Integrations::Yampi::BackfillOrdersService::DEFAULT_DAYS
+        result = Integrations::Yampi::BackfillOrdersService.call(credential, days: days.to_i)
+
+        render json: {
+          success:       result.success?,
+          created_count: result.created_count,
+          updated_count: result.updated_count,
+          skipped_count: result.skipped.size,
+          skipped:       result.skipped.first(20),
+          error_message: result.error_message
+        }, status: result.success? ? :ok : :unprocessable_entity
       end
 
       private
