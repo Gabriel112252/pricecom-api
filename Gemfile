@@ -14,6 +14,11 @@ gem "jwt"
 gem "sidekiq", "~> 7.3"
 gem "sidekiq-cron"
 
+# Background jobs
+gem "sidekiq", "~> 7.3"
+gem "sidekiq-cron"
+gem "connection_pool", "~> 2.5"
+
 # Utilities
 gem "kaminari"
 gem "active_model_serializers"
