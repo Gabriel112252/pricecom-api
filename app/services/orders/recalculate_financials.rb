@@ -32,7 +32,7 @@ module Orders
 
     private
 
-    attr_reader :order
+    attr_reader :order, :run_audit
 
     def cost_price_for(items)
       items.sum { |item| item.quantity.to_i * item.unit_cost.to_f }
