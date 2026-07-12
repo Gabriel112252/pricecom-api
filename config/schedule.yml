@@ -6,6 +6,11 @@ product_sync_dispatch:
   class: "Integrations::ScheduleProductSyncsJob"
   queue: integrations
 
+yampi_order_polling_dispatch:
+  cron: "*/5 * * * *"
+  class: "Integrations::Yampi::OrdersPollingSchedulerJob"
+  queue: integrations
+
 # idworks (ERP) has no webhooks — polling is the only option (see
 # Integrations::Idworks::OrderSyncService/ProductCostSyncService class
 # comments). Product cost changes infrequently, so a 6h full sync is

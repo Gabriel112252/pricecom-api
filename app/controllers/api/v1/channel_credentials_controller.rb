@@ -88,9 +88,10 @@ module Api
       end
 
       # POST /api/v1/integrations/yampi/backfill_orders
-      # One-off pull of Yampi orders from the last N days (default 30) —
-      # see Integrations::Yampi::BackfillOrdersService. Distinct from #sync,
-      # which is the recurring product/stock sync.
+      # Enqueues the same Yampi order polling job used by the scheduler.
+      # The first job execution performs the 30-day created_at backfill when
+      # orders_sync_cursor_at is blank; later executions use the incremental
+      # updated_at window. The HTTP request never performs API pagination.
       def backfill_orders
         credential = current_tenant.channel_credentials.find_by(channel: "yampi")
 
@@ -98,17 +99,14 @@ module Api
           return render json: { error: "Yampi ainda não está conectada" }, status: :unprocessable_entity
         end
 
-        days   = params[:days].presence || Integrations::Yampi::BackfillOrdersService::DEFAULT_DAYS
-        result = Integrations::Yampi::BackfillOrdersService.call(credential, days: days.to_i)
+        job = Integrations::Yampi::OrdersPollingJob.perform_later(credential.id, trigger: "manual")
 
         render json: {
-          success:       result.success?,
-          created_count: result.created_count,
-          updated_count: result.updated_count,
-          skipped_count: result.skipped.size,
-          skipped:       result.skipped.first(20),
-          error_message: result.error_message
-        }, status: result.success? ? :ok : :unprocessable_entity
+          success: true,
+          enqueued: true,
+          job_id: job.job_id,
+          channel: channel_json(credential.channel, credential, recent_logs_for(credential))
+        }, status: :accepted
       end
 
       private
@@ -131,7 +129,7 @@ module Api
 
       def recent_logs_by_channel
         IntegrationSyncLog
-          .where(tenant: current_tenant, action: "product_sync")
+          .where(tenant: current_tenant, action: [ "product_sync", "yampi_order_polling" ])
           .order(created_at: :desc)
           .limit(100)
           .group_by { |log| log.metadata["channel"] }
@@ -140,7 +138,7 @@ module Api
 
       def recent_logs_for(credential)
         IntegrationSyncLog
-          .where(tenant: current_tenant, action: "product_sync")
+          .where(tenant: current_tenant, action: [ "product_sync", "yampi_order_polling" ])
           .where("metadata->>'channel_credential_id' = ?", credential.id.to_s)
           .order(created_at: :desc)
           .limit(5)
@@ -154,6 +152,8 @@ module Api
           status:               credential&.status || "pending",
           required_fields:      ChannelCredential::REQUIRED_FIELDS.fetch(channel),
           last_synced_at:       credential&.last_synced_at,
+          orders_sync_cursor_at: credential&.orders_sync_cursor_at,
+          polling_enabled:       credential&.polling_enabled,
           role:                 credential&.role,
           stock_source_channel: credential&.stock_source_channel&.channel,
           recent_logs:          logs
@@ -165,7 +165,13 @@ module Api
           id:            log.id,
           status:        log.status,
           error_message: log.error_message,
+          action:        log.action,
           synced_count:  log.metadata["synced_count"],
+          created_count: log.metadata["created_count"],
+          updated_count: log.metadata["updated_count"],
+          unchanged_count: log.metadata["unchanged_count"],
+          ignored_count: log.metadata["ignored_count"],
+          error_count:   log.metadata["error_count"],
           started_at:    log.started_at,
           finished_at:   log.finished_at
         }

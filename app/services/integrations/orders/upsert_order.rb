@@ -44,7 +44,7 @@ module Integrations
       end
 
       def upsert_order(channel)
-        order = @tenant.orders.find_or_initialize_by(external_id: @normalized[:external_id])
+        order = @tenant.orders.find_or_initialize_by(channel: channel, external_id: @normalized[:external_id])
         order.assign_attributes(
           channel:          channel,
           order_number:     @normalized[:order_number],

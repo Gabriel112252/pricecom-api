@@ -17,7 +17,8 @@ module Integrations
       end
 
       def call
-        order = @tenant.orders.find_by(external_id: @normalized[:external_id])
+        channel = resolve_channel
+        order = channel ? @tenant.orders.find_by(channel: channel, external_id: @normalized[:external_id]) : nil
 
         unless order
           return Result.new(
@@ -41,6 +42,12 @@ module Integrations
       end
 
       private
+
+      def resolve_channel
+        return @integration.channel if @integration&.channel
+        return @tenant.channels.find_by(platform: @provider) if @provider
+        nil
+      end
 
       def resolve_refund_amount
         amount = @normalized[:refund_amount].to_f
