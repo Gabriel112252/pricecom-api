@@ -60,13 +60,23 @@ module Api
           products_synced_count: cost_result.synced_count,
           orders_synced_count:   order_result.synced_count,
           products_received_count: cost_result.metadata[:received_count] || cost_result.metadata["received_count"],
+          products_found_by_sku_count: cost_result.metadata[:matched_count] || cost_result.metadata["matched_count"],
           products_updated_count: cost_result.metadata[:product_updated_count] || cost_result.metadata["product_updated_count"],
+          product_order_items_updated_count: cost_result.metadata[:order_items_updated_count] || cost_result.metadata["order_items_updated_count"],
           products_ignored_count: cost_result.metadata[:ignored_count] || cost_result.metadata["ignored_count"],
+          products_ignored_reason_counts: cost_result.metadata[:ignored_reason_counts] || cost_result.metadata["ignored_reason_counts"],
+          products_matched_examples: cost_result.metadata[:matched_examples] || cost_result.metadata["matched_examples"],
           products_error_count: cost_result.metadata[:error_count] || cost_result.metadata["error_count"],
           order_freights_received_count: order_result.metadata[:received_count] || order_result.metadata["received_count"],
+          order_freights_found_count: order_result.metadata[:found_count] || order_result.metadata["found_count"],
           order_freights_updated_count: order_result.metadata[:updated_count] || order_result.metadata["updated_count"],
+          order_freights_recalculated_count: order_result.metadata[:recalculated_count] || order_result.metadata["recalculated_count"],
           order_freights_ignored_count: order_result.metadata[:ignored_count] || order_result.metadata["ignored_count"],
-          orders_recalculated_count: cost_result.metadata[:orders_recalculated_count] || cost_result.metadata["orders_recalculated_count"],
+          order_freights_ignored_reason_counts: order_result.metadata[:ignored_reason_counts] || order_result.metadata["ignored_reason_counts"],
+          order_freights_ignored_examples: order_result.metadata[:ignored] || order_result.metadata["ignored"],
+          order_freights_matched_examples: order_result.metadata[:matched_examples] || order_result.metadata["matched_examples"],
+          orders_recalculated_count: (cost_result.metadata[:orders_recalculated_count] || cost_result.metadata["orders_recalculated_count"]).to_i +
+            (order_result.metadata[:recalculated_count] || order_result.metadata["recalculated_count"]).to_i,
           error_message:         [ cost_result.error_message, order_result.error_message ].compact.first
         }
       end

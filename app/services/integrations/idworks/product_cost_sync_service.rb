@@ -86,6 +86,9 @@ module Integrations
       def ignored = @ignored ||= []
       def unmatched = @unmatched ||= []
       def item_errors = @item_errors ||= []
+      def ignored_reason_counts = @ignored_reason_counts ||= Hash.new(0)
+      def matched_examples = @matched_examples ||= []
+      def response_debug = @response_debug ||= []
 
       def sync_cost?
         DataSourceConfig.source_for(tenant, "cost") == "idworks"
@@ -93,11 +96,12 @@ module Integrations
 
       def sync_all(adapter)
         products = adapter.fetch_products
+        @response_debug = adapter.product_response_debug
         @received_count = products.size
 
         products.each do |raw|
           if raw[:sku].blank?
-            record_ignored(raw, "sem SKU")
+            record_ignored(raw, "missing_sku")
             next
           end
 
@@ -112,7 +116,7 @@ module Integrations
         return record_unmatched(raw) unless product
 
         cost = raw[:cost_last_purchase].nil? ? raw[:cost_average] : raw[:cost_last_purchase]
-        return record_ignored(raw, "sem custo confirmado") if cost.nil?
+        return record_ignored(raw, "missing_cost") if cost.nil?
 
         @matched_count = matched_count + 1
 
@@ -121,6 +125,7 @@ module Integrations
           product.save!
           @product_updated_count = product_updated_count + 1
         end
+        record_matched_example(raw, product, cost)
 
         item_updates, order_updates = apply_cost_to_orders(product, cost)
         @order_items_updated_count = order_items_updated_count + item_updates
@@ -171,7 +176,13 @@ module Integrations
       end
 
       def record_unmatched(raw)
-        entry = { sku: raw[:sku], idworks_id: raw[:idworks_id], reason: "produto não encontrado no Pricecom" }
+        ignored_reason_counts["product_not_found"] += 1
+        entry = {
+          sku: raw[:sku],
+          idworks_id: raw[:idworks_id],
+          reason: "product_not_found",
+          idworks_raw_keys: raw[:raw_keys]
+        }
         unmatched << entry
         ignored << entry
         Rails.logger.info("[IDWorks] product_cost_sync ignored sku=#{raw[:sku]} idworks_id=#{raw[:idworks_id]} reason=product_not_found")
@@ -179,10 +190,28 @@ module Integrations
       end
 
       def record_ignored(raw, reason)
-        entry = { sku: raw[:sku], idworks_id: raw[:idworks_id], reason: reason }
+        ignored_reason_counts[reason] += 1
+        entry = {
+          sku: raw[:sku],
+          idworks_id: raw[:idworks_id],
+          reason: reason,
+          idworks_raw_keys: raw[:raw_keys]
+        }
         ignored << entry
         Rails.logger.info("[IDWorks] product_cost_sync ignored sku=#{raw[:sku].presence || '(blank)'} idworks_id=#{raw[:idworks_id]} reason=#{reason}")
         nil
+      end
+
+      def record_matched_example(raw, product, cost)
+        return if matched_examples.size >= 10
+
+        matched_examples << {
+          idworks_sku: raw[:sku],
+          idworks_id: raw[:idworks_id],
+          pricecom_product_id: product.id,
+          pricecom_sku: product.sku,
+          cost_price: cost.to_s
+        }
       end
 
       def start_log
@@ -206,10 +235,16 @@ module Integrations
           order_items_updated_count: order_items_updated_count,
           orders_recalculated_count: orders_recalculated_count,
           ignored_count: ignored.size,
+          ignored_reason_counts: ignored_reason_counts,
+          missing_sku_count: ignored_reason_counts["missing_sku"],
+          missing_cost_count: ignored_reason_counts["missing_cost"],
+          product_not_found_count: ignored_reason_counts["product_not_found"],
           unmatched_count: unmatched.size,
           error_count: item_errors.size,
           ignored: ignored.first(20),
-          unmatched: unmatched.first(20)
+          unmatched: unmatched.first(20),
+          matched_examples: matched_examples.first(10),
+          idworks_response_debug: response_debug
         }
       end
 

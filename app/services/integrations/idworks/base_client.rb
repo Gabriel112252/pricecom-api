@@ -9,6 +9,8 @@ module Integrations
     class BaseClient
       include AdapterHttp
 
+      attr_reader :last_response
+
       def initialize(credentials)
         @credentials = credentials.to_h.with_indifferent_access
       end
@@ -24,6 +26,7 @@ module Integrations
 
       def get(path, params = {})
         response = connection(base_url).get(path, params) { |req| apply_headers(req) }
+        @last_response = response
         handle_response(response)
       end
 

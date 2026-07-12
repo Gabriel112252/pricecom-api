@@ -167,8 +167,13 @@ module Integrations
         )
         mapping.assign_attributes(
           mappable:       order,
+          external_code:  @normalized[:order_number],
           status:         "active",
-          last_synced_at: Time.current
+          last_synced_at: Time.current,
+          metadata:       mapping.metadata.merge(
+            "provider"     => @provider,
+            "order_number" => @normalized[:order_number]
+          )
         )
         mapping.save!
       end
