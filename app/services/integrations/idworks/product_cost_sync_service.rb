@@ -169,7 +169,7 @@ module Integrations
       def recalculate_orders(order_ids)
         count = 0
         tenant.orders.where(id: order_ids.uniq).find_each do |order|
-          Orders::RecalculateFinancials.call(order)
+          ::Orders::RecalculateFinancials.call(order)
           count += 1
         end
         count

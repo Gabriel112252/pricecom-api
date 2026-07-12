@@ -149,7 +149,7 @@ module Integrations
       end
 
       def recalculate_costs(order, _channel)
-        Orders::RecalculateFinancials.call(order, run_audit: false)
+        ::Orders::RecalculateFinancials.call(order, run_audit: false)
       end
 
       def idworks_cost_source?

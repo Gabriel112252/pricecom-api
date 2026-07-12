@@ -123,7 +123,7 @@ module Integrations
           end
 
           order.update!(real_freight_cost: raw_order[:value_shipping])
-          Orders::RecalculateFinancials.call(order)
+          ::Orders::RecalculateFinancials.call(order)
           @updated_count = updated_count + 1
           @recalculated_count = recalculated_count + 1
           record_matched_example(raw_order, order, resolution)
