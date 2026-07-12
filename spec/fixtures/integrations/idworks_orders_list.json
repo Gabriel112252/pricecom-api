@@ -1,0 +1,20 @@
+{
+  "Data": [
+    {
+      "IDOrder": 88001,
+      "Order": "555001",
+      "ValueProduct": 180.00,
+      "ValueOrder": 199.90,
+      "ValueShipping": 15.30,
+      "ValuePaid": 199.90
+    },
+    {
+      "IDOrder": 88002,
+      "Order": "555999-NOT-IN-PRICECOM",
+      "ValueProduct": 29.90,
+      "ValueOrder": 29.90,
+      "ValueShipping": 0,
+      "ValuePaid": 29.90
+    }
+  ]
+}

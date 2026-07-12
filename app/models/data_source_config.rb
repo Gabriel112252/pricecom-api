@@ -9,8 +9,14 @@ class DataSourceConfig < ApplicationRecord
   # the data_source_configs:seed_defaults rake task for tenants connected
   # before this config existed). A tenant can repoint any of these later —
   # this is only the initial value, never enforced afterwards.
+  #
+  # "tax" is deliberately absent from idworks' defaults: confirmed via
+  # swagger.idworks.com.br (2026-07-10) that idworks has no usable tax-rate
+  # field anywhere (only fiscal classification codes), so it's never a
+  # valid default source for "tax" — see
+  # Integrations::Idworks::ProductCostSyncService's class comment.
   DEFAULTS_BY_SOURCE = {
-    "idworks" => %w[cost tax freight],
+    "idworks" => %w[cost freight],
     "pagarme" => %w[payment_reconciliation]
   }.freeze
 

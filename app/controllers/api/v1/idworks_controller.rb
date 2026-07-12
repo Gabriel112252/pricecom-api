@@ -25,20 +25,26 @@ module Api
         begin
           Integrations::IdworksAdapter.new(integration.credentials).authenticate
           integration.update!(status: "connected")
-        rescue Integrations::AuthenticationError, Integrations::ApiError, Integrations::RateLimitError => e
+        rescue Integrations::AuthenticationError
           integration.update!(status: "error")
-          return render json: { errors: [ e.message ] }, status: :unprocessable_entity
+          return render json: { errors: [ "E-mail ou senha do idworks inválidos." ] }, status: :unprocessable_entity
+        rescue Integrations::ApiError, Integrations::RateLimitError => e
+          integration.update!(status: "error")
+          return render json: { errors: [ "Não foi possível conectar ao idworks agora: #{e.message}" ] }, status: :unprocessable_entity
         end
 
         render json: integration_json(integration)
       end
 
       # POST /api/v1/integrations/idworks/sync
-      # Runs both the product cost/tax pull and the invoice (NF) matching
-      # pass in one call — the two are independent services internally
+      # Runs both the product cost pull and the order freight sync in one
+      # call — the two are independent services internally
       # (Integrations::Idworks::ProductCostSyncService /
-      # Integrations::InvoiceSyncService) but there's only one "sync idworks"
-      # action from the user's point of view.
+      # Integrations::Idworks::OrderSyncService) but there's only one "sync
+      # idworks" action from the user's point of view. This is also what
+      # the manual "Sincronizar agora" button calls, same services the
+      # scheduled jobs (Idworks::ProductCostSyncJob / Idworks::OrderSyncJob)
+      # use — see config/schedule.yml.
       def sync
         integration = current_tenant.integrations.find_by(provider: "idworks")
 
@@ -46,14 +52,14 @@ module Api
           return render json: { error: "idworks ainda não está conectado" }, status: :unprocessable_entity
         end
 
-        cost_result    = Integrations::Idworks::ProductCostSyncService.call(integration)
-        invoice_result = Integrations::InvoiceSyncService.call(integration)
+        cost_result  = Integrations::Idworks::ProductCostSyncService.call(integration)
+        order_result = Integrations::Idworks::OrderSyncService.call(integration, from: 24.hours.ago)
 
         render json: {
-          success:                cost_result.success? && invoice_result.success?,
-          products_synced_count:  cost_result.synced_count,
-          invoices_synced_count:  invoice_result.synced_count,
-          error_message:          [ cost_result.error_message, invoice_result.error_message ].compact.first
+          success:               !cost_result.error? && !order_result.error?,
+          products_synced_count: cost_result.synced_count,
+          orders_synced_count:   order_result.synced_count,
+          error_message:         [ cost_result.error_message, order_result.error_message ].compact.first
         }
       end
 

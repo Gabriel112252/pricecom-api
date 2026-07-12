@@ -1,8 +1,8 @@
 module Integrations
   # Common interface every ERP adapter implements (idworks today) — mirrors
   # BaseChannelAdapter's shape but for the kind of data an ERP is the source
-  # of truth for (real product cost/tax, invoices) rather than a sales
-  # channel's catalog/orders. Shares HTTP/error handling with
+  # of truth for (real product cost, real shipping cost) rather than a
+  # sales channel's catalog/orders. Shares HTTP/error handling with
   # BaseChannelAdapter via AdapterHttp instead of duplicating it.
   class BaseErpAdapter
     include AdapterHttp
@@ -17,20 +17,21 @@ module Integrations
       raise NotImplementedError, "#{self.class} must implement #authenticate"
     end
 
-    # Returns an Array of { sku:, cost:, tax_rate: } — the ERP's real cost
-    # and tax rate per SKU, matched onto Product by sku (see
-    # Integrations::Idworks::ProductCostSyncService).
-    def fetch_products_with_cost
-      raise NotImplementedError, "#{self.class} must implement #fetch_products_with_cost"
+    # Returns an Array of { sku:, cost_last_purchase:, cost_average: } — the
+    # ERP's real cost figures per SKU, matched onto Product by sku (see
+    # Integrations::Idworks::ProductCostSyncService, which decides field
+    # priority). No tax rate here — see that service's class comment for
+    # why tax isn't synced from idworks.
+    def fetch_products
+      raise NotImplementedError, "#{self.class} must implement #fetch_products"
     end
 
-    # Looks up the invoice (NF) issued for a single order, keyed by
-    # whatever reference the ERP indexes orders under (order_number today).
-    # Returns nil when no invoice has been matched/issued yet, or:
-    #   { nf_number:, nf_gross_value:, nf_discount:, nf_freight:,
-    #     tax_amount:, real_freight_cost: }
-    def fetch_invoices(order_ref)
-      raise NotImplementedError, "#{self.class} must implement #fetch_invoices"
+    # Returns an Array of { order_ref:, idworks_order_id:, value_shipping:,
+    # value_product:, value_order:, value_paid: } for orders in [from, to] —
+    # the ERP's real shipping cost per order (see
+    # Integrations::Idworks::OrderSyncService).
+    def fetch_orders(from:, to:)
+      raise NotImplementedError, "#{self.class} must implement #fetch_orders"
     end
 
     private

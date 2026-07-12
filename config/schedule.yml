@@ -5,3 +5,18 @@ product_sync_dispatch:
   cron: "*/15 * * * *"
   class: "Integrations::ScheduleProductSyncsJob"
   queue: integrations
+
+# idworks (ERP) has no webhooks — polling is the only option (see
+# Integrations::Idworks::OrderSyncService/ProductCostSyncService class
+# comments). Product cost changes infrequently, so a 6h full sync is
+# enough; freight needs to reflect new orders promptly, so it polls every
+# 15min with a 2h incremental window (overlap is intentional/idempotent).
+idworks_product_cost_sync_dispatch:
+  cron: "0 */6 * * *"
+  class: "Integrations::Idworks::ScheduleProductCostSyncsJob"
+  queue: integrations
+
+idworks_order_sync_dispatch:
+  cron: "*/15 * * * *"
+  class: "Integrations::Idworks::ScheduleOrderSyncsJob"
+  queue: integrations

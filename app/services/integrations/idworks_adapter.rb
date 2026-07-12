@@ -1,87 +1,101 @@
 module Integrations
-  # idworks (ERP) adapter.
+  # idworks (ERP) adapter — CONFIRMED against the tenant's real idworks
+  # Swagger spec (swagger.idworks.com.br) on 2026-07-10: base URL
+  # https://hidrabene.api-idworks.com.br/1.0/, GET /sku (paginated product
+  # list, "Page" param), GET /orders (paginated, DateFrom/DateTo filters).
+  # Auth is delegated entirely to Idworks::BaseClient/Idworks::AuthService
+  # (POST user/signin/local -> Bearer token + Origin/FilePath headers on
+  # every call) rather than reimplemented here.
   #
-  # IMPORTANT — UNVERIFIED: no idworks API documentation was available in
-  # this environment (no attachment was provided and there's no public doc
-  # site to check, unlike Yampi/Shopify/etc). The endpoint paths, auth
-  # scheme, and field names below are a reasonable guess based on this
-  # codebase's existing REST-adapter conventions (see YampiAdapter),
-  # NOT confirmed against real idworks traffic. Treat every method here as
-  # needing validation against a real idworks account/sandbox before this
-  # is trusted to drive production cost/tax/invoice data — mismatched field
-  # names would silently produce nil/zero costs rather than an error.
-  #
-  # Auth: assumed bearer token — headers `Authorization: Bearer {token}`.
-  # Base URL: each tenant's own idworks instance, so unlike the sales-channel
-  # adapters there's no single shared host — it's part of the credentials.
+  # STILL UNVERIFIED (not covered in the Swagger fields relayed to this
+  # environment — confirm before trusting in production):
+  #   - the exact pagination response envelope: assumed to be either a bare
+  #     array or a { "Data" => [...] } wrapper, stopping once a page comes
+  #     back empty. If idworks instead returns e.g. an explicit TotalPages
+  #     field and an empty final page is never actually empty, this could
+  #     under/over-fetch.
+  #   - the plain SKU-code field name on /sku records: guessed as "Sku"
+  #     (falling back to IDSku). Note Product#idworks_id already exists as
+  #     a column but nothing currently reads/writes it — IDSku might be the
+  #     intended match key instead of the sku string; out of scope to
+  #     change here without being asked, but worth revisiting.
+  #   - DateFrom/DateTo's exact format/timezone for GET /orders — assumed
+  #     full ISO8601 timestamps (a date-only filter would be useless for
+  #     OrderSyncService's 2-hour polling window).
   class IdworksAdapter < BaseErpAdapter
-    PER_PAGE = 100
-
-    def authenticate
-      get("products", page: 1, per_page: 1)
-      true
+    def initialize(credentials)
+      super
+      @client = Idworks::BaseClient.new(credentials)
     end
 
-    # → [{ sku:, cost:, tax_rate: }]
-    def fetch_products_with_cost
+    def authenticate
+      client.authenticate!
+    end
+
+    # → [{ sku:, cost_last_purchase:, cost_average: }]
+    def fetch_products
       products = []
       page = 1
 
       loop do
-        body = with_rate_limit_retry { get("products", page: page, per_page: PER_PAGE) }
-        page_products = body["data"] || []
-        products.concat(page_products.map { |raw| normalize_product_cost(raw) })
+        body  = with_rate_limit_retry { client.get("sku", "Page" => page) }
+        items = extract_list(body)
+        break if items.blank?
 
-        pagination = body.dig("meta", "pagination") || {}
-        total_pages = pagination["total_pages"].to_i
-        break if total_pages <= page || page_products.empty?
-
+        products.concat(items.map { |raw| normalize_product(raw) })
         page += 1
       end
 
       products
     end
 
-    # → { nf_number:, nf_gross_value:, nf_discount:, nf_freight:,
-    #     tax_amount:, real_freight_cost: } or nil when no invoice yet.
-    def fetch_invoices(order_ref)
-      body    = with_rate_limit_retry { get("invoices", order_ref: order_ref) }
-      invoice = body["data"]
-      return nil if invoice.blank?
+    # → [{ order_ref:, idworks_order_id:, value_shipping:, value_product:,
+    #      value_order:, value_paid: }]
+    def fetch_orders(from:, to:)
+      orders = []
+      page = 1
 
-      {
-        nf_number:         invoice["nf_number"] || invoice["invoice_number"],
-        nf_gross_value:    to_decimal(invoice["nf_gross_value"] || invoice["gross_value"]),
-        nf_discount:       to_decimal(invoice["nf_discount"] || invoice["discount"]),
-        nf_freight:        to_decimal(invoice["nf_freight"] || invoice["freight"]),
-        tax_amount:        to_decimal(invoice["tax_amount"] || invoice["imposto"]),
-        real_freight_cost: to_decimal(invoice["real_freight_cost"] || invoice["freight_cost"])
-      }
+      loop do
+        body = with_rate_limit_retry do
+          client.get("orders", "Page" => page, "DateFrom" => from.iso8601, "DateTo" => to.iso8601)
+        end
+        items = extract_list(body)
+        break if items.blank?
+
+        orders.concat(items.map { |raw| normalize_order(raw) })
+        page += 1
+      end
+
+      orders
     end
 
     private
 
-    def normalize_product_cost(raw)
+    attr_reader :client
+
+    def extract_list(body)
+      return body if body.is_a?(Array)
+
+      body["Data"] || body["data"] || []
+    end
+
+    def normalize_product(raw)
       {
-        sku:      raw["sku"],
-        cost:     to_decimal(raw["cost"] || raw["cost_price"]),
-        tax_rate: to_decimal(raw["tax_rate"] || raw["icms_rate"])
+        sku:                raw["Sku"] || raw["IDSku"]&.to_s,
+        cost_last_purchase: to_decimal(raw["CostLastPurchase"]),
+        cost_average:       to_decimal(raw["CostAverage"])
       }
     end
 
-    def get(path, **params)
-      response = connection(base_url).get(path, params) do |req|
-        req.headers["Authorization"] = "Bearer #{credentials[:api_key] || credentials[:token]}"
-      end
-      handle_response(response)
-    end
-
-    # Trailing slash matters — Faraday/URI resolves a relative path against
-    # the base URL per RFC 3986 "merge" rules (see YampiAdapter's BASE_URL
-    # comment for the same gotcha): without it, the base URL's own last
-    # path segment would be replaced instead of extended.
-    def base_url
-      "#{credentials[:base_url].to_s.chomp('/')}/"
+    def normalize_order(raw)
+      {
+        order_ref:        raw["Order"]&.to_s,
+        idworks_order_id: raw["IDOrder"]&.to_s,
+        value_shipping:   to_decimal(raw["ValueShipping"]),
+        value_product:    to_decimal(raw["ValueProduct"]),
+        value_order:      to_decimal(raw["ValueOrder"]),
+        value_paid:       to_decimal(raw["ValuePaid"])
+      }
     end
   end
 end
