@@ -46,7 +46,7 @@ RSpec.describe Dashboard::BuildSummary do
       expect(result[:revenue][:gross]).to eq(300.0)
       expect(result[:revenue][:net]).to eq(280.0)
       expect(result[:orders][:count]).to eq(2)
-      expect(result[:orders][:aov]).to eq(150.0)
+      expect(result[:orders][:aov]).to eq(140.0)
       expect(result[:orders][:vs_previous_period_pct]).to eq(100.0) # 2 orders vs 1 previously
     end
 
@@ -76,7 +76,7 @@ RSpec.describe Dashboard::BuildSummary do
       result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
 
       series = result[:revenue][:by_channel_series]
-      expect(series.sum { |row| row[:gross] }).to eq(300.0)
+      expect(series.sum { |row| row[:gross] }).to eq(280.0)
       expect(series.map { |row| row[:channel] }.uniq).to eq([ "Yampi" ])
     end
 
@@ -85,7 +85,50 @@ RSpec.describe Dashboard::BuildSummary do
 
       result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
 
-      expect(result[:orders][:aov_by_channel]).to eq({ "Yampi" => 150.0, "Shopify" => 500.0 })
+      expect(result[:orders][:aov_by_channel]).to eq({ "Yampi" => 140.0, "Shopify" => 500.0 })
+    end
+  end
+
+  describe "executive financial payload" do
+    it "exposes executive KPIs with net revenue, discounts and financial coverage" do
+      order = make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+      product = tenant.products.create!(sku: "SKU-1", name: "Produto", cost_price: 30)
+      order.update!(discount: 15, freight: 8, commission: 4, operational_cost: 2)
+      order.order_items.create!(product: product, sku: product.sku, name: product.name, quantity: 1, unit_price: 100, unit_cost: 30)
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      expect(result[:kpis]).to include(
+        gross_revenue: 100.0,
+        net_revenue: 85.0,
+        average_ticket: 85.0,
+        discounts_total: 15.0,
+        contribution_margin: 48.24,
+        contribution_margin_available: true,
+        financial_coverage_percentage: 100.0
+      )
+      expect(result[:financial_composition][:result]).to include(value: 41.0, available: true, status: "available")
+    end
+
+    it "does not expose contribution margin as definitive when order cost is incomplete" do
+      order = make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+      order.update!(discount: 20)
+      order.order_items.create!(sku: "MISSING-COST", name: "Produto sem custo", quantity: 1, unit_price: 100, unit_cost: nil)
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      expect(result[:kpis][:net_revenue]).to eq(80.0)
+      expect(result[:kpis][:contribution_margin_available]).to eq(false)
+      expect(result[:kpis][:contribution_margin]).to be_nil
+      expect(result[:financial][:profit_available]).to eq(false)
+      expect(result[:financial][:profit]).to be_nil
+      expect(result[:financial_composition][:result]).to include(value: nil, available: false, status: "incomplete")
+      expect(result[:data_quality]).to include(
+        missing_cost_orders_count: 1,
+        complete_orders_count: 0,
+        incomplete_orders_count: 1,
+        financial_status: "incomplete"
+      )
     end
   end
 

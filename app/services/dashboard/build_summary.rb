@@ -7,6 +7,7 @@ module Dashboard
     FINANCIAL_CONFLICT_TYPES = %w[
       nf_discount_mismatch nf_freight_mismatch settlement_amount_mismatch missing_settlement
     ].freeze
+    CANCELED_STATUS_ALIASES = %w[cancelado canceled cancelled cancelada].freeze
 
     def self.call(tenant:, params:)
       new(tenant: tenant, params: params).call
@@ -21,22 +22,27 @@ module Dashboard
       period      = resolve_period
       granularity = resolve_granularity(period)
 
-      orders_scope = orders_in_period(period)
-      prev_scope   = orders_in_period(previous_period(period))
+      orders_scope = financial_orders(orders_in_period(period))
+      prev_scope   = financial_orders(orders_in_period(previous_period(period)))
 
       current_totals = period_totals(orders_scope)
       prev_totals    = period_totals(prev_scope)
       period_rows    = revenue_rows(orders_scope, granularity)
+      data_quality   = build_data_quality(orders_scope)
 
       {
         period:                   { from: period[:from].iso8601, to: period[:to].iso8601 },
         granularity:              granularity,
+        kpis:                     build_kpis(current_totals, prev_totals, data_quality),
+        financial_composition:    build_financial_composition(current_totals, data_quality),
+        revenue_timeline:         build_revenue_timeline(period_rows, granularity),
+        sales_by_channel:         build_sales_by_channel(orders_scope, current_totals),
         revenue:                  build_revenue(orders_scope, period_rows, granularity, current_totals, prev_totals),
-        financial:                build_financial(current_totals, prev_totals),
-        margin:                   build_margin(period_rows, granularity, current_totals, prev_totals),
+        financial:                build_financial(current_totals, prev_totals, data_quality),
+        margin:                   build_margin(period_rows, granularity, current_totals, prev_totals, data_quality),
         orders:                   build_orders(orders_scope, granularity, current_totals, prev_totals),
         data_sources:             build_data_sources,
-        data_quality:             build_data_quality(orders_scope),
+        data_quality:             data_quality,
         conflicts:                build_conflicts,
         reconciliation:           build_reconciliation(period),
         top_products_by_margin:   build_top_products_by_margin(period),
@@ -78,47 +84,57 @@ module Dashboard
       scope
     end
 
+    def financial_orders(scope)
+      scope
+        .where(order_type: %w[sale refund])
+        .where.not("LOWER(COALESCE(status, '')) IN (?)", CANCELED_STATUS_ALIASES)
+    end
+
     def format_bucket(bucket, granularity)
       granularity == "hour" ? bucket.iso8601 : bucket.to_date.iso8601
     end
 
     def pct_change(current, previous)
-      return nil if previous.nil? || previous.zero?
+      return nil if previous.nil? || previous.to_f.abs < 0.01
       ((current - previous) / previous.to_f * 100).round(2)
     end
 
     def period_totals(scope)
-      count, gross, refund, product_cost, freight_amount, discount_amount, commission_amount, operational_cost, tax_amount, margin = scope.pick(
+      count, gross, refund, discount_amount, commission_amount, operational_cost = scope.pick(
         Arel.sql("COUNT(*)"),
         Arel.sql("COALESCE(SUM(gross_value), 0)"),
         Arel.sql("COALESCE(SUM(refund_amount), 0)"),
-        Arel.sql("COALESCE(SUM(cost_price), 0)"),
-        Arel.sql("COALESCE(SUM(#{freight_amount_sql}), 0)"),
         Arel.sql("COALESCE(SUM(discount), 0)"),
         Arel.sql("COALESCE(SUM(commission), 0)"),
-        Arel.sql("COALESCE(SUM(operational_cost), 0)"),
-        Arel.sql("COALESCE(SUM(#{tax_amount_sql}), 0)"),
-        Arel.sql("COALESCE(SUM(#{margin_amount_sql}), 0)")
-      ) || [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        Arel.sql("COALESCE(SUM(operational_cost), 0)")
+      ) || [0, 0, 0, 0, 0, 0]
 
       gross_f = gross.to_f
-      net_f   = gross_f - refund.to_f
-      margin_f = margin.to_f
+      discounts_f = discount_amount.to_f
+      refunds_f = refund.to_f
+      net_f = gross_f - discounts_f - refunds_f
+      product_cost_f = product_cost_for(scope)
+      freight_f = freight_for(scope)
+      taxes_f = taxes_for(scope)
+      result_f = net_f - product_cost_f - freight_f - commission_amount.to_f - taxes_f - operational_cost.to_f
 
       {
         count:            count,
         gross:            gross_f,
         net:              net_f,
-        product_cost:     product_cost.to_f,
-        freight:          freight_amount.to_f,
-        discounts:        discount_amount.to_f,
+        refunds:          refunds_f,
+        product_cost:     product_cost_f,
+        freight:          freight_f,
+        discounts:        discounts_f,
         commissions:      commission_amount.to_f,
         operational_cost: operational_cost.to_f,
-        taxes:            tax_amount.to_f,
-        margin:           margin_f,
-        profit:           margin_f - refund.to_f,
-        margin_pct:       gross_f > 0 ? (margin_f / gross_f * 100) : 0,
-        aov:              count > 0 ? (gross_f / count) : 0
+        taxes:            taxes_f,
+        result:           result_f,
+        profit:           result_f,
+        margin:           result_f,
+        margin_pct:       net_f > 0 ? (result_f / net_f * 100) : 0,
+        aov:              count > 0 ? (net_f / count) : 0,
+        discounts_pct:    gross_f > 0 ? (discounts_f / gross_f * 100) : 0
       }
     end
 
@@ -131,19 +147,18 @@ module Dashboard
           Arel.sql("date_trunc('#{trunc}', ordered_at)"),
           Arel.sql("COALESCE(SUM(gross_value), 0)"),
           Arel.sql("COALESCE(SUM(refund_amount), 0)"),
-          Arel.sql("COALESCE(SUM(#{margin_amount_sql}), 0)")
+          Arel.sql("COALESCE(SUM(discount), 0)"),
+          Arel.sql("COUNT(*)")
         )
     end
 
     def build_revenue(scope, rows, granularity, current_totals, prev_totals)
-      by_day = rows.map do |bucket, g, r, _m|
-        { date: format_bucket(bucket, granularity), gross: g.to_f.round(2), net: (g.to_f - r.to_f).round(2) }
-      end
+      by_day = build_revenue_timeline(rows, granularity)
 
       by_channel = scope
         .joins(:channel)
         .group("channels.name")
-        .sum(:gross_value)
+        .sum(Arel.sql("COALESCE(gross_value, 0) - COALESCE(discount, 0) - COALESCE(refund_amount, 0)"))
         .transform_values { |v| v.to_f.round(2) }
 
       {
@@ -157,8 +172,9 @@ module Dashboard
       }
     end
 
-    def build_financial(current_totals, prev_totals)
+    def build_financial(current_totals, prev_totals, data_quality)
       product_cost = current_totals[:product_cost].round(2)
+      financial_available = data_quality[:financial_status] == "complete"
 
       {
         product_cost: product_cost,
@@ -167,26 +183,146 @@ module Dashboard
         discounts: current_totals[:discounts].round(2),
         commissions: current_totals[:commissions].round(2),
         operational_cost: current_totals[:operational_cost].round(2),
-        refunds: (current_totals[:gross] - current_totals[:net]).round(2),
-        profit: current_totals[:profit].round(2),
-        margin: current_totals[:margin].round(2),
-        margin_pct: current_totals[:margin_pct].round(2),
+        refunds: current_totals[:refunds].round(2),
+        profit: financial_available ? current_totals[:profit].round(2) : nil,
+        margin: financial_available ? current_totals[:margin].round(2) : nil,
+        margin_pct: financial_available ? current_totals[:margin_pct].round(2) : nil,
+        profit_available: financial_available,
+        margin_available: financial_available,
+        unavailable_reason: financial_available ? nil : data_quality[:financial_status_reason],
         product_cost_vs_previous_pct: pct_change(product_cost, prev_totals[:product_cost]),
-        profit_vs_previous_pct: pct_change(current_totals[:profit], prev_totals[:profit])
+        profit_vs_previous_pct: financial_available ? pct_change(current_totals[:profit], prev_totals[:profit]) : nil
       }
     end
 
-    def build_margin(rows, granularity, current_totals, prev_totals)
-      trend = rows.map do |bucket, g, _r, m|
-        gf = g.to_f
-        { date: format_bucket(bucket, granularity), pct: gf > 0 ? (m.to_f / gf * 100).round(2) : 0 }
-      end
+    def build_margin(rows, granularity, current_totals, prev_totals, data_quality)
+      trend = []
+      financial_available = data_quality[:financial_status] == "complete"
 
       {
-        avg_pct:                current_totals[:margin_pct].round(2),
-        avg_pct_vs_previous_pct: pct_change(current_totals[:margin_pct], prev_totals[:margin_pct]),
-        trend:                  trend
+        avg_pct:                  financial_available ? current_totals[:margin_pct].round(2) : nil,
+        avg_pct_vs_previous_pct:  financial_available ? pct_change(current_totals[:margin_pct], prev_totals[:margin_pct]) : nil,
+        available:                financial_available,
+        unavailable_reason:       financial_available ? nil : data_quality[:financial_status_reason],
+        trend:                    trend
       }
+    end
+
+    def build_kpis(current_totals, prev_totals, data_quality)
+      margin_available = data_quality[:financial_status] == "complete"
+
+      {
+        gross_revenue: current_totals[:gross].round(2),
+        net_revenue: current_totals[:net].round(2),
+        net_revenue_vs_previous_pct: pct_change(current_totals[:net], prev_totals[:net]),
+        orders_count: current_totals[:count],
+        orders_vs_previous_pct: pct_change(current_totals[:count], prev_totals[:count]),
+        average_ticket: current_totals[:aov].round(2),
+        average_ticket_vs_previous_pct: pct_change(current_totals[:aov], prev_totals[:aov]),
+        discounts_total: current_totals[:discounts].round(2),
+        discounts_percentage: current_totals[:discounts_pct].round(2),
+        contribution_margin: margin_available ? current_totals[:margin_pct].round(2) : nil,
+        contribution_margin_available: margin_available,
+        contribution_margin_unavailable_reason: margin_available ? nil : data_quality[:financial_status_reason],
+        financial_coverage_percentage: data_quality[:coverage_percentage],
+        complete_orders_count: data_quality[:complete_orders_count],
+        incomplete_orders_count: data_quality[:incomplete_orders_count]
+      }
+    end
+
+    def build_financial_composition(current_totals, data_quality)
+      result_available = data_quality[:financial_status] == "complete"
+      incomplete_reason = data_quality[:financial_status_reason]
+
+      {
+        gross_revenue: composition_line(current_totals[:gross], "available", "Soma de gross_value dos pedidos válidos."),
+        discounts: composition_line(current_totals[:discounts], "available", "Soma de discount dos pedidos válidos."),
+        refunds: composition_line(current_totals[:refunds], "available", "Soma de refund_amount dos pedidos válidos."),
+        net_revenue: composition_line(current_totals[:net], "available", "Receita bruta menos descontos e reembolsos."),
+        product_cost: composition_line(
+          current_totals[:product_cost],
+          data_quality[:missing_cost_orders_count].positive? ? "incomplete" : "available",
+          "CMV calculado por order_items.quantity x order_items.unit_cost para itens com custo conhecido.",
+          data_quality[:missing_cost_orders_count].positive? ? "Existem pedidos com item sem custo completo." : nil
+        ),
+        freight: composition_line(
+          current_totals[:freight],
+          data_quality[:orders_without_freight].positive? ? "incomplete" : "available",
+          freight_tooltip,
+          data_quality[:orders_without_freight].positive? ? "Existem pedidos sem frete real." : nil
+        ),
+        commissions: composition_line(current_totals[:commissions], "available", "Soma de commission persistida nos pedidos."),
+        taxes: composition_line(
+          tax_source_configured? ? current_totals[:taxes] : nil,
+          tax_source_configured? ? (data_quality[:orders_without_tax].positive? ? "incomplete" : "available") : "not_configured",
+          tax_source_configured? ? "Soma de tax_amount dos pedidos." : "Nenhuma fonte de impostos configurada no Pricecom.",
+          data_quality[:orders_without_tax].positive? ? "Existem pedidos sem imposto." : nil
+        ),
+        operational_costs: composition_line(current_totals[:operational_cost], "available", "Soma de operational_cost persistida nos pedidos."),
+        result: composition_line(
+          result_available ? current_totals[:result] : nil,
+          result_available ? "available" : "incomplete",
+          "Receita líquida - CMV - frete - comissões - impostos - custos operacionais.",
+          result_available ? nil : incomplete_reason
+        ),
+        result_available: result_available,
+        result_unavailable_reason: result_available ? nil : incomplete_reason
+      }
+    end
+
+    def build_revenue_timeline(rows, granularity)
+      rows.map do |bucket, gross, refund, discount, orders_count|
+        gross_f = gross.to_f
+        discounts_f = discount.to_f
+        refunds_f = refund.to_f
+        net_f = gross_f - discounts_f - refunds_f
+        orders_count_i = orders_count.to_i
+
+        {
+          date: format_bucket(bucket, granularity),
+          gross: gross_f.round(2),
+          discounts: discounts_f.round(2),
+          refunds: refunds_f.round(2),
+          net: net_f.round(2),
+          orders_count: orders_count_i,
+          average_ticket: orders_count_i.positive? ? (net_f / orders_count_i).round(2) : 0
+        }
+      end
+    end
+
+    def build_sales_by_channel(scope, current_totals)
+      rows = scope
+        .joins(:channel)
+        .group("channels.id", "channels.name")
+        .pluck(
+          Arel.sql("channels.name"),
+          Arel.sql("COUNT(*)"),
+          Arel.sql("COALESCE(SUM(gross_value), 0)"),
+          Arel.sql("COALESCE(SUM(discount), 0)"),
+          Arel.sql("COALESCE(SUM(refund_amount), 0)")
+        )
+
+      total_net = current_totals[:net]
+      rows.filter_map do |name, count, gross, discount, refund|
+        count_i = count.to_i
+        next if count_i.zero?
+
+        gross_f = gross.to_f
+        discount_f = discount.to_f
+        refund_f = refund.to_f
+        net_f = gross_f - discount_f - refund_f
+
+        {
+          channel: name,
+          net_revenue: net_f.round(2),
+          gross_revenue: gross_f.round(2),
+          discounts: discount_f.round(2),
+          refunds: refund_f.round(2),
+          orders_count: count_i,
+          average_ticket: count_i.positive? ? (net_f / count_i).round(2) : 0,
+          share_percentage: total_net.positive? ? (net_f / total_net * 100).round(2) : 0
+        }
+      end.sort_by { |row| -row[:net_revenue] }
     end
 
     def build_data_sources
@@ -207,15 +343,88 @@ module Dashboard
         .first
       log_metadata = latest_idworks_cost_log&.metadata || {}
 
+      latest_yampi_log = tenant.integration_sync_logs
+        .where(action: "yampi_order_polling")
+        .order(created_at: :desc)
+        .first
+      latest_idworks_order_log = tenant.integration_sync_logs
+        .where(action: "idworks_order_sync")
+        .order(created_at: :desc)
+        .first
+      order_ids_with_items = non_gift_items.distinct.pluck(:order_id)
+      missing_item_order_ids = scope.where.not(id: order_ids_with_items).pluck(:id)
+      missing_cost_order_ids = (missing_item_order_ids + non_gift_items
+        .where("order_items.product_id IS NULL OR order_items.unit_cost IS NULL OR order_items.unit_cost <= 0")
+        .distinct
+        .pluck(:order_id)).uniq
+      missing_freight_order_ids = data_source_for("freight") == "idworks" ? scope.where(real_freight_cost: nil).pluck(:id) : []
+      missing_tax_order_ids = tax_source_configured? ? scope.where(tax_amount: nil).pluck(:id) : []
+      incomplete_order_ids = (missing_cost_order_ids + missing_freight_order_ids + missing_tax_order_ids).uniq
+      total_orders = scope.count
+      complete_orders = total_orders - incomplete_order_ids.size
+      coverage = total_orders.positive? ? (complete_orders.to_f / total_orders * 100).round(2) : 100.0
+      status = coverage >= 95 ? "healthy" : coverage >= 70 ? "attention" : "critical"
+      incomplete_reasons = []
+      incomplete_reasons << "#{missing_cost_order_ids.size} pedido(s) sem custo completo" if missing_cost_order_ids.any?
+      incomplete_reasons << "#{missing_freight_order_ids.size} pedido(s) sem frete real" if missing_freight_order_ids.any?
+      incomplete_reasons << "#{missing_tax_order_ids.size} pedido(s) sem imposto" if missing_tax_order_ids.any?
+      financial_status_reason = incomplete_order_ids.empty? ? nil : "Indisponível — #{incomplete_reasons.join(', ')}."
+
       {
-        orders_without_cost: scope.where("COALESCE(cost_price, 0) = 0").count,
+        complete_orders_count: complete_orders,
+        incomplete_orders_count: incomplete_order_ids.size,
+        missing_cost_orders_count: missing_cost_order_ids.size,
+        orders_without_cost: missing_cost_order_ids.size,
         order_items_without_cost: non_gift_items.where("unit_cost IS NULL OR unit_cost = 0").count,
         order_items_without_product: non_gift_items.where(product_id: nil).count,
-        orders_without_freight: data_source_for("freight") == "idworks" ? scope.where(real_freight_cost: nil).count : 0,
-        orders_without_tax: data_source_for("tax").present? ? scope.where(tax_amount: nil).count : 0,
+        orders_without_freight: missing_freight_order_ids.size,
+        orders_without_tax: missing_tax_order_ids.size,
+        coverage_percentage: coverage,
+        financial_coverage_percentage: coverage,
+        financial_status: incomplete_order_ids.empty? ? "complete" : "incomplete",
+        financial_status_reason: financial_status_reason,
+        health_status: status,
         products_without_sku_match: log_metadata["unmatched_count"].to_i,
+        unmatched_skus_count: log_metadata["unmatched_count"].to_i,
         latest_idworks_product_cost_sync_at: latest_idworks_cost_log&.finished_at,
+        latest_idworks_order_sync_at: latest_idworks_order_log&.finished_at,
+        latest_idworks_sync_at: [latest_idworks_cost_log&.finished_at, latest_idworks_order_log&.finished_at].compact.max,
+        latest_yampi_order_sync_at: latest_yampi_log&.finished_at,
         latest_idworks_unmatched_skus: Array(log_metadata["unmatched"]).first(10)
+      }.merge(integration_health_metadata(latest_yampi_log, latest_idworks_cost_log, latest_idworks_order_log))
+    end
+
+    def integration_health_metadata(latest_yampi_log, latest_idworks_cost_log, latest_idworks_order_log)
+      delayed = []
+      error_logs = tenant.integration_sync_logs
+        .where(action: %w[yampi_order_polling idworks_product_cost_sync idworks_order_sync])
+        .where(status: "error")
+        .order(created_at: :desc)
+        .limit(5)
+
+      yampi_credentials = tenant.channel_credentials.where(channel: "yampi", status: "active")
+      yampi_credentials = yampi_credentials.where(polling_enabled: true) if ChannelCredential.column_names.include?("polling_enabled")
+
+      if yampi_credentials.exists?
+        last_yampi_at = latest_yampi_log&.finished_at
+        delayed << { provider: "yampi", reason: "polling atrasado" } if last_yampi_at.nil? || last_yampi_at < 15.minutes.ago
+      end
+
+      if tenant.integrations.where(provider: "idworks", status: "connected").exists?
+        latest_idworks_at = [latest_idworks_cost_log&.finished_at, latest_idworks_order_log&.finished_at].compact.max
+        delayed << { provider: "idworks", reason: "sincronização atrasada" } if latest_idworks_at.nil? || latest_idworks_at < 12.hours.ago
+      end
+
+      {
+        delayed_integrations: delayed,
+        integration_errors: error_logs.map { |log|
+          {
+            action: log.action,
+            status: log.status,
+            error_message: log.error_message,
+            finished_at: log.finished_at
+          }
+        }
       }
     end
 
@@ -234,7 +443,10 @@ module Dashboard
       rows = scope
         .joins(:channel)
         .group("channels.name")
-        .pluck(Arel.sql("channels.name"), Arel.sql("COALESCE(AVG(gross_value), 0)"))
+        .pluck(
+          Arel.sql("channels.name"),
+          Arel.sql("COALESCE(AVG(COALESCE(gross_value, 0) - COALESCE(discount, 0) - COALESCE(refund_amount, 0)), 0)")
+        )
 
       rows.each_with_object({}) { |(name, avg), hash| hash[name] = avg.to_f.round(2) }
     end
@@ -244,7 +456,12 @@ module Dashboard
     end
 
     def build_revenue_channel_series(scope, granularity)
-      build_channel_bucket_series(scope, granularity, "COALESCE(SUM(gross_value), 0)", :gross) { |v| v.to_f.round(2) }
+      build_channel_bucket_series(
+        scope,
+        granularity,
+        "COALESCE(SUM(COALESCE(gross_value, 0) - COALESCE(discount, 0) - COALESCE(refund_amount, 0)), 0)",
+        :gross
+      ) { |v| v.to_f.round(2) }
     end
 
     def build_channel_bucket_series(scope, granularity, aggregate_sql, value_key)
@@ -350,6 +567,7 @@ module Dashboard
         .joins(:order, :product)
         .where(orders: { tenant_id: tenant.id, ordered_at: period_range(period) })
         .where(is_gift: false)
+        .where("order_items.unit_cost IS NOT NULL AND order_items.unit_cost > 0")
         .group("products.id", "products.sku", "products.name")
         .having("SUM(order_items.quantity * order_items.unit_price - order_items.discount) > 0")
         .order(Arel.sql(
@@ -432,22 +650,49 @@ module Dashboard
       @data_sources[data_type]
     end
 
-    def freight_amount_sql
-      data_source_for("freight") == "idworks" ? "COALESCE(real_freight_cost, 0)" : "COALESCE(freight, 0)"
+    def product_cost_for(scope)
+      item_scope_for(scope)
+        .where("unit_cost IS NOT NULL AND unit_cost > 0")
+        .sum(Arel.sql("quantity * unit_cost"))
+        .to_f
     end
 
-    def tax_amount_sql
-      data_source_for("tax").present? ? "COALESCE(tax_amount, 0)" : "0"
+    def freight_for(scope)
+      if data_source_for("freight") == "idworks"
+        scope.where.not(real_freight_cost: nil).sum(:real_freight_cost).to_f
+      else
+        scope.sum(:freight).to_f
+      end
     end
 
-    def margin_amount_sql
-      "COALESCE(gross_value, 0) - COALESCE(cost_price, 0) - #{freight_amount_sql} - " \
-        "COALESCE(discount, 0) - COALESCE(commission, 0) - COALESCE(operational_cost, 0) - #{tax_amount_sql}"
+    def taxes_for(scope)
+      tax_source_configured? ? scope.where.not(tax_amount: nil).sum(:tax_amount).to_f : 0.0
+    end
+
+    def tax_source_configured?
+      data_source_for("tax").present?
+    end
+
+    def freight_tooltip
+      data_source_for("freight") == "idworks" ? "Soma de real_freight_cost importado do IDWorks." : "Soma de freight dos pedidos."
+    end
+
+    def composition_line(value, status, tooltip, reason = nil)
+      {
+        value: value&.to_f&.round(2),
+        available: status == "available",
+        status: status,
+        tooltip: tooltip,
+        reason: reason
+      }
+    end
+
+    def item_scope_for(scope)
+      OrderItem.where(order_id: scope.select(:id), is_gift: false)
     end
 
     def item_cost_amount_sql
-      unit_cost_sql = data_source_for("cost") == "idworks" ? "COALESCE(products.cost_price, 0)" : "COALESCE(order_items.unit_cost, 0)"
-      "order_items.quantity * #{unit_cost_sql}"
+      "order_items.quantity * order_items.unit_cost"
     end
   end
 end
