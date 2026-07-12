@@ -48,7 +48,7 @@ module Api
       def sync
         integration = current_tenant.integrations.find_by(provider: "idworks")
 
-        if integration.nil? || integration.status == "disconnected"
+        if integration.nil? || integration.status != "connected"
           return render json: { error: "idworks ainda não está conectado" }, status: :unprocessable_entity
         end
 
@@ -59,6 +59,14 @@ module Api
           success:               !cost_result.error? && !order_result.error?,
           products_synced_count: cost_result.synced_count,
           orders_synced_count:   order_result.synced_count,
+          products_received_count: cost_result.metadata[:received_count] || cost_result.metadata["received_count"],
+          products_updated_count: cost_result.metadata[:product_updated_count] || cost_result.metadata["product_updated_count"],
+          products_ignored_count: cost_result.metadata[:ignored_count] || cost_result.metadata["ignored_count"],
+          products_error_count: cost_result.metadata[:error_count] || cost_result.metadata["error_count"],
+          order_freights_received_count: order_result.metadata[:received_count] || order_result.metadata["received_count"],
+          order_freights_updated_count: order_result.metadata[:updated_count] || order_result.metadata["updated_count"],
+          order_freights_ignored_count: order_result.metadata[:ignored_count] || order_result.metadata["ignored_count"],
+          orders_recalculated_count: cost_result.metadata[:orders_recalculated_count] || cost_result.metadata["orders_recalculated_count"],
           error_message:         [ cost_result.error_message, order_result.error_message ].compact.first
         }
       end

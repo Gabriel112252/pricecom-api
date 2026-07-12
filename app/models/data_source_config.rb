@@ -3,6 +3,12 @@ class DataSourceConfig < ApplicationRecord
 
   DATA_TYPES = %w[cost freight tax payment_reconciliation].freeze
   SOURCES    = %w[idworks pagarme].freeze
+  AVAILABLE_SOURCES_BY_DATA_TYPE = {
+    "cost" => %w[idworks],
+    "freight" => %w[idworks],
+    "tax" => [],
+    "payment_reconciliation" => %w[pagarme]
+  }.freeze
 
   # Which source a data_type defaults to the first time its provider is
   # connected (see IdworksController#connect / PagarmeController#connect and
@@ -40,5 +46,9 @@ class DataSourceConfig < ApplicationRecord
 
   def self.source_for(tenant, data_type)
     tenant.data_source_configs.enabled.find_by(data_type: data_type)&.source
+  end
+
+  def self.available_sources_for(data_type)
+    AVAILABLE_SOURCES_BY_DATA_TYPE.fetch(data_type.to_s, SOURCES)
   end
 end

@@ -68,8 +68,31 @@ module Api
           settings:               integration.settings,
           credentials_configured: integration.credentials_configured?,
           last_synced_at:         integration.last_synced_at,
+          recent_logs:            recent_logs_for(integration),
           created_at:             integration.created_at,
           updated_at:             integration.updated_at
+        }
+      end
+
+      def recent_logs_for(integration)
+        integration.integration_sync_logs
+          .order(created_at: :desc)
+          .limit(5)
+          .map { |log| log_json(log) }
+      end
+
+      def log_json(log)
+        {
+          id:            log.id,
+          action:        log.action,
+          status:        log.status,
+          error_message: log.error_message,
+          synced_count:  log.metadata["synced_count"],
+          received_count: log.metadata["received_count"],
+          updated_count: log.metadata["updated_count"] || log.metadata["product_updated_count"],
+          ignored_count: log.metadata["ignored_count"],
+          started_at:    log.started_at,
+          finished_at:   log.finished_at
         }
       end
     end

@@ -19,7 +19,8 @@ module Api
           {
             data_type: data_type,
             source:    config&.source,
-            enabled:   config.nil? ? true : config.enabled
+            enabled:   config.nil? ? true : config.enabled,
+            available_sources: DataSourceConfig.available_sources_for(data_type)
           }
         }
       end

@@ -32,7 +32,7 @@ module Integrations
       client.authenticate!
     end
 
-    # → [{ sku:, cost_last_purchase:, cost_average: }]
+    # → [{ idworks_id:, sku:, cost_last_purchase:, cost_average: }]
     def fetch_products
       products = []
       page = 1
@@ -81,7 +81,8 @@ module Integrations
 
     def normalize_product(raw)
       {
-        sku:                raw["Sku"] || raw["IDSku"]&.to_s,
+        idworks_id:         raw["IDSku"]&.to_s,
+        sku:                raw["Sku"]&.to_s,
         cost_last_purchase: to_decimal(raw["CostLastPurchase"]),
         cost_average:       to_decimal(raw["CostAverage"])
       }

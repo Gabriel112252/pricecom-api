@@ -55,8 +55,8 @@ RSpec.describe Integrations::IdworksAdapter do
       raws = adapter.fetch_products
 
       expect(raws).to contain_exactly(
-        { sku: "CAM-001-P-AZUL", cost_last_purchase: BigDecimal("60.00"), cost_average: BigDecimal("58.50") },
-        { sku: "CAN-001", cost_last_purchase: nil, cost_average: BigDecimal("11.20") }
+        { idworks_id: "12345", sku: "CAM-001-P-AZUL", cost_last_purchase: BigDecimal("60.00"), cost_average: BigDecimal("58.50") },
+        { idworks_id: "12346", sku: "CAN-001", cost_last_purchase: nil, cost_average: BigDecimal("11.20") }
       )
     end
 

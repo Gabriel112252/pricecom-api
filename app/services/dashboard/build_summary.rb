@@ -32,8 +32,11 @@ module Dashboard
         period:                   { from: period[:from].iso8601, to: period[:to].iso8601 },
         granularity:              granularity,
         revenue:                  build_revenue(orders_scope, period_rows, granularity, current_totals, prev_totals),
+        financial:                build_financial(current_totals, prev_totals),
         margin:                   build_margin(period_rows, granularity, current_totals, prev_totals),
         orders:                   build_orders(orders_scope, granularity, current_totals, prev_totals),
+        data_sources:             build_data_sources,
+        data_quality:             build_data_quality(orders_scope),
         conflicts:                build_conflicts,
         reconciliation:           build_reconciliation(period),
         top_products_by_margin:   build_top_products_by_margin(period),
@@ -85,23 +88,37 @@ module Dashboard
     end
 
     def period_totals(scope)
-      count, gross, refund, margin = scope.pick(
+      count, gross, refund, product_cost, freight_amount, discount_amount, commission_amount, operational_cost, tax_amount, margin = scope.pick(
         Arel.sql("COUNT(*)"),
         Arel.sql("COALESCE(SUM(gross_value), 0)"),
         Arel.sql("COALESCE(SUM(refund_amount), 0)"),
-        Arel.sql("COALESCE(SUM(margin), 0)")
-      ) || [0, 0, 0, 0]
+        Arel.sql("COALESCE(SUM(cost_price), 0)"),
+        Arel.sql("COALESCE(SUM(#{freight_amount_sql}), 0)"),
+        Arel.sql("COALESCE(SUM(discount), 0)"),
+        Arel.sql("COALESCE(SUM(commission), 0)"),
+        Arel.sql("COALESCE(SUM(operational_cost), 0)"),
+        Arel.sql("COALESCE(SUM(#{tax_amount_sql}), 0)"),
+        Arel.sql("COALESCE(SUM(#{margin_amount_sql}), 0)")
+      ) || [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 
       gross_f = gross.to_f
       net_f   = gross_f - refund.to_f
+      margin_f = margin.to_f
 
       {
-        count:      count,
-        gross:      gross_f,
-        net:        net_f,
-        margin:     margin.to_f,
-        margin_pct: gross_f > 0 ? (margin.to_f / gross_f * 100) : 0,
-        aov:        count > 0 ? (gross_f / count) : 0
+        count:            count,
+        gross:            gross_f,
+        net:              net_f,
+        product_cost:     product_cost.to_f,
+        freight:          freight_amount.to_f,
+        discounts:        discount_amount.to_f,
+        commissions:      commission_amount.to_f,
+        operational_cost: operational_cost.to_f,
+        taxes:            tax_amount.to_f,
+        margin:           margin_f,
+        profit:           margin_f - refund.to_f,
+        margin_pct:       gross_f > 0 ? (margin_f / gross_f * 100) : 0,
+        aov:              count > 0 ? (gross_f / count) : 0
       }
     end
 
@@ -114,7 +131,7 @@ module Dashboard
           Arel.sql("date_trunc('#{trunc}', ordered_at)"),
           Arel.sql("COALESCE(SUM(gross_value), 0)"),
           Arel.sql("COALESCE(SUM(refund_amount), 0)"),
-          Arel.sql("COALESCE(SUM(margin), 0)")
+          Arel.sql("COALESCE(SUM(#{margin_amount_sql}), 0)")
         )
     end
 
@@ -140,6 +157,25 @@ module Dashboard
       }
     end
 
+    def build_financial(current_totals, prev_totals)
+      product_cost = current_totals[:product_cost].round(2)
+
+      {
+        product_cost: product_cost,
+        freight: current_totals[:freight].round(2),
+        taxes: current_totals[:taxes].round(2),
+        discounts: current_totals[:discounts].round(2),
+        commissions: current_totals[:commissions].round(2),
+        operational_cost: current_totals[:operational_cost].round(2),
+        refunds: (current_totals[:gross] - current_totals[:net]).round(2),
+        profit: current_totals[:profit].round(2),
+        margin: current_totals[:margin].round(2),
+        margin_pct: current_totals[:margin_pct].round(2),
+        product_cost_vs_previous_pct: pct_change(product_cost, prev_totals[:product_cost]),
+        profit_vs_previous_pct: pct_change(current_totals[:profit], prev_totals[:profit])
+      }
+    end
+
     def build_margin(rows, granularity, current_totals, prev_totals)
       trend = rows.map do |bucket, g, _r, m|
         gf = g.to_f
@@ -150,6 +186,36 @@ module Dashboard
         avg_pct:                current_totals[:margin_pct].round(2),
         avg_pct_vs_previous_pct: pct_change(current_totals[:margin_pct], prev_totals[:margin_pct]),
         trend:                  trend
+      }
+    end
+
+    def build_data_sources
+      DataSourceConfig::DATA_TYPES.each_with_object({}) do |data_type, hash|
+        hash[data_type] = {
+          source: data_source_for(data_type),
+          available_sources: DataSourceConfig.available_sources_for(data_type)
+        }
+      end
+    end
+
+    def build_data_quality(scope)
+      items = OrderItem.where(order_id: scope.select(:id))
+      non_gift_items = items.where(is_gift: false)
+      latest_idworks_cost_log = tenant.integration_sync_logs
+        .where(action: "idworks_product_cost_sync")
+        .order(created_at: :desc)
+        .first
+      log_metadata = latest_idworks_cost_log&.metadata || {}
+
+      {
+        orders_without_cost: scope.where("COALESCE(cost_price, 0) = 0").count,
+        order_items_without_cost: non_gift_items.where("unit_cost IS NULL OR unit_cost = 0").count,
+        order_items_without_product: non_gift_items.where(product_id: nil).count,
+        orders_without_freight: data_source_for("freight") == "idworks" ? scope.where(real_freight_cost: nil).count : 0,
+        orders_without_tax: data_source_for("tax").present? ? scope.where(tax_amount: nil).count : 0,
+        products_without_sku_match: log_metadata["unmatched_count"].to_i,
+        latest_idworks_product_cost_sync_at: latest_idworks_cost_log&.finished_at,
+        latest_idworks_unmatched_skus: Array(log_metadata["unmatched"]).first(10)
       }
     end
 
@@ -288,7 +354,7 @@ module Dashboard
         .having("SUM(order_items.quantity * order_items.unit_price - order_items.discount) > 0")
         .order(Arel.sql(
           "(SUM(order_items.quantity * order_items.unit_price - order_items.discount) " \
-          "- SUM(order_items.quantity * order_items.unit_cost)) " \
+          "- SUM(#{item_cost_amount_sql})) " \
           "/ SUM(order_items.quantity * order_items.unit_price - order_items.discount) DESC"
         ))
         .limit(10)
@@ -296,7 +362,7 @@ module Dashboard
           Arel.sql("products.sku"),
           Arel.sql("products.name"),
           Arel.sql("SUM(order_items.quantity * order_items.unit_price - order_items.discount)"),
-          Arel.sql("SUM(order_items.quantity * order_items.unit_cost)")
+          Arel.sql("SUM(#{item_cost_amount_sql})")
         )
 
       rows.map do |sku, name, revenue, cost|
@@ -359,6 +425,29 @@ module Dashboard
 
     def period_range(period)
       period[:from].beginning_of_day..period[:to].end_of_day
+    end
+
+    def data_source_for(data_type)
+      @data_sources ||= tenant.data_source_configs.enabled.pluck(:data_type, :source).to_h
+      @data_sources[data_type]
+    end
+
+    def freight_amount_sql
+      data_source_for("freight") == "idworks" ? "COALESCE(real_freight_cost, 0)" : "COALESCE(freight, 0)"
+    end
+
+    def tax_amount_sql
+      data_source_for("tax").present? ? "COALESCE(tax_amount, 0)" : "0"
+    end
+
+    def margin_amount_sql
+      "COALESCE(gross_value, 0) - COALESCE(cost_price, 0) - #{freight_amount_sql} - " \
+        "COALESCE(discount, 0) - COALESCE(commission, 0) - COALESCE(operational_cost, 0) - #{tax_amount_sql}"
+    end
+
+    def item_cost_amount_sql
+      unit_cost_sql = data_source_for("cost") == "idworks" ? "COALESCE(products.cost_price, 0)" : "COALESCE(order_items.unit_cost, 0)"
+      "order_items.quantity * #{unit_cost_sql}"
     end
   end
 end

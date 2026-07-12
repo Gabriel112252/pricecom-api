@@ -1,11 +1,8 @@
 module Integrations
   module Idworks
-    # Pulls real cost per SKU from idworks (GET /sku) and applies it onto
-    # matching Products — mirrors ProductSyncService's shape (adapter
-    # build/authenticate, per-item error collection, IntegrationSyncLog),
-    # but idworks is the source of truth for cost, not a sales channel's
-    # catalog, so this only ever touches Product, never
-    # ChannelProductListing.
+    # Pulls real cost per SKU from idworks (GET /sku), applies it onto
+    # matching Products, then propagates the unit cost to matching order items
+    # and recalculates the affected orders.
     #
     # Cost field priority (confirmed via swagger.idworks.com.br on
     # 2026-07-10): CostSet only appears on the /sku/{IDSku} detail
@@ -43,34 +40,37 @@ module Integrations
 
       def call
         unless sync_cost?
-          return Result.new(outcome: :skipped, synced_count: 0, error_message: nil, metadata: { reason: "cost não está configurado para idworks" })
+          log = start_log
+          metadata = count_metadata.merge(reason: "cost não está configurado para idworks")
+          finish_log(log, status: "skipped", metadata: metadata, errors: [])
+          return Result.new(outcome: :skipped, synced_count: 0, error_message: nil, metadata: metadata)
         end
 
         log     = start_log
         adapter = IdworksAdapter.new(integration.credentials)
         adapter.authenticate
 
-        synced_count, item_errors = sync_all(adapter)
+        sync_all(adapter)
 
         integration.update!(status: "connected", last_synced_at: Time.current)
-        finish_log(log, status: item_errors.empty? ? "success" : "error", synced_count:, errors: item_errors)
+        finish_log(log, status: item_errors.empty? ? "success" : "error", metadata: count_metadata, errors: item_errors)
 
         Result.new(
           outcome: item_errors.empty? ? :success : :error,
-          synced_count: synced_count,
+          synced_count: matched_count,
           error_message: item_errors.first&.fetch(:message, nil),
-          metadata: { errors: item_errors }
+          metadata: count_metadata.merge(errors: item_errors)
         )
       rescue AuthenticationError => e
         integration.update!(status: "error")
-        finish_log(log, status: "error", synced_count: 0, errors: [ { message: e.message } ])
+        finish_log(log, status: "error", metadata: count_metadata, errors: [ { message: e.message } ])
         Result.new(outcome: :error, synced_count: 0, error_message: e.message, metadata: {})
       rescue RateLimitError => e
-        finish_log(log, status: "error", synced_count: 0, errors: [ { message: "rate_limited: #{e.message}" } ])
+        finish_log(log, status: "error", metadata: count_metadata, errors: [ { message: "rate_limited: #{e.message}" } ])
         Result.new(outcome: :error, synced_count: 0, error_message: e.message, metadata: { retry_after: e.retry_after })
       rescue ApiError => e
         integration.update!(status: "error")
-        finish_log(log, status: "error", synced_count: 0, errors: [ { message: e.message } ])
+        finish_log(log, status: "error", metadata: count_metadata, errors: [ { message: e.message } ])
         Result.new(outcome: :error, synced_count: 0, error_message: e.message, metadata: {})
       end
 
@@ -78,38 +78,111 @@ module Integrations
 
       attr_reader :integration, :tenant
 
+      def received_count = @received_count ||= 0
+      def matched_count = @matched_count ||= 0
+      def product_updated_count = @product_updated_count ||= 0
+      def order_items_updated_count = @order_items_updated_count ||= 0
+      def orders_recalculated_count = @orders_recalculated_count ||= 0
+      def ignored = @ignored ||= []
+      def unmatched = @unmatched ||= []
+      def item_errors = @item_errors ||= []
+
       def sync_cost?
         DataSourceConfig.source_for(tenant, "cost") == "idworks"
       end
 
       def sync_all(adapter)
-        synced_count = 0
-        item_errors  = []
+        products = adapter.fetch_products
+        @received_count = products.size
 
-        adapter.fetch_products.each do |raw|
+        products.each do |raw|
           if raw[:sku].blank?
-            item_errors << { sku: nil, message: "sem SKU — ignorado" }
+            record_ignored(raw, "sem SKU")
             next
           end
 
-          applied = apply_to_product(raw)
-          synced_count += 1 if applied
+          apply_to_product(raw)
         rescue => e
           item_errors << { sku: raw[:sku], message: e.message }
         end
-
-        [ synced_count, item_errors ]
       end
 
       def apply_to_product(raw)
         product = tenant.products.find_by(sku: raw[:sku])
-        return false unless product
+        return record_unmatched(raw) unless product
 
-        cost = raw[:cost_last_purchase].presence || raw[:cost_average].presence
-        return false if cost.blank?
+        cost = raw[:cost_last_purchase].nil? ? raw[:cost_average] : raw[:cost_last_purchase]
+        return record_ignored(raw, "sem custo confirmado") if cost.nil?
 
-        product.update!(cost_price: cost)
-        true
+        @matched_count = matched_count + 1
+
+        product.assign_attributes(cost_price: cost, idworks_id: raw[:idworks_id].presence || product.idworks_id)
+        if product.changed?
+          product.save!
+          @product_updated_count = product_updated_count + 1
+        end
+
+        item_updates, order_updates = apply_cost_to_orders(product, cost)
+        @order_items_updated_count = order_items_updated_count + item_updates
+        @orders_recalculated_count = orders_recalculated_count + order_updates
+      end
+
+      def apply_cost_to_orders(product, cost)
+        updated_items = 0
+        order_ids = []
+
+        matching_items_for(product).where(is_gift: false).find_each do |item|
+          changed = false
+
+          if item.product_id.blank?
+            item.product = product
+            changed = true
+          end
+
+          if item.unit_cost != cost
+            item.unit_cost = cost
+            changed = true
+          end
+
+          if changed
+            item.save!
+            updated_items += 1
+            order_ids << item.order_id
+          end
+        end
+
+        recalculated_orders = recalculate_orders(order_ids)
+        [ updated_items, recalculated_orders ]
+      end
+
+      def matching_items_for(product)
+        OrderItem.joins(:order)
+          .where(orders: { tenant_id: tenant.id })
+          .where("order_items.product_id = :product_id OR order_items.sku = :sku", product_id: product.id, sku: product.sku)
+      end
+
+      def recalculate_orders(order_ids)
+        count = 0
+        tenant.orders.where(id: order_ids.uniq).find_each do |order|
+          Orders::RecalculateFinancials.call(order)
+          count += 1
+        end
+        count
+      end
+
+      def record_unmatched(raw)
+        entry = { sku: raw[:sku], idworks_id: raw[:idworks_id], reason: "produto não encontrado no Pricecom" }
+        unmatched << entry
+        ignored << entry
+        Rails.logger.info("[IDWorks] product_cost_sync ignored sku=#{raw[:sku]} idworks_id=#{raw[:idworks_id]} reason=product_not_found")
+        nil
+      end
+
+      def record_ignored(raw, reason)
+        entry = { sku: raw[:sku], idworks_id: raw[:idworks_id], reason: reason }
+        ignored << entry
+        Rails.logger.info("[IDWorks] product_cost_sync ignored sku=#{raw[:sku].presence || '(blank)'} idworks_id=#{raw[:idworks_id]} reason=#{reason}")
+        nil
       end
 
       def start_log
@@ -124,13 +197,31 @@ module Integrations
         )
       end
 
-      def finish_log(log, status:, synced_count:, errors:)
+      def count_metadata
+        {
+          received_count: received_count,
+          matched_count: matched_count,
+          synced_count: matched_count,
+          product_updated_count: product_updated_count,
+          order_items_updated_count: order_items_updated_count,
+          orders_recalculated_count: orders_recalculated_count,
+          ignored_count: ignored.size,
+          unmatched_count: unmatched.size,
+          error_count: item_errors.size,
+          ignored: ignored.first(20),
+          unmatched: unmatched.first(20)
+        }
+      end
+
+      def finish_log(log, status:, metadata:, errors:)
+        return unless log
+
         log.update!(
           status: status,
           finished_at: Time.current,
           duration_ms: ((Time.current - log.started_at) * 1000).round,
           error_message: errors.first&.fetch(:message, nil),
-          metadata: log.metadata.merge(synced_count: synced_count, error_count: errors.size, errors: errors.first(10))
+          metadata: log.metadata.merge(metadata).merge(error_count: errors.size, errors: errors.first(10))
         )
       end
     end

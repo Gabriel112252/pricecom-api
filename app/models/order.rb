@@ -18,15 +18,9 @@ class Order < ApplicationRecord
   scope :cancellations, -> { where(order_type: "cancellation") }
   scope :refunds,      -> { where(order_type: "refund") }
 
-  # real_freight_cost/tax_amount are filled in by Integrations::InvoiceSyncService
-  # once idworks has matched an NF to this order — until then they're nil,
-  # so real_freight_cost falls back to the channel-charged `freight` (the
-  # only freight cost figure available for older/not-yet-synced orders) and
-  # tax_amount, having no prior equivalent, simply contributes 0.
   def calculate_margin
-    effective_freight = real_freight_cost.presence || freight
-    self.margin = gross_value - cost_price - effective_freight - discount - commission - operational_cost - tax_amount.to_f
-    self.margin_pct = gross_value > 0 ? (margin / gross_value * 100).round(2) : 0
+    self.margin = gross_value.to_f - cost_price.to_f - effective_freight_cost - discount.to_f - commission.to_f - operational_cost.to_f - effective_tax_amount
+    self.margin_pct = gross_value.to_f > 0 ? (margin / gross_value.to_f * 100).round(2) : 0
   end
 
   def net_gross_value
@@ -40,5 +34,13 @@ class Order < ApplicationRecord
   def net_margin_pct
     return 0.0 unless gross_value.to_f > 0
     (net_margin / gross_value.to_f * 100).round(2)
+  end
+
+  def effective_freight_cost
+    DataSourceConfig.source_for(tenant, "freight") == "idworks" ? real_freight_cost.to_f : freight.to_f
+  end
+
+  def effective_tax_amount
+    DataSourceConfig.source_for(tenant, "tax").present? ? tax_amount.to_f : 0.0
   end
 end

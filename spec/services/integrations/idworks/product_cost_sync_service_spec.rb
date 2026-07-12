@@ -2,6 +2,7 @@ require "rails_helper"
 
 RSpec.describe Integrations::Idworks::ProductCostSyncService do
   let(:tenant) { Tenant.create!(name: "Loja Teste", slug: "loja-teste-#{SecureRandom.hex(4)}") }
+  let(:channel) { tenant.channels.create!(name: "Yampi", platform: "yampi") }
   let(:integration) do
     tenant.integrations.create!(
       provider: "idworks", name: "idworks", status: "connected",
@@ -44,6 +45,27 @@ RSpec.describe Integrations::Idworks::ProductCostSyncService do
       described_class.call(integration)
 
       expect(tenant.products.find_by(sku: "CAN-001").cost_price).to eq(BigDecimal("11.20"))
+    end
+
+    it "propagates product cost to matching order items and recalculates order margin" do
+      product = tenant.products.find_by(sku: "CAM-001-P-AZUL")
+      order = tenant.orders.create!(
+        channel: channel,
+        external_id: "ORDER-1",
+        order_number: "ORDER-1",
+        gross_value: 150,
+        freight: 10,
+        ordered_at: Time.current,
+        order_type: "sale"
+      )
+      order.order_items.create!(product: product, sku: product.sku, name: product.name, quantity: 2, unit_price: 75, unit_cost: nil)
+
+      result = described_class.call(integration)
+
+      expect(result.metadata[:order_items_updated_count]).to eq(1)
+      expect(order.order_items.first.reload.unit_cost).to eq(BigDecimal("60.00"))
+      expect(order.reload.cost_price).to eq(BigDecimal("120.00"))
+      expect(order.margin).to eq(BigDecimal("20.0"))
     end
 
     it "never touches tax_rate — idworks has no usable tax field" do

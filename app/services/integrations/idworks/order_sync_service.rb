@@ -39,17 +39,20 @@ module Integrations
 
       def call
         unless freight_sync_enabled?
-          return Result.new(outcome: :skipped, synced_count: 0, error_message: nil, metadata: { reason: "freight não está configurado para idworks" })
+          log = start_log
+          metadata = count_metadata.merge(reason: "freight não está configurado para idworks")
+          finish_log(log, status: "skipped", metadata: metadata, errors: [])
+          return Result.new(outcome: :skipped, synced_count: 0, error_message: nil, metadata: metadata)
         end
 
         log     = start_log
         adapter = IdworksAdapter.new(integration.credentials)
         adapter.authenticate
 
-        synced_count, unmatched, item_errors = sync_all(adapter)
+        sync_all(adapter)
 
         integration.update!(status: "connected", last_synced_at: Time.current)
-        finish_log(log, status: item_errors.empty? ? "success" : "error", synced_count:, unmatched:, errors: item_errors)
+        finish_log(log, status: item_errors.empty? ? "success" : "error", metadata: count_metadata, errors: item_errors)
 
         # An idworks order with no matching Pricecom Order is routine (not
         # every idworks order has necessarily synced into Pricecom yet) and
@@ -57,20 +60,20 @@ module Integrations
         # applying a matched order does.
         Result.new(
           outcome: item_errors.empty? ? :success : :error,
-          synced_count: synced_count,
+          synced_count: updated_count,
           error_message: item_errors.first&.fetch(:message, nil),
-          metadata: { unmatched: unmatched, errors: item_errors }
+          metadata: count_metadata.merge(errors: item_errors)
         )
       rescue AuthenticationError => e
         integration.update!(status: "error")
-        finish_log(log, status: "error", synced_count: 0, unmatched: [], errors: [ { message: e.message } ])
+        finish_log(log, status: "error", metadata: count_metadata, errors: [ { message: e.message } ])
         Result.new(outcome: :error, synced_count: 0, error_message: e.message, metadata: {})
       rescue RateLimitError => e
-        finish_log(log, status: "error", synced_count: 0, unmatched: [], errors: [ { message: "rate_limited: #{e.message}" } ])
+        finish_log(log, status: "error", metadata: count_metadata, errors: [ { message: "rate_limited: #{e.message}" } ])
         Result.new(outcome: :error, synced_count: 0, error_message: e.message, metadata: { retry_after: e.retry_after })
       rescue ApiError => e
         integration.update!(status: "error")
-        finish_log(log, status: "error", synced_count: 0, unmatched: [], errors: [ { message: e.message } ])
+        finish_log(log, status: "error", metadata: count_metadata, errors: [ { message: e.message } ])
         Result.new(outcome: :error, synced_count: 0, error_message: e.message, metadata: {})
       end
 
@@ -78,31 +81,38 @@ module Integrations
 
       attr_reader :integration, :tenant, :from, :to
 
+      def received_count = @received_count ||= 0
+      def updated_count = @updated_count ||= 0
+      def ignored = @ignored ||= []
+      def unmatched = @unmatched ||= []
+      def item_errors = @item_errors ||= []
+
       def freight_sync_enabled?
         DataSourceConfig.source_for(tenant, "freight") == "idworks"
       end
 
       def sync_all(adapter)
-        synced_count = 0
-        unmatched    = []
-        item_errors  = []
+        orders = adapter.fetch_orders(from: from, to: to)
+        @received_count = orders.size
 
-        adapter.fetch_orders(from: from, to: to).each do |raw_order|
+        orders.each do |raw_order|
           order = match_order(raw_order)
 
           if order.nil?
-            unmatched << { idworks_ref: raw_order[:order_ref] || raw_order[:idworks_order_id] }
+            record_unmatched(raw_order)
             next
           end
-          next if raw_order[:value_shipping].blank?
+          if raw_order[:value_shipping].nil?
+            record_ignored(raw_order, "sem ValueShipping")
+            next
+          end
 
           order.update!(real_freight_cost: raw_order[:value_shipping])
-          synced_count += 1
+          Orders::RecalculateFinancials.call(order)
+          @updated_count = updated_count + 1
         rescue => e
           item_errors << { idworks_ref: raw_order[:order_ref], message: e.message }
         end
-
-        [ synced_count, unmatched, item_errors ]
       end
 
       # UNCONFIRMED: idworks' "Order" field is assumed to be the same
@@ -133,19 +143,41 @@ module Integrations
         )
       end
 
-      def finish_log(log, status:, synced_count:, unmatched:, errors:)
+      def record_unmatched(raw_order)
+        entry = { idworks_ref: raw_order[:order_ref] || raw_order[:idworks_order_id], reason: "pedido não encontrado no Pricecom" }
+        unmatched << entry
+        ignored << entry
+        Rails.logger.info("[IDWorks] order_sync ignored idworks_ref=#{entry[:idworks_ref]} reason=order_not_found")
+      end
+
+      def record_ignored(raw_order, reason)
+        entry = { idworks_ref: raw_order[:order_ref] || raw_order[:idworks_order_id], reason: reason }
+        ignored << entry
+        Rails.logger.info("[IDWorks] order_sync ignored idworks_ref=#{entry[:idworks_ref]} reason=#{reason}")
+      end
+
+      def count_metadata
+        {
+          received_count: received_count,
+          updated_count: updated_count,
+          synced_count: updated_count,
+          ignored_count: ignored.size,
+          unmatched_count: unmatched.size,
+          error_count: item_errors.size,
+          ignored: ignored.first(20),
+          unmatched: unmatched.first(20)
+        }
+      end
+
+      def finish_log(log, status:, metadata:, errors:)
+        return unless log
+
         log.update!(
           status: status,
           finished_at: Time.current,
           duration_ms: ((Time.current - log.started_at) * 1000).round,
           error_message: errors.first&.fetch(:message, nil),
-          metadata: log.metadata.merge(
-            synced_count: synced_count,
-            unmatched_count: unmatched.size,
-            unmatched: unmatched.first(10),
-            error_count: errors.size,
-            errors: errors.first(10)
-          )
+          metadata: log.metadata.merge(metadata).merge(error_count: errors.size, errors: errors.first(10))
         )
       end
     end

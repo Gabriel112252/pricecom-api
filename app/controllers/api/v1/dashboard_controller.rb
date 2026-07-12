@@ -24,6 +24,9 @@ module Api
       private
 
       def apply_financial_filters(scope)
+        reconciliation_source = DataSourceConfig.source_for(current_tenant, "payment_reconciliation")
+        scope = scope.joins(:financial_source).where(financial_sources: { provider: reconciliation_source }) if reconciliation_source.present?
+
         scope = scope.where(financial_source_id: params[:financial_source_id]) if params[:financial_source_id].present?
         scope = scope.where(channel_id:          params[:channel_id])          if params[:channel_id].present?
         scope = scope.where(status:               params[:status])             if params[:status].present?
