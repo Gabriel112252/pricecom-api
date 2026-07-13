@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_07_10_020003) do
+ActiveRecord::Schema[7.2].define(version: 2026_07_13_000100) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -51,6 +51,8 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_10_020003) do
     t.datetime "updated_at", null: false
     t.integer "role", default: 2, null: false
     t.bigint "stock_source_channel_id"
+    t.datetime "orders_sync_cursor_at"
+    t.boolean "polling_enabled", default: false, null: false
     t.index ["stock_source_channel_id"], name: "index_channel_credentials_on_stock_source_channel_id"
     t.index ["tenant_id", "channel"], name: "index_channel_credentials_on_tenant_id_and_channel", unique: true
     t.index ["tenant_id"], name: "index_channel_credentials_on_tenant_id"
@@ -387,7 +389,10 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_10_020003) do
     t.datetime "stock_deducted_at"
     t.decimal "real_freight_cost", precision: 10, scale: 2
     t.decimal "tax_amount", precision: 10, scale: 2
+    t.string "coupon_code"
+    t.decimal "coupon_discount", precision: 10, scale: 2, default: "0.0", null: false
     t.index ["channel_id"], name: "index_orders_on_channel_id"
+    t.index ["tenant_id", "coupon_code"], name: "index_orders_on_tenant_id_and_coupon_code"
     t.index ["tenant_id", "external_id"], name: "index_orders_on_tenant_id_and_external_id"
     t.index ["tenant_id", "order_type"], name: "index_orders_on_tenant_id_and_order_type"
     t.index ["tenant_id", "ordered_at"], name: "index_orders_on_tenant_id_and_ordered_at"

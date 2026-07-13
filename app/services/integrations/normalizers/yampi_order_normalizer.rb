@@ -49,14 +49,9 @@ module Integrations
           # shaped payload ever shows up.
           gross_value:    to_f(@p["total"] || @p["total_value"] || @p["value_total"]),
           freight:        to_f(@p["total_freight"] || @p["freight_value"] || @p["value_shipment"]),
-          discount:       to_f(
-            @p["discount"] ||
-            @p["total_discount"] ||
-            @p["discount_value"] ||
-            @p["discounts_total"] ||
-            @p["value_discount"] ||
-            @p.dig("totals", "discount")
-          ),
+          discount:       extract_discount,
+          coupon_code:    extract_coupon_code,
+          coupon_discount: extract_coupon_discount,
           ordered_at:     parse_date(@p["created_at"]),
           items:          extract_items
         }
@@ -112,6 +107,51 @@ module Integrations
         return nil unless address.is_a?(Hash)
 
         address["state"] || address["uf"]
+      end
+
+      def extract_discount
+        to_f(
+          @p["discount"] ||
+          @p["total_discount"] ||
+          @p["discount_value"] ||
+          @p["discounts_total"] ||
+          @p["value_discount"] ||
+          @p.dig("totals", "discount")
+        )
+      end
+
+      def extract_coupon_code
+        coupon_hash = unwrap_data(@p["coupon"])
+        discount_coupon_hash = @p["discount_coupon"].is_a?(Hash) ? @p["discount_coupon"] : {}
+        promocode_hash = @p["promocode"].is_a?(Hash) ? @p["promocode"] : {}
+        coupon_string = @p["coupon"] if @p["coupon"].is_a?(String)
+        code = @p["coupon_code"] ||
+          @p["coupon_name"] ||
+          coupon_string ||
+          coupon_hash["code"] ||
+          coupon_hash["name"] ||
+          coupon_hash["title"] ||
+          discount_coupon_hash["code"] ||
+          promocode_hash["code"]
+
+        code.to_s.strip.presence
+      end
+
+      def extract_coupon_discount
+        coupon_hash = unwrap_data(@p["coupon"])
+        discount_coupon_hash = @p["discount_coupon"].is_a?(Hash) ? @p["discount_coupon"] : {}
+        promocode_hash = @p["promocode"].is_a?(Hash) ? @p["promocode"] : {}
+        explicit_value = to_f(
+          @p["coupon_discount"] ||
+          @p["coupon_value"] ||
+          coupon_hash["value"] ||
+          coupon_hash["discount"] ||
+          discount_coupon_hash["value"] ||
+          promocode_hash["discount"]
+        )
+        return explicit_value if explicit_value.positive?
+
+        extract_coupon_code.present? ? extract_discount : 0.0
       end
 
       # Unwraps Yampi's common `{ "data" => { ... } }` embed shape (used for

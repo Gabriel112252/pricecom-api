@@ -132,6 +132,24 @@ RSpec.describe Dashboard::BuildSummary do
     end
   end
 
+  describe "regional and coupon payload" do
+    it "summarizes orders by Brazilian state and coupon usage" do
+      sp_order = make_order(channel_a, gross: 120, margin: 0, ordered_at: 1.day.ago)
+      sp_order.update!(state: "SP", discount: 20, coupon_code: "BEMVINDO", coupon_discount: 20)
+      make_order(channel_a, gross: 80, margin: 0, ordered_at: 1.day.ago).update!(state: "São Paulo")
+      make_order(channel_b, gross: 60, margin: 0, ordered_at: 1.day.ago).update!(state: "RJ", discount: 10, coupon_code: "BEMVINDO", coupon_discount: 10)
+      make_order(channel_b, gross: 40, margin: 0, ordered_at: 1.day.ago).update!(state: "MG", discount: 5, coupon_code: "VIP", coupon_discount: 5)
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      expect(result[:regional_sales][:top_state]).to include(state: "SP", orders_count: 2)
+      expect(result[:regional_sales][:states].find { |state| state[:state] == "RJ" }).to include(orders_count: 1, net_revenue: 50.0)
+      expect(result[:coupons]).to include(total_discount: 35.0, orders_count: 3)
+      expect(result[:coupons][:top_coupons].first).to include(code: "BEMVINDO", orders_count: 2, discount_total: 30.0)
+      expect(result[:kpis]).to include(coupon_discount_total: 35.0, coupon_orders_count: 3, top_region_state: "SP")
+    end
+  end
+
   describe "conflicts" do
     it "sums the absolute value of open financial conflicts as value_at_risk, ignoring resolved ones and non-financial types" do
       make_conflict(conflict_type: "nf_discount_mismatch", difference: -15.5)

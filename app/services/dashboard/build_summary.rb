@@ -8,6 +8,40 @@ module Dashboard
       nf_discount_mismatch nf_freight_mismatch settlement_amount_mismatch missing_settlement
     ].freeze
     CANCELED_STATUS_ALIASES = %w[cancelado canceled cancelled cancelada].freeze
+    BRAZIL_STATES = {
+      "AC" => "Acre",
+      "AL" => "Alagoas",
+      "AP" => "Amapá",
+      "AM" => "Amazonas",
+      "BA" => "Bahia",
+      "CE" => "Ceará",
+      "DF" => "Distrito Federal",
+      "ES" => "Espírito Santo",
+      "GO" => "Goiás",
+      "MA" => "Maranhão",
+      "MT" => "Mato Grosso",
+      "MS" => "Mato Grosso do Sul",
+      "MG" => "Minas Gerais",
+      "PA" => "Pará",
+      "PB" => "Paraíba",
+      "PR" => "Paraná",
+      "PE" => "Pernambuco",
+      "PI" => "Piauí",
+      "RJ" => "Rio de Janeiro",
+      "RN" => "Rio Grande do Norte",
+      "RS" => "Rio Grande do Sul",
+      "RO" => "Rondônia",
+      "RR" => "Roraima",
+      "SC" => "Santa Catarina",
+      "SP" => "São Paulo",
+      "SE" => "Sergipe",
+      "TO" => "Tocantins"
+    }.freeze
+    BRAZIL_STATE_ALIASES = BRAZIL_STATES.each_with_object({}) do |(uf, name), hash|
+      hash[uf] = uf
+      hash[name.upcase] = uf
+      hash[I18n.transliterate(name).upcase] = uf
+    end.freeze
 
     def self.call(tenant:, params:)
       new(tenant: tenant, params: params).call
@@ -29,14 +63,18 @@ module Dashboard
       prev_totals    = period_totals(prev_scope)
       period_rows    = revenue_rows(orders_scope, granularity)
       data_quality   = build_data_quality(orders_scope)
+      coupons        = build_coupons(orders_scope)
+      regional_sales = build_regional_sales(orders_scope, current_totals)
 
       {
         period:                   { from: period[:from].iso8601, to: period[:to].iso8601 },
         granularity:              granularity,
-        kpis:                     build_kpis(current_totals, prev_totals, data_quality),
+        kpis:                     build_kpis(current_totals, prev_totals, data_quality, coupons, regional_sales),
         financial_composition:    build_financial_composition(current_totals, data_quality),
         revenue_timeline:         build_revenue_timeline(period_rows, granularity),
         sales_by_channel:         build_sales_by_channel(orders_scope, current_totals),
+        regional_sales:           regional_sales,
+        coupons:                  coupons,
         revenue:                  build_revenue(orders_scope, period_rows, granularity, current_totals, prev_totals),
         financial:                build_financial(current_totals, prev_totals, data_quality),
         margin:                   build_margin(period_rows, granularity, current_totals, prev_totals, data_quality),
@@ -208,8 +246,9 @@ module Dashboard
       }
     end
 
-    def build_kpis(current_totals, prev_totals, data_quality)
+    def build_kpis(current_totals, prev_totals, data_quality, coupons, regional_sales)
       margin_available = data_quality[:financial_status] == "complete"
+      top_state = regional_sales[:top_state]
 
       {
         gross_revenue: current_totals[:gross].round(2),
@@ -226,7 +265,14 @@ module Dashboard
         contribution_margin_unavailable_reason: margin_available ? nil : data_quality[:financial_status_reason],
         financial_coverage_percentage: data_quality[:coverage_percentage],
         complete_orders_count: data_quality[:complete_orders_count],
-        incomplete_orders_count: data_quality[:incomplete_orders_count]
+        incomplete_orders_count: data_quality[:incomplete_orders_count],
+        coupon_discount_total: coupons[:total_discount],
+        coupon_orders_count: coupons[:orders_count],
+        coupon_usage_percentage: coupons[:usage_percentage],
+        top_region_state: top_state&.dig(:state),
+        top_region_name: top_state&.dig(:name),
+        top_region_orders_count: top_state&.dig(:orders_count),
+        top_region_net_revenue: top_state&.dig(:net_revenue)
       }
     end
 
@@ -323,6 +369,92 @@ module Dashboard
           share_percentage: total_net.positive? ? (net_f / total_net * 100).round(2) : 0
         }
       end.sort_by { |row| -row[:net_revenue] }
+    end
+
+    def build_regional_sales(scope, current_totals)
+      rows = scope
+        .group(:state)
+        .pluck(
+          :state,
+          Arel.sql("COUNT(*)"),
+          Arel.sql("COALESCE(SUM(gross_value), 0)"),
+          Arel.sql("COALESCE(SUM(discount), 0)"),
+          Arel.sql("COALESCE(SUM(refund_amount), 0)")
+        )
+
+      aggregate = Hash.new { |hash, uf| hash[uf] = { orders_count: 0, net_revenue: 0.0, gross_revenue: 0.0 } }
+      unknown_orders = 0
+
+      rows.each do |raw_state, count, gross, discount, refund|
+        uf = normalize_state(raw_state)
+        if uf.blank?
+          unknown_orders += count.to_i
+          next
+        end
+
+        gross_f = gross.to_f
+        net_f = gross_f - discount.to_f - refund.to_f
+        aggregate[uf][:orders_count] += count.to_i
+        aggregate[uf][:net_revenue] += net_f
+        aggregate[uf][:gross_revenue] += gross_f
+      end
+
+      states = BRAZIL_STATES.map do |uf, name|
+        values = aggregate[uf]
+        {
+          state: uf,
+          name: name,
+          orders_count: values[:orders_count],
+          net_revenue: values[:net_revenue].round(2),
+          gross_revenue: values[:gross_revenue].round(2),
+          share_percentage: current_totals[:count].positive? ? (values[:orders_count].to_f / current_totals[:count] * 100).round(2) : 0
+        }
+      end
+
+      ranked = states.select { |state| state[:orders_count].positive? }.sort_by { |state| [-state[:orders_count], -state[:net_revenue]] }
+
+      {
+        states: states,
+        top_state: ranked.first,
+        top_states: ranked.first(8),
+        unknown_orders_count: unknown_orders,
+        total_orders_count: current_totals[:count]
+      }
+    end
+
+    def build_coupons(scope)
+      return empty_coupons unless order_has_coupons?
+
+      coupon_value_sql = "CASE WHEN COALESCE(coupon_discount, 0) > 0 THEN coupon_discount ELSE COALESCE(discount, 0) END"
+      coupon_scope = scope.where("coupon_code IS NOT NULL AND TRIM(coupon_code) <> ''")
+      total_orders = scope.count
+      orders_count = coupon_scope.count
+      total_discount = coupon_scope.sum(Arel.sql(coupon_value_sql)).to_f
+      rows = coupon_scope
+        .group(Arel.sql("UPPER(TRIM(coupon_code))"))
+        .pluck(
+          Arel.sql("UPPER(TRIM(coupon_code))"),
+          Arel.sql("COUNT(*)"),
+          Arel.sql("COALESCE(SUM(#{coupon_value_sql}), 0)"),
+          Arel.sql("COALESCE(SUM(COALESCE(gross_value, 0) - COALESCE(discount, 0) - COALESCE(refund_amount, 0)), 0)")
+        )
+
+      top_coupons = rows.map do |code, count, discount, net_revenue|
+        {
+          code: code,
+          orders_count: count.to_i,
+          discount_total: discount.to_f.round(2),
+          net_revenue: net_revenue.to_f.round(2)
+        }
+      end.sort_by { |row| [-row[:orders_count], -row[:discount_total]] }.first(10)
+
+      {
+        available: true,
+        total_discount: total_discount.round(2),
+        orders_count: orders_count,
+        usage_percentage: total_orders.positive? ? (orders_count.to_f / total_orders * 100).round(2) : 0,
+        top_coupons: top_coupons
+      }
     end
 
     def build_data_sources
@@ -648,6 +780,26 @@ module Dashboard
     def data_source_for(data_type)
       @data_sources ||= tenant.data_source_configs.enabled.pluck(:data_type, :source).to_h
       @data_sources[data_type]
+    end
+
+    def normalize_state(value)
+      normalized = I18n.transliterate(value.to_s).strip.upcase
+      normalized = normalized.gsub(/\AESTADO DE\s+/, "")
+      BRAZIL_STATE_ALIASES[normalized]
+    end
+
+    def order_has_coupons?
+      @order_has_coupons ||= Order.column_names.include?("coupon_code")
+    end
+
+    def empty_coupons
+      {
+        available: false,
+        total_discount: 0.0,
+        orders_count: 0,
+        usage_percentage: 0.0,
+        top_coupons: []
+      }
     end
 
     def product_cost_for(scope)

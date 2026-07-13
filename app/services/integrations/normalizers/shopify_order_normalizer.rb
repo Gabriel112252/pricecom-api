@@ -37,6 +37,8 @@ module Integrations
           gross_value:    to_f(@p["total_price"] || @p["subtotal_price"]),
           freight:        extract_freight,
           discount:       to_f(@p["total_discounts"]),
+          coupon_code:    extract_coupon_code,
+          coupon_discount: extract_coupon_discount,
           ordered_at:     parse_date(@p["created_at"]),
           items:          extract_items
         }
@@ -78,6 +80,21 @@ module Integrations
           @p["total_shipping_price"] ||
           @p["shipping_price"]
         )
+      end
+
+      def extract_coupon_code
+        first_code = Array(@p["discount_codes"]).find { |discount| discount["code"].present? }
+        return first_code["code"].to_s.strip if first_code
+
+        first_application = Array(@p["discount_applications"]).find { |discount| discount["code"].present? || discount["title"].present? }
+        (first_application&.dig("code") || first_application&.dig("title")).to_s.strip.presence
+      end
+
+      def extract_coupon_discount
+        discount_codes_total = Array(@p["discount_codes"]).sum { |discount| to_f(discount["amount"]) }
+        return discount_codes_total if discount_codes_total.positive?
+
+        extract_coupon_code.present? ? to_f(@p["total_discounts"]) : 0.0
       end
 
       def extract_items

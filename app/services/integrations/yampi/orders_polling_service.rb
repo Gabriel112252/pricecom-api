@@ -263,7 +263,7 @@ module Integrations
       end
 
       def persisted_order_attrs(order)
-        {
+        attrs = {
           order_number: order.order_number.to_s,
           status: order.status.to_s,
           payment_method: order.payment_method.to_s,
@@ -282,10 +282,13 @@ module Integrations
           items_qty: order.items_qty.to_i,
           ordered_at: order.ordered_at&.utc&.to_i
         }
+        attrs[:coupon_code] = order.coupon_code.to_s if order_has_coupons?
+        attrs[:coupon_discount] = decimal_string(order.coupon_discount) if order_has_coupons?
+        attrs
       end
 
       def normalized_order_attrs(normalized)
-        {
+        attrs = {
           order_number: normalized[:order_number].to_s,
           status: normalized[:status].to_s,
           payment_method: normalized[:payment_method].to_s,
@@ -304,6 +307,9 @@ module Integrations
           items_qty: normalized[:items].sum { |item| item[:quantity].to_i },
           ordered_at: normalized[:ordered_at]&.utc&.to_i
         }
+        attrs[:coupon_code] = normalized[:coupon_code].to_s if order_has_coupons?
+        attrs[:coupon_discount] = decimal_string(normalized[:coupon_discount]) if order_has_coupons?
+        attrs
       end
 
       def persisted_items(order)
@@ -340,6 +346,10 @@ module Integrations
         BigDecimal(value.to_s.presence || "0").round(2).to_s("F")
       rescue ArgumentError
         "0.0"
+      end
+
+      def order_has_coupons?
+        @order_has_coupons ||= Order.column_names.include?("coupon_code")
       end
 
       def find_existing_yampi_order(external_id)

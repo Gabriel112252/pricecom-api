@@ -45,7 +45,7 @@ module Integrations
 
       def upsert_order(channel)
         order = @tenant.orders.find_or_initialize_by(channel: channel, external_id: @normalized[:external_id])
-        order.assign_attributes(
+        attrs = {
           channel:          channel,
           order_number:     @normalized[:order_number],
           status:           @normalized[:status],
@@ -68,7 +68,11 @@ module Integrations
           cost_price:       0,
           commission:       0,
           operational_cost: 0
-        )
+        }
+        attrs[:coupon_code] = @normalized[:coupon_code].presence if order_has_coupons?
+        attrs[:coupon_discount] = @normalized[:coupon_discount].to_f if order_has_coupons?
+
+        order.assign_attributes(attrs)
         order.save!
         order
       end
@@ -154,6 +158,10 @@ module Integrations
 
       def idworks_cost_source?
         @idworks_cost_source ||= DataSourceConfig.source_for(@tenant, "cost") == "idworks"
+      end
+
+      def order_has_coupons?
+        @order_has_coupons ||= Order.column_names.include?("coupon_code")
       end
 
       def upsert_order_mapping(order)

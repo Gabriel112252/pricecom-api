@@ -55,6 +55,8 @@ module Integrations
             @p["total_discount"] ||
             @p.dig("payment", "discount")
           ),
+          coupon_code:    extract_coupon_code,
+          coupon_discount: extract_coupon_discount,
           ordered_at:     parse_date(@p["create_time"] || @p["created_at"]),
           items:          extract_items
         }
@@ -100,6 +102,51 @@ module Integrations
         @p.dig("recipient_address", "state") ||
           @p.dig("recipient_address", "province") ||
           @p.dig("order", "recipient_address", "state").to_s
+      end
+
+      def extract_discount
+        to_f(
+          @p["discount"] ||
+          @p["seller_discount"] ||
+          @p["platform_discount"] ||
+          @p["total_discount"] ||
+          @p.dig("payment", "discount")
+        )
+      end
+
+      def extract_coupon_code
+        coupon_hash = @p["coupon"].is_a?(Hash) ? @p["coupon"] : {}
+        voucher_hash = @p["voucher"].is_a?(Hash) ? @p["voucher"] : {}
+        promotion_hash = @p["promotion"].is_a?(Hash) ? @p["promotion"] : {}
+        coupon_string = @p["coupon"] if @p["coupon"].is_a?(String)
+        voucher_string = @p["voucher"] if @p["voucher"].is_a?(String)
+        code = @p["coupon_code"] ||
+          @p["voucher_code"] ||
+          coupon_string ||
+          voucher_string ||
+          coupon_hash["code"] ||
+          voucher_hash["code"] ||
+          @p.dig("payment", "coupon_code") ||
+          promotion_hash["code"]
+
+        code.to_s.strip.presence
+      end
+
+      def extract_coupon_discount
+        coupon_hash = @p["coupon"].is_a?(Hash) ? @p["coupon"] : {}
+        voucher_hash = @p["voucher"].is_a?(Hash) ? @p["voucher"] : {}
+        promotion_hash = @p["promotion"].is_a?(Hash) ? @p["promotion"] : {}
+        explicit_value = to_f(
+          @p["coupon_discount"] ||
+          @p["voucher_discount"] ||
+          coupon_hash["discount"] ||
+          voucher_hash["discount"] ||
+          @p.dig("payment", "coupon_discount") ||
+          promotion_hash["discount"]
+        )
+        return explicit_value if explicit_value.positive?
+
+        extract_coupon_code.present? ? extract_discount : 0.0
       end
 
       def extract_items
