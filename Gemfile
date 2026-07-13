@@ -17,7 +17,7 @@ gem "sidekiq-cron"
 # Background jobs
 gem "sidekiq", "~> 7.3"
 gem "sidekiq-cron"
-gem "connection_pool", "~> 2.5"
+gem "connection_pool", "~> 3.0"
 
 # Utilities
 gem "kaminari"
