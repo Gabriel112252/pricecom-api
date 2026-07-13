@@ -3,6 +3,7 @@ module Integrations
     class OrdersPollingService
       BACKFILL_DAYS = 30
       INCREMENTAL_OVERLAP = 10.minutes
+      INCREMENTAL_CREATED_AT_LOOKBACK_DAYS = 3
       LIMIT = Integrations::YampiAdapter::ORDERS_LIMIT
 
       PollingEvent = Struct.new(:tenant, :payload, :event_type, :integration, keyword_init: true)
@@ -30,7 +31,8 @@ module Integrations
         @cursor_to = @started_at.utc
         @previous_cursor_at = channel_credential.orders_sync_cursor_at&.utc
         @sync_mode = previous_cursor_at.present? ? "incremental" : "backfill"
-        @cursor_from = sync_mode == "incremental" ? previous_cursor_at - INCREMENTAL_OVERLAP : cursor_to - BACKFILL_DAYS.days
+        @cursor_from = sync_mode == "incremental" ? incremental_cursor_from : cursor_to - BACKFILL_DAYS.days
+        @max_seen_cursor_at = nil
         @seen_external_ids = Set.new
         initialize_counters
       end
@@ -58,8 +60,8 @@ module Integrations
           return result(:error, item_errors.first&.fetch(:message, nil))
         end
 
-        channel_credential.update!(orders_sync_cursor_at: cursor_to, last_synced_at: Time.current, status: "active")
-        @new_cursor_at = cursor_to
+        @new_cursor_at = next_cursor_at
+        channel_credential.update!(orders_sync_cursor_at: @new_cursor_at, last_synced_at: Time.current, status: "active")
         finish_log(status: "success")
         result(:success, nil)
       rescue Integrations::AuthenticationError => e
@@ -86,6 +88,10 @@ module Integrations
       attr_reader :channel_credential, :tenant, :trigger, :integration, :adapter, :rate_limiter, :lock,
         :started_at, :cursor_to, :previous_cursor_at, :sync_mode, :cursor_from, :seen_external_ids,
         :log, :retry_after
+
+      def incremental_cursor_from
+        [ previous_cursor_at - INCREMENTAL_OVERLAP, cursor_to - INCREMENTAL_CREATED_AT_LOOKBACK_DAYS.days ].min
+      end
 
       def initialize_counters
         @pages_fetched = 0
@@ -176,12 +182,15 @@ module Integrations
         @api_records_received += raw_orders.size
 
         raw_orders.each do |raw_order|
-          unless inside_cursor_window?(raw_order)
+          timestamp = cursor_timestamp_for(raw_order)
+
+          unless inside_cursor_window?(raw_order, timestamp)
             @outside_cursor_window_count += 1
             next
           end
 
           @records_inside_cursor_window += 1
+          observe_cursor_timestamp(timestamp)
           process_order(raw_order)
         end
       end
@@ -232,16 +241,26 @@ module Integrations
         record_processed(external_id, "error")
       end
 
-      def inside_cursor_window?(raw_order)
+      def inside_cursor_window?(raw_order, timestamp)
         return true if sync_mode == "backfill"
 
-        updated_at = parse_yampi_timestamp(raw_order["updated_at"])
-        unless updated_at
-          record_ignored((raw_order["id"] || raw_order["order_id"])&.to_s, "sem updated_at")
+        unless timestamp
+          record_ignored((raw_order["id"] || raw_order["order_id"])&.to_s, "sem created_at")
           return false
         end
 
-        updated_at.between?(cursor_from, cursor_to)
+        timestamp.between?(cursor_from, cursor_to)
+      end
+
+      def observe_cursor_timestamp(timestamp)
+        return unless timestamp
+
+        timestamp = timestamp.utc
+        @max_seen_cursor_at = timestamp if @max_seen_cursor_at.nil? || timestamp > @max_seen_cursor_at
+      end
+
+      def cursor_timestamp_for(raw_order)
+        parse_yampi_timestamp(raw_order["created_at"])
       end
 
       def parse_yampi_timestamp(value)
@@ -369,8 +388,7 @@ module Integrations
       end
 
       def date_filter
-        field = sync_mode == "backfill" ? "created_at" : "updated_at"
-        "#{field}:#{api_date_from}|#{api_date_to}"
+        "created_at:#{api_date_from}|#{api_date_to}"
       end
 
       def api_date_from
@@ -424,6 +442,8 @@ module Integrations
           sync_mode: sync_mode,
           window_from: cursor_from.iso8601,
           window_to: cursor_to.iso8601,
+          cursor_source_field: "created_at",
+          incremental_created_at_lookback_days: INCREMENTAL_CREATED_AT_LOOKBACK_DAYS,
           api_date_from: api_date_from,
           api_date_to: api_date_to,
           previous_cursor_at: previous_cursor_at&.iso8601
@@ -433,6 +453,7 @@ module Integrations
       def count_metadata
         {
           new_cursor_at: @new_cursor_at&.iso8601,
+          max_seen_cursor_at: @max_seen_cursor_at&.iso8601,
           pages_fetched: @pages_fetched,
           api_requests_count: @api_requests_count,
           api_records_received: @api_records_received,
@@ -456,6 +477,17 @@ module Integrations
 
       def result(outcome, error_message, retry_after: nil)
         Result.new(outcome: outcome, error_message: error_message, retry_after: retry_after, metadata: count_metadata)
+      end
+
+      def next_cursor_at
+        if @max_seen_cursor_at
+          observed_cursor_at = [ @max_seen_cursor_at, cursor_to ].compact.min
+          return [ observed_cursor_at, previous_cursor_at ].compact.max
+        end
+
+        return previous_cursor_at if previous_cursor_at.present?
+
+        cursor_to
       end
 
       def pages_fetched = @pages_fetched

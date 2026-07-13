@@ -90,13 +90,23 @@ module Api
       # POST /api/v1/integrations/yampi/backfill_orders
       # Enqueues the same Yampi order polling job used by the scheduler.
       # The first job execution performs the 30-day created_at backfill when
-      # orders_sync_cursor_at is blank; later executions use the incremental
-      # updated_at window. The HTTP request never performs API pagination.
+      # orders_sync_cursor_at is blank; later executions use an incremental
+      # created_at window. The HTTP request never performs API pagination.
       def backfill_orders
         credential = current_tenant.channel_credentials.find_by(channel: "yampi")
 
         if credential.nil? || credential.status == "pending"
           return render json: { error: "Yampi ainda não está conectada" }, status: :unprocessable_entity
+        end
+
+        if yampi_order_polling_running?(credential)
+          return render json: {
+            success: true,
+            enqueued: false,
+            already_running: true,
+            message: "Sincronização de pedidos da Yampi já está em execução",
+            channel: channel_json(credential.channel, credential, recent_logs_for(credential))
+          }, status: :accepted
         end
 
         job = Integrations::Yampi::OrdersPollingJob.perform_later(credential.id, trigger: "manual")
@@ -154,6 +164,7 @@ module Api
           last_synced_at:       credential&.last_synced_at,
           orders_sync_cursor_at: credential&.orders_sync_cursor_at,
           polling_enabled:       credential&.polling_enabled,
+          orders_polling_running: yampi_order_polling_running?(credential),
           role:                 credential&.role,
           stock_source_channel: credential&.stock_source_channel&.channel,
           recent_logs:          logs
@@ -172,9 +183,19 @@ module Api
           unchanged_count: log.metadata["unchanged_count"],
           ignored_count: log.metadata["ignored_count"],
           error_count:   log.metadata["error_count"],
+          trigger:       log.metadata["trigger"],
           started_at:    log.started_at,
           finished_at:   log.finished_at
         }
+      end
+
+      def yampi_order_polling_running?(credential)
+        return false unless credential&.channel == "yampi"
+
+        Integrations::Yampi::PollingLock.new(credential).locked?
+      rescue => e
+        Rails.logger.warn("[ChannelCredentialsController] yampi polling lock check failed for channel_credential_id=#{credential&.id}: #{e.message}")
+        false
       end
     end
   end

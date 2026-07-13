@@ -148,6 +148,21 @@ RSpec.describe Dashboard::BuildSummary do
       expect(result[:coupons][:top_coupons].first).to include(code: "BEMVINDO", orders_count: 2, discount_total: 30.0)
       expect(result[:kpis]).to include(coupon_discount_total: 35.0, coupon_orders_count: 3, top_region_state: "SP")
     end
+
+    it "surfaces uncoded discounts without inventing coupon rankings" do
+      make_order(channel_a, gross: 120, margin: 0, ordered_at: 1.day.ago).update!(state: "SP", discount: 20)
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      expect(result[:coupons]).to include(
+        has_coupon_codes: false,
+        display_discount_total: 20.0,
+        uncoded_discount_total: 20.0,
+        uncoded_discount_orders_count: 1,
+        top_coupons: []
+      )
+      expect(result[:kpis]).to include(coupon_discount_total: 20.0, coupon_orders_count: 1)
+    end
   end
 
   describe "conflicts" do

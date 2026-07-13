@@ -36,6 +36,14 @@ module Integrations
         redis { |conn| conn.call("EVAL", RELEASE_SCRIPT, 1, key, token) }
       end
 
+      def locked?
+        redis { |conn| conn.call("EXISTS", key) }.to_i == 1
+      end
+
+      def ttl
+        redis { |conn| conn.call("TTL", key) }.to_i
+      end
+
       private
 
       attr_reader :channel_credential, :ttl_seconds

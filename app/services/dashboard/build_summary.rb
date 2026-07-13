@@ -266,9 +266,12 @@ module Dashboard
         financial_coverage_percentage: data_quality[:coverage_percentage],
         complete_orders_count: data_quality[:complete_orders_count],
         incomplete_orders_count: data_quality[:incomplete_orders_count],
-        coupon_discount_total: coupons[:total_discount],
-        coupon_orders_count: coupons[:orders_count],
+        coupon_discount_total: coupons[:display_discount_total],
+        coupon_orders_count: coupons[:display_orders_count],
         coupon_usage_percentage: coupons[:usage_percentage],
+        coupon_codes_count: coupons[:codes_count],
+        uncoded_discount_total: coupons[:uncoded_discount_total],
+        uncoded_discount_orders_count: coupons[:uncoded_discount_orders_count],
         top_region_state: top_state&.dig(:state),
         top_region_name: top_state&.dig(:name),
         top_region_orders_count: top_state&.dig(:orders_count),
@@ -427,9 +430,12 @@ module Dashboard
 
       coupon_value_sql = "CASE WHEN COALESCE(coupon_discount, 0) > 0 THEN coupon_discount ELSE COALESCE(discount, 0) END"
       coupon_scope = scope.where("coupon_code IS NOT NULL AND TRIM(coupon_code) <> ''")
+      uncoded_discount_scope = scope.where("(coupon_code IS NULL OR TRIM(coupon_code) = '') AND COALESCE(discount, 0) > 0")
       total_orders = scope.count
       orders_count = coupon_scope.count
       total_discount = coupon_scope.sum(Arel.sql(coupon_value_sql)).to_f
+      uncoded_discount_total = uncoded_discount_scope.sum(:discount).to_f
+      uncoded_discount_orders_count = uncoded_discount_scope.count
       rows = coupon_scope
         .group(Arel.sql("UPPER(TRIM(coupon_code))"))
         .pluck(
@@ -448,11 +454,20 @@ module Dashboard
         }
       end.sort_by { |row| [-row[:orders_count], -row[:discount_total]] }.first(10)
 
+      display_discount_total = total_discount.positive? ? total_discount : uncoded_discount_total
+      display_orders_count = orders_count.positive? ? orders_count : uncoded_discount_orders_count
+
       {
         available: true,
+        has_coupon_codes: orders_count.positive?,
         total_discount: total_discount.round(2),
+        display_discount_total: display_discount_total.round(2),
         orders_count: orders_count,
-        usage_percentage: total_orders.positive? ? (orders_count.to_f / total_orders * 100).round(2) : 0,
+        display_orders_count: display_orders_count,
+        codes_count: rows.size,
+        uncoded_discount_total: uncoded_discount_total.round(2),
+        uncoded_discount_orders_count: uncoded_discount_orders_count,
+        usage_percentage: total_orders.positive? ? (display_orders_count.to_f / total_orders * 100).round(2) : 0,
         top_coupons: top_coupons
       }
     end
@@ -795,8 +810,14 @@ module Dashboard
     def empty_coupons
       {
         available: false,
+        has_coupon_codes: false,
         total_discount: 0.0,
+        display_discount_total: 0.0,
         orders_count: 0,
+        display_orders_count: 0,
+        codes_count: 0,
+        uncoded_discount_total: 0.0,
+        uncoded_discount_orders_count: 0,
         usage_percentage: 0.0,
         top_coupons: []
       }
