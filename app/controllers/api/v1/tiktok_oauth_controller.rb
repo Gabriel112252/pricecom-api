@@ -31,8 +31,16 @@ module Api
         token_data = Integrations::TiktokOauthTokenClient
           .new(app_key: tiktok_app_key(credential), app_secret: tiktok_app_secret(credential))
           .exchange(auth_code: auth_code)
+        authorized_shops = Integrations::TiktokAuthorizedShopsClient
+          .new(
+            app_key: tiktok_app_key(credential),
+            app_secret: tiktok_app_secret(credential),
+            access_token: token_data["access_token"]
+          )
+          .fetch
+        selected_shop = single_authorized_shop!(authorized_shops)
 
-        credential = upsert_credential(credential, token_data)
+        credential = upsert_credential(credential, token_data, selected_shop: selected_shop, authorized_shops: authorized_shops)
         Channel.ensure_for!(tenant, "tiktok")
 
         redirect_to frontend_redirect_url("connected", "TikTok Shop conectado", credential_id: credential.id),
@@ -105,7 +113,9 @@ module Api
         {}
       end
 
-      def upsert_credential(credential, token_data)
+      def upsert_credential(credential, token_data, selected_shop:, authorized_shops:)
+        selected_shop = normalize_authorized_shop(selected_shop)
+
         credential.status = "active"
         credential.credentials = credential.credentials.to_h.merge(
           "access_token" => token_data["access_token"],
@@ -117,12 +127,45 @@ module Api
           "seller_base_region" => token_data["seller_base_region"],
           "user_type" => token_data["user_type"],
           "granted_scopes" => token_data["granted_scopes"],
-          "shop_region" => params[:shop_region],
+          "shop_cipher" => selected_shop["cipher"],
+          "shop_id" => selected_shop["id"],
+          "shop_name" => selected_shop["name"],
+          "shop_code" => selected_shop["code"],
+          "shop_seller_type" => selected_shop["seller_type"],
+          "authorized_shops" => authorized_shops.map { |shop| normalize_authorized_shop(shop) },
+          "shop_region" => selected_shop["region"] || params[:shop_region],
           "locale" => params[:locale],
           "oauth_connected_at" => Time.current.iso8601
         ).compact
         credential.save!
         credential
+      end
+
+      def single_authorized_shop!(shops)
+        normalized_shops = Array(shops).map { |shop| normalize_authorized_shop(shop) }
+        raise Integrations::ApiError, "TikTok OAuth: nenhuma loja autorizada retornada" if normalized_shops.empty?
+
+        if normalized_shops.many?
+          raise Integrations::ApiError,
+            "TikTok OAuth: múltiplas lojas autorizadas retornadas; o modelo atual suporta uma loja TikTok por credencial"
+        end
+
+        shop = normalized_shops.first
+        return shop if shop["cipher"].present?
+
+        raise Integrations::ApiError, "TikTok OAuth: shop_cipher não retornado pela API de lojas autorizadas"
+      end
+
+      def normalize_authorized_shop(shop)
+        values = shop.to_h.with_indifferent_access
+        {
+          "id" => values[:id],
+          "name" => values[:name],
+          "region" => values[:region],
+          "seller_type" => values[:seller_type],
+          "cipher" => values[:cipher],
+          "code" => values[:code]
+        }.compact
       end
 
       def redirect_error(message)

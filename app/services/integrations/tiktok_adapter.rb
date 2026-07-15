@@ -9,8 +9,15 @@ module Integrations
   # lightly verified and should still be checked against a sandbox account
   # before broader production use.
   class TiktokAdapter < BaseChannelAdapter
+    include TiktokRequestSigning
+
     BASE_URL = "https://open-api.tiktokglobalshop.com".freeze
     PRODUCT_SEARCH_PATH = "/product/202309/products/search".freeze
+    INVENTORY_SEARCH_PATH = "/product/202309/inventory/search".freeze
+    SHOP_SCOPED_PATHS = [
+      PRODUCT_SEARCH_PATH,
+      INVENTORY_SEARCH_PATH
+    ].freeze
     PAGE_SIZE = 100
 
     # code => 0 means success; these are believed-auth-related failure
@@ -19,7 +26,7 @@ module Integrations
     RATE_LIMIT_KEYWORDS = %w[rate frequency too many limit].freeze
 
     def authenticate
-      post(PRODUCT_SEARCH_PATH, { page_size: 1 })
+      post(PRODUCT_SEARCH_PATH, {}, query_params: { page_size: 1 })
       true
     end
 
@@ -28,7 +35,8 @@ module Integrations
       page_token = nil
 
       loop do
-        body = post(PRODUCT_SEARCH_PATH, { page_size: PAGE_SIZE, page_token: page_token }.compact)
+        query_params = { page_size: PAGE_SIZE, page_token: page_token }.compact
+        body = post(PRODUCT_SEARCH_PATH, {}, query_params: query_params)
         data = body["data"] || {}
 
         (data["products"] || []).each do |product|
@@ -45,9 +53,11 @@ module Integrations
     end
 
     def fetch_stock(external_id)
-      body = post("/product/202309/products/#{external_id}/inventory/search", {})
-      inventories = body.dig("data", "inventories") || []
-      inventories.sum { |inv| inv["quantity"].to_i }
+      body = post(INVENTORY_SEARCH_PATH, { sku_ids: [ external_id.to_s ] })
+      inventories = body.dig("data", "inventory") || []
+      inventories.sum do |inventory|
+        (inventory["skus"] || []).sum { |sku| sku["total_available_quantity"].to_i }
+      end
     end
 
     def normalize_product(raw)
@@ -63,10 +73,13 @@ module Integrations
 
     private
 
-    def post(path, body)
+    def post(path, body, query_params: {})
       timestamp = Time.now.to_i
       encoded_body = encode_json_body(body)
-      params = { app_key: credentials[:app_key], timestamp: timestamp }
+      params = {
+        app_key: credentials[:app_key],
+        timestamp: timestamp
+      }.merge(query_params.compact).merge(shop_scoped_query_params(path))
       params[:sign] = sign(path, params, encoded_body)
 
       response = connection(BASE_URL).post(path) do |req|
@@ -79,6 +92,18 @@ module Integrations
       parsed = handle_response(response)
       raise_on_body_error(parsed)
       parsed
+    end
+
+    def shop_scoped_query_params(path)
+      return {} unless SHOP_SCOPED_PATHS.include?(path)
+
+      shop_cipher = credentials[:shop_cipher].presence
+      if shop_cipher.blank?
+        raise AuthenticationError,
+          "TiktokAdapter: shop_cipher ausente; reautorize a integração TikTok Shop"
+      end
+
+      { shop_cipher: shop_cipher }
     end
 
     # TikTok Shop's API returns HTTP 200 for most application-level errors
@@ -105,20 +130,11 @@ module Integrations
     # JSON body + app_secret. TikTok explicitly excludes `sign` and
     # `access_token`; for API version 202309+ the token is a header.
     def sign(path, params, encoded_body = nil)
-      base = params
-        .except(:sign, "sign", :access_token, "access_token")
-        .sort_by { |key, _value| key.to_s }
-        .map { |key, value| "#{key}#{value}" }
-        .join
-
-      signable = "#{credentials[:app_secret]}#{path}#{base}#{encoded_body}#{credentials[:app_secret]}"
-      OpenSSL::HMAC.hexdigest("SHA256", credentials[:app_secret].to_s, signable)
+      tiktok_sign(path, params, app_secret: credentials[:app_secret], encoded_body: encoded_body)
     end
 
     def encode_json_body(body)
-      return nil if body.nil?
-
-      JSON.generate(body)
+      tiktok_json_body(body)
     end
   end
 end

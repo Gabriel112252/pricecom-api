@@ -5,7 +5,7 @@ require "rails_helper"
 # is grounded against TikTok Shop Partner Center docs: 202309+ APIs send the
 # access token in `x-tts-access-token`, not in the query string.
 RSpec.describe Integrations::TiktokAdapter do
-  let(:credentials) { { app_key: "key123", app_secret: "secret456", access_token: "tok789" } }
+  let(:credentials) { { app_key: "key123", app_secret: "secret456", access_token: "tok789", shop_cipher: "GCP_cipher" } }
   let(:adapter) { described_class.new(credentials) }
   let(:search_url) { "https://open-api.tiktokglobalshop.com/product/202309/products/search" }
   let(:fixture_body) { File.read(Rails.root.join("spec/fixtures/integrations/tiktok_products.json")) }
@@ -29,6 +29,7 @@ RSpec.describe Integrations::TiktokAdapter do
 
       query = Rack::Utils.parse_query(captured_request.uri.query)
       expect(query).to include("app_key" => "key123")
+      expect(query).to include("shop_cipher" => "GCP_cipher")
       expect(query).to include("timestamp", "sign")
       expect(query).not_to include("access_token")
       expect(captured_request.headers["X-Tts-Access-Token"]).to eq("tok789")

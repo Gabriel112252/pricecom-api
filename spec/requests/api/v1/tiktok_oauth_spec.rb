@@ -4,6 +4,7 @@ RSpec.describe "TikTok Shop OAuth callback", type: :request do
   let(:tenant) { Tenant.create!(name: "Loja Teste", slug: "loja-teste-#{SecureRandom.hex(4)}") }
   let(:admin) { tenant.users.create!(name: "Admin", email: "admin@#{SecureRandom.hex(4)}.com", password: "password123", role: "admin") }
   let(:token_url) { "https://auth.tiktok-shops.com/api/v2/token/get" }
+  let(:authorized_shops_url) { "https://open-api.tiktokglobalshop.com/authorization/202309/shops" }
   let(:state) do
     Rails.application.message_verifier(:tiktok_oauth_state)
       .generate({ tenant_id: tenant.id }, expires_in: 10.minutes)
@@ -26,6 +27,25 @@ RSpec.describe "TikTok Shop OAuth callback", type: :request do
       request_id: "req-1"
     }.to_json
   end
+  let(:authorized_shops_response) do
+    {
+      code: 0,
+      message: "Success",
+      data: {
+        shops: [
+          {
+            id: "shop-1",
+            name: "Loja TikTok",
+            region: "BR",
+            seller_type: "LOCAL",
+            cipher: "GCP_shop_cipher",
+            code: "BRSHOP1"
+          }
+        ]
+      },
+      request_id: "shop-req-1"
+    }.to_json
+  end
 
   before do
     allow(ENV).to receive(:fetch).and_call_original
@@ -42,6 +62,22 @@ RSpec.describe "TikTok Shop OAuth callback", type: :request do
       status: "pending",
       credentials: credentials
     )
+  end
+
+  def stub_authorized_shops(body = authorized_shops_response)
+    stub_request(:get, authorized_shops_url)
+      .with(
+        query: hash_including(
+          "app_key" => "tenant-app-key",
+          "sign" => /\h{64}/,
+          "timestamp" => /\d+/
+        ),
+        headers: {
+          "Content-Type" => "application/json",
+          "X-Tts-Access-Token" => "access-token"
+        }
+      )
+      .to_return(status: 200, body: body, headers: { "Content-Type" => "application/json" })
   end
 
   it "returns the TikTok authorization URL with signed tenant state" do
@@ -80,6 +116,7 @@ RSpec.describe "TikTok Shop OAuth callback", type: :request do
         "grant_type" => "authorized_code"
       })
       .to_return(status: 200, body: token_response, headers: { "Content-Type" => "application/json" })
+    stub_authorized_shops
 
     get "/api/v1/webhooks/tiktok", params: {
       app_key: "tenant-app-key",
@@ -102,10 +139,46 @@ RSpec.describe "TikTok Shop OAuth callback", type: :request do
       "open_id" => "open-1",
       "seller_name" => "Loja TikTok",
       "seller_base_region" => "BR",
+      "shop_cipher" => "GCP_shop_cipher",
+      "shop_id" => "shop-1",
+      "shop_name" => "Loja TikTok",
+      "shop_code" => "BRSHOP1",
+      "shop_seller_type" => "LOCAL",
       "shop_region" => "BR",
       "locale" => "pt-BR"
     )
     expect(tenant.channels.find_by(platform: "tiktok")).to be_present
+  end
+
+  it "redirects with error when TikTok returns more than one authorized shop" do
+    credential = create_tiktok_credential
+
+    stub_request(:get, token_url)
+      .with(query: hash_including(
+        "app_key" => "tenant-app-key",
+        "app_secret" => "tenant-app-secret",
+        "auth_code" => "auth-code"
+      ))
+      .to_return(status: 200, body: token_response, headers: { "Content-Type" => "application/json" })
+    stub_authorized_shops(
+      {
+        code: 0,
+        message: "Success",
+        data: {
+          shops: [
+            { id: "shop-1", name: "Loja 1", region: "BR", seller_type: "LOCAL", cipher: "cipher-1", code: "BR1" },
+            { id: "shop-2", name: "Loja 2", region: "BR", seller_type: "LOCAL", cipher: "cipher-2", code: "BR2" }
+          ]
+        }
+      }.to_json
+    )
+
+    get "/api/v1/webhooks/tiktok", params: { app_key: "tenant-app-key", code: "auth-code", state: state }
+
+    expect(response).to redirect_to(/https:\/\/pricecom-web\.example\/integracoes\?/)
+    expect(response.location).to include("tiktok=error")
+    expect(response.location).to include("m%C3%BAltiplas+lojas")
+    expect(credential.reload.status).to eq("pending")
   end
 
   it "redirects with error when TikTok returns code different from zero" do
