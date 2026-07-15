@@ -11,6 +11,11 @@ yampi_order_polling_dispatch:
   class: "Integrations::Yampi::OrdersPollingSchedulerJob"
   queue: integrations
 
+tiktok_order_polling_dispatch:
+  cron: "*/15 * * * *"
+  class: "Integrations::Tiktok::OrdersPollingSchedulerJob"
+  queue: integrations
+
 # idworks (ERP) has no webhooks — polling is the only option (see
 # Integrations::Idworks::OrderSyncService/ProductCostSyncService class
 # comments). Product cost changes infrequently, so a 6h full sync is

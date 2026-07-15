@@ -1,28 +1,42 @@
 module Integrations
-  # TikTok Shop Partner API (Product module).
+  # TikTok Shop Partner API (Product + Order modules).
   #
-  # ⚠️ PARTIALLY VERIFIED: the authentication/signature contract below was
-  # checked against TikTok Shop Partner Center docs in July 2026: API
-  # version 202309+ sends access tokens through `x-tts-access-token`, signs
-  # only query params excluding `sign`/`access_token`, and appends the JSON
-  # body for non-multipart requests. Product payload normalization remains
-  # lightly verified and should still be checked against a sandbox account
-  # before broader production use.
+  # Verified against TikTok Shop Partner Center docs in July 2026:
+  # - Auth/signature: API version 202309+ sends access tokens through
+  #   `x-tts-access-token`, signs only query params excluding
+  #   `sign`/`access_token`, and appends the JSON body for non-multipart
+  #   requests.
+  # - Product payload: Search Products 202309
+  #   (partner.tiktokshop.com/docv2/page/search-products-202309) — each
+  #   skus[] entry has `id`, `seller_sku`, `price.{currency,
+  #   tax_exclusive_price, sale_price}` and `inventory[].{warehouse_id,
+  #   quantity}`. There is no `sku_id` or `price.amount` field.
+  # - Order payload: Get Order List 202309
+  #   (partner.tiktokshop.com/docv2/page/get-order-list-202309) —
+  #   pagination/sort go in the query string, time/status filters in the
+  #   JSON body, shop_cipher required in the query.
   class TiktokAdapter < BaseChannelAdapter
     include TiktokRequestSigning
 
     BASE_URL = "https://open-api.tiktokglobalshop.com".freeze
     PRODUCT_SEARCH_PATH = "/product/202309/products/search".freeze
     INVENTORY_SEARCH_PATH = "/product/202309/inventory/search".freeze
+    ORDER_SEARCH_PATH = "/order/202309/orders/search".freeze
     SHOP_SCOPED_PATHS = [
       PRODUCT_SEARCH_PATH,
-      INVENTORY_SEARCH_PATH
+      INVENTORY_SEARCH_PATH,
+      ORDER_SEARCH_PATH
     ].freeze
     PAGE_SIZE = 100
+    ORDERS_PAGE_SIZE = 50
 
-    # code => 0 means success; these are believed-auth-related failure
-    # families (see class comment — not confirmed against real docs).
+    # code => 0 means success. Auth/permission failures show up as the
+    # 105xxx code family (e.g. 105005 already observed in production when
+    # the app lacks the scope for an endpoint); keyword matching stays as a
+    # fallback for other auth-shaped messages.
     AUTH_ERROR_KEYWORDS = %w[sign signature access_token token auth].freeze
+    PERMISSION_ERROR_KEYWORDS = ["permission", "scope", "not authorized", "unauthorized"].freeze
+    AUTH_ERROR_CODES = (105_000..105_999).freeze
     RATE_LIMIT_KEYWORDS = %w[rate frequency too many limit].freeze
 
     def authenticate
@@ -60,15 +74,38 @@ module Integrations
       end
     end
 
+    # `seller_sku` is optional in TikTok Shop (sellers often leave it
+    # blank, and the API then returns an empty string), so fall back to the
+    # TikTok-generated SKU `id` — otherwise every SKU without a seller code
+    # is dropped by ProductSyncService as "sem SKU externo".
+    # `sale_price` (tax-inclusive) only exists for CN cross-border sellers;
+    # `tax_exclusive_price` is the regular selling-price field.
     def normalize_product(raw)
       {
         external_id:  raw["id"].to_s,
-        external_sku: raw["seller_sku"] || raw["sku_id"],
+        external_sku: raw["seller_sku"].presence || raw["id"].to_s,
         name:         raw["_product_title"],
-        price:        to_decimal(raw.dig("price", "amount") || raw["price"]),
+        price:        to_decimal(raw.dig("price", "sale_price").presence || raw.dig("price", "tax_exclusive_price")),
         stock_qty:    to_decimal((raw["inventory"] || []).sum { |inv| inv["quantity"].to_i }),
         raw:          raw.except("_product_title")
       }
+    end
+
+    # One page of the Get Order List API. Time/status filters
+    # (create_time_ge/lt, update_time_ge/lt, order_status) belong in the
+    # JSON body; page_size/page_token/sort_* belong in the query string.
+    # Returns the response's "data" hash: { "orders" => [...],
+    # "next_page_token" => ..., "total_count" => ... }.
+    def fetch_orders_page(filters: {}, page_token: nil, page_size: ORDERS_PAGE_SIZE, sort_field: "create_time")
+      query_params = {
+        page_size:  page_size,
+        page_token: page_token.presence,
+        sort_field: sort_field,
+        sort_order: "ASC"
+      }.compact
+
+      body = post(ORDER_SEARCH_PATH, filters.compact, query_params: query_params)
+      body["data"] || {}
     end
 
     private
@@ -90,7 +127,7 @@ module Integrations
       end
 
       parsed = handle_response(response)
-      raise_on_body_error(parsed)
+      raise_on_body_error(parsed, path)
       parsed
     end
 
@@ -108,17 +145,24 @@ module Integrations
 
     # TikTok Shop's API returns HTTP 200 for most application-level errors
     # too, encoding the real outcome in the response body's `code` field
-    # (0 = success). Best-effort classification into our shared error
-    # types, since we don't have the real numeric error-code table.
-    def raise_on_body_error(body)
+    # (0 = success). The 105xxx family covers auth/permission failures
+    # (invalid/expired token, missing scope — 105005 already seen in
+    # production); scope errors get an explicit reauthorization hint so the
+    # sync log tells the operator what to do.
+    def raise_on_body_error(body, path = nil)
       code = body["code"]
       return if code.nil? || code.zero?
 
       message = body["message"].to_s
       downcased = message.downcase
+      where = path ? " em #{path}" : ""
 
-      if AUTH_ERROR_KEYWORDS.any? { |k| downcased.include?(k) }
-        raise AuthenticationError, "TiktokAdapter: #{message} (code #{code})"
+      if PERMISSION_ERROR_KEYWORDS.any? { |k| downcased.include?(k) }
+        raise AuthenticationError,
+          "TiktokAdapter: sem permissão/escopo#{where} (code #{code}: #{message}) — " \
+          "ative o escopo correspondente no Partner Center (ex: Order Information) e reconecte o TikTok Shop"
+      elsif AUTH_ERROR_CODES.cover?(code.to_i) || AUTH_ERROR_KEYWORDS.any? { |k| downcased.include?(k) }
+        raise AuthenticationError, "TiktokAdapter: credenciais rejeitadas#{where} (code #{code}: #{message})"
       elsif RATE_LIMIT_KEYWORDS.any? { |k| downcased.include?(k) }
         raise RateLimitError, "TiktokAdapter: #{message} (code #{code})"
       else

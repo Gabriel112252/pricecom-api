@@ -1,9 +1,10 @@
 require "rails_helper"
 
-# ⚠️ Unlike the Yampi and Shopify specs, the product payload assertions here
-# still cover the adapter's assumed response shape. The auth/signing contract
-# is grounded against TikTok Shop Partner Center docs: 202309+ APIs send the
-# access token in `x-tts-access-token`, not in the query string.
+# Both the auth/signing contract and the product payload shape are grounded
+# against TikTok Shop Partner Center docs (July 2026): 202309+ APIs send the
+# access token in `x-tts-access-token`, and Search Products 202309 returns
+# skus[] with `id`, `seller_sku` (optional, may be blank) and
+# `price.{tax_exclusive_price, sale_price}`.
 RSpec.describe Integrations::TiktokAdapter do
   let(:credentials) { { app_key: "key123", app_secret: "secret456", access_token: "tok789", shop_cipher: "GCP_cipher" } }
   let(:adapter) { described_class.new(credentials) }
@@ -105,6 +106,78 @@ RSpec.describe Integrations::TiktokAdapter do
         price:        BigDecimal("89.90"),
         stock_qty:    BigDecimal("30")
       )
+    end
+
+    it "falls back to the TikTok SKU id when seller_sku is blank" do
+      raw = adapter.fetch_products.find { |r| r["id"] == "sku-002" }
+
+      expect(adapter.normalize_product(raw)).to include(
+        external_id:  "sku-002",
+        external_sku: "sku-002",
+        stock_qty:    BigDecimal("12")
+      )
+    end
+
+    it "prefers sale_price over tax_exclusive_price when present" do
+      raw = {
+        "id" => "sku-003",
+        "seller_sku" => "SKU-3",
+        "price" => { "currency" => "BRL", "tax_exclusive_price" => "80.00", "sale_price" => "96.00" },
+        "inventory" => [],
+        "_product_title" => "Produto"
+      }
+
+      expect(adapter.normalize_product(raw)[:price]).to eq(BigDecimal("96.00"))
+    end
+  end
+
+  describe "#fetch_orders_page" do
+    let(:orders_url) { "https://open-api.tiktokglobalshop.com/order/202309/orders/search" }
+    let(:orders_body) do
+      {
+        code: 0,
+        message: "Success",
+        data: {
+          orders: [ { id: "576461413038785752", status: "COMPLETED" } ],
+          next_page_token: "tok-2",
+          total_count: 1
+        }
+      }.to_json
+    end
+
+    it "sends pagination in the query and time filters in the JSON body" do
+      captured_request = nil
+
+      stub_request(:post, /\A#{Regexp.escape(orders_url)}/)
+        .with { |request| captured_request = request }
+        .to_return(status: 200, body: orders_body, headers: { "Content-Type" => "application/json" })
+
+      data = adapter.fetch_orders_page(
+        filters: { create_time_ge: 1_623_812_664, create_time_lt: 1_623_899_064 },
+        page_token: nil,
+        sort_field: "create_time"
+      )
+
+      query = Rack::Utils.parse_query(captured_request.uri.query)
+      expect(query).to include("page_size" => "50", "sort_field" => "create_time", "sort_order" => "ASC")
+      expect(query).to include("shop_cipher" => "GCP_cipher")
+      expect(query).not_to include("page_token")
+      expect(JSON.parse(captured_request.body)).to eq(
+        "create_time_ge" => 1_623_812_664, "create_time_lt" => 1_623_899_064
+      )
+      expect(data["orders"].size).to eq(1)
+      expect(data["next_page_token"]).to eq("tok-2")
+    end
+
+    it "raises AuthenticationError with a scope hint on permission errors" do
+      stub_request(:post, /\A#{Regexp.escape(orders_url)}/)
+        .to_return(
+          status: 200,
+          body: { code: 105_005, message: "No permission to call this api" }.to_json,
+          headers: { "Content-Type" => "application/json" }
+        )
+
+      expect { adapter.fetch_orders_page }.to raise_error(Integrations::AuthenticationError, /escopo/)
     end
   end
 end

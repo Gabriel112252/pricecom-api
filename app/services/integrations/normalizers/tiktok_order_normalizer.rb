@@ -1,5 +1,10 @@
 module Integrations
   module Normalizers
+    # Normalizes a TikTok Shop order (Get Order List / Get Order Detail
+    # 202309 — partner.tiktokshop.com/docv2/page/get-order-list-202309)
+    # into the shape Integrations::Orders::UpsertOrder expects. The
+    # doc-verified fields come first in each extractor; the extra fallbacks
+    # are kept for defensively handling webhook-shaped payloads.
     class TiktokOrderNormalizer
       CANCEL_KEYWORDS = %w[cancel canceled cancelled cancelado].freeze
       REFUND_KEYWORDS = %w[refund refunded estorno reembolso chargeback].freeze
@@ -18,6 +23,8 @@ module Integrations
 
         {
           external_id:    external_id,
+          # TikTok has no separate human-facing order number; the order id
+          # is what Seller Center shows.
           order_number:   @p["order_number"] || @p["order_id"]&.to_s || external_id,
           status:         extract_status,
           payment_method: extract_payment_method,
@@ -36,25 +43,22 @@ module Integrations
           nf_discount:    to_f(@p["nf_discount"]    || @p.dig("invoice", "discount")),
           nf_freight:     to_f(@p["nf_freight"]     || @p.dig("invoice", "freight")),
           refund_reason:  @p["refund_reason"] || @p["reason"] || @p.dig("refund", "reason"),
+          # payment.total_amount = sub_total + shipping_fee + taxes — the
+          # amount the buyer actually paid (post-discount), matching the
+          # Yampi value_total semantics used elsewhere.
           gross_value:    to_f(
+            @p.dig("payment", "total_amount") ||
             @p["total_amount"] ||
             @p["total"] ||
             @p["payment_amount"] ||
-            @p.dig("payment", "total_amount") ||
             @p.dig("order", "total_amount")
           ),
           freight:        to_f(
+            @p.dig("payment", "shipping_fee") ||
             @p["shipping_fee"] ||
-            @p["freight"] ||
-            @p.dig("payment", "shipping_fee")
+            @p["freight"]
           ),
-          discount:       to_f(
-            @p["discount"] ||
-            @p["seller_discount"] ||
-            @p["platform_discount"] ||
-            @p["total_discount"] ||
-            @p.dig("payment", "discount")
-          ),
+          discount:       extract_discount,
           coupon_code:    extract_coupon_code,
           coupon_discount: extract_coupon_discount,
           ordered_at:     parse_date(@p["create_time"] || @p["created_at"]),
@@ -68,6 +72,9 @@ module Integrations
         (@p["id"] || @p["order_id"] || @p.dig("order", "id"))&.to_s
       end
 
+      # Doc enum: UNPAID / ON_HOLD / AWAITING_SHIPMENT / PARTIALLY_SHIPPING
+      # / AWAITING_COLLECTION / IN_TRANSIT / DELIVERED / COMPLETED /
+      # CANCELLED — stored verbatim, like the other channels.
       def extract_status
         @p["status"] ||
           @p["order_status"] ||
@@ -82,14 +89,19 @@ module Integrations
       end
 
       def extract_payment_method
-        @p.dig("payment", "method") ||
+        @p["payment_method_name"] ||
+          @p.dig("payment", "method") ||
           @p["payment_method"] ||
           @p["pay_type"].to_s
       end
 
+      # recipient_address is absent for UNPAID/ON_HOLD orders, and the name
+      # is desensitized when platform logistics is used — both acceptable
+      # for dashboard purposes.
       def extract_customer_name
         recipient = @p.dig("recipient_address") || @p.dig("order", "recipient_address") || {}
         recipient["name"].presence ||
+          @p["buyer_nickname"].presence ||
           @p.dig("buyer_info", "buyer_name").to_s
       end
 
@@ -98,19 +110,38 @@ module Integrations
         tags.any? { |t| t.to_s.downcase.include?("recorr") } ? "recorrente" : "novo"
       end
 
+      # There is no flat `state` key in the 202309 address schema: the
+      # administrative divisions live in recipient_address.district_info[]
+      # ({address_level_name, address_name, address_level}), with
+      # region_code as the country-level fallback.
       def extract_state
-        @p.dig("recipient_address", "state") ||
-          @p.dig("recipient_address", "province") ||
-          @p.dig("order", "recipient_address", "state").to_s
+        @p.dig("recipient_address", "state").presence ||
+          @p.dig("recipient_address", "province").presence ||
+          extract_state_from_district_info.presence ||
+          @p.dig("recipient_address", "region_code").to_s
       end
 
+      def extract_state_from_district_info
+        districts = @p.dig("recipient_address", "district_info")
+        return nil unless districts.is_a?(Array)
+
+        named = districts.find { |d| d["address_level_name"].to_s.match?(/state|province|estado/i) }
+        leveled = districts.find { |d| d["address_level"].to_s == "L1" }
+        (named || leveled)&.dig("address_name")
+      end
+
+      # payment.seller_discount / payment.platform_discount are the
+      # product-level discounts (shipping discounts are already reflected
+      # in payment.shipping_fee).
       def extract_discount
+        payment = @p["payment"].is_a?(Hash) ? @p["payment"] : nil
+        return to_f(payment["seller_discount"]) + to_f(payment["platform_discount"]) if payment
+
         to_f(
           @p["discount"] ||
           @p["seller_discount"] ||
           @p["platform_discount"] ||
-          @p["total_discount"] ||
-          @p.dig("payment", "discount")
+          @p["total_discount"]
         )
       end
 
@@ -149,21 +180,41 @@ module Integrations
         extract_coupon_code.present? ? extract_discount : 0.0
       end
 
+      # line_items has no quantity field: each entry is exactly one unit of
+      # a SKU (buying 3x the same SKU yields 3 line items), so units are
+      # grouped back into one item with a summed quantity. Per-unit fields
+      # per the doc: sku_id, seller_sku, product_id, product_name, sku_name,
+      # sale_price, original_price, seller_discount, platform_discount,
+      # is_gift.
       def extract_items
-        items = @p["items"] || @p["line_items"] || @p.dig("order", "items") || []
-        items.map do |i|
-          name = (i["product_name"] || i["name"] || i["title"]).to_s
+        line_items = @p["line_items"] || @p["items"] || @p.dig("order", "items") || []
+
+        line_items.group_by { |i| item_group_key(i) }.map do |_key, units|
+          i = units.first
           {
-            sku:           (i["seller_sku"] || i["sku"] || i["sku_id"]).to_s,
-            name:          name,
-            quantity:      (i["quantity"] || i["qty"] || 1).to_i,
+            sku:           (i["seller_sku"].presence || i["sku_id"] || i["sku"]).to_s,
+            name:          extract_item_name(i),
+            quantity:      units.sum { |unit| (unit["quantity"] || 1).to_i },
             unit_price:    to_f(i["sale_price"] || i["price"] || i["unit_price"]),
+            # TikTok doesn't expose product cost; unit_cost comes from the
+            # local Product (see UpsertOrder#unit_cost_for_item).
             unit_cost:     to_f(i["cost_price"] || i["cost"] || i["unit_cost"]),
-            discount:      to_f(i["discount"] || i["seller_discount"] || i["platform_discount"]),
+            discount:      units.sum { |unit| to_f(unit["seller_discount"]) + to_f(unit["platform_discount"]) },
             is_gift:       extract_item_gift(i, name_key: "product_name", price_key: "sale_price"),
-            nf_unit_price: to_f(i["nf_unit_price"] || i.dig("invoice", "unit_price"))
+            nf_unit_price: to_f(i["nf_unit_price"] || i.dig("invoice", "unit_price")),
+            external_product_id: i["product_id"]&.to_s
           }
         end
+      end
+
+      def item_group_key(item)
+        sku_key = item["sku_id"].presence || item["seller_sku"].presence || item["id"].presence || item.object_id
+        [ sku_key, item["sale_price"].to_s, item["is_gift"] == true ]
+      end
+
+      def extract_item_name(item)
+        name = (item["product_name"].presence || item["name"].presence || item["title"]).to_s
+        name.presence || item["sku_name"].to_s
       end
 
       def extract_item_gift(item, name_key: "name", price_key: "price")
