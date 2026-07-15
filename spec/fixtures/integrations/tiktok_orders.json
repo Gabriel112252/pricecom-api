@@ -1,0 +1,73 @@
+{
+  "code": 0,
+  "message": "Success",
+  "request_id": "req-orders-abc-123",
+  "data": {
+    "next_page_token": "",
+    "total_count": 1,
+    "orders": [
+      {
+        "id": "580100000000000001",
+        "status": "COMPLETED",
+        "create_time": 1752345600,
+        "update_time": 1752432000,
+        "payment_method_name": "PIX",
+        "payment": {
+          "currency": "BRL",
+          "original_total_product_price": "119.80",
+          "seller_discount": "20.00",
+          "platform_discount": "44.34",
+          "sub_total": "55.46",
+          "original_shipping_fee": "10.00",
+          "shipping_fee_seller_discount": "3.16",
+          "shipping_fee_platform_discount": "0",
+          "shipping_fee": "6.84",
+          "tax": "0",
+          "total_amount": "62.30"
+        },
+        "recipient_address": {
+          "name": "Cliente Exemplo",
+          "full_address": "Rua Exemplo 100, São Paulo, SP",
+          "postal_code": "01000-000",
+          "region_code": "BR",
+          "district_info": [
+            { "address_level_name": "Country", "address_name": "Brazil", "address_level": "L0" },
+            { "address_level_name": "State", "address_name": "SP", "address_level": "L1" }
+          ]
+        },
+        "line_items": [
+          {
+            "id": "770000000000000001",
+            "sku_id": "111222333",
+            "seller_sku": "CAMISA-P",
+            "product_id": "999888777",
+            "product_name": "Camisa Básica P",
+            "sku_name": "P, Azul",
+            "sale_price": "29.95",
+            "original_price": "59.90",
+            "seller_discount": "10.00",
+            "platform_discount": "22.17",
+            "currency": "BRL",
+            "is_gift": false,
+            "display_status": "COMPLETED"
+          },
+          {
+            "id": "770000000000000002",
+            "sku_id": "111222333",
+            "seller_sku": "CAMISA-P",
+            "product_id": "999888777",
+            "product_name": "Camisa Básica P",
+            "sku_name": "P, Azul",
+            "sale_price": "29.95",
+            "original_price": "59.90",
+            "seller_discount": "10.00",
+            "platform_discount": "22.17",
+            "currency": "BRL",
+            "is_gift": false,
+            "display_status": "COMPLETED"
+          }
+        ]
+      }
+    ]
+  }
+}

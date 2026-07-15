@@ -43,21 +43,17 @@ module Integrations
           nf_discount:    to_f(@p["nf_discount"]    || @p.dig("invoice", "discount")),
           nf_freight:     to_f(@p["nf_freight"]     || @p.dig("invoice", "freight")),
           refund_reason:  @p["refund_reason"] || @p["reason"] || @p.dig("refund", "reason"),
-          # payment.total_amount = sub_total + shipping_fee + taxes — the
-          # amount the buyer actually paid (post-discount), matching the
-          # Yampi value_total semantics used elsewhere.
-          gross_value:    to_f(
-            @p.dig("payment", "total_amount") ||
-            @p["total_amount"] ||
-            @p["total"] ||
-            @p["payment_amount"] ||
-            @p.dig("order", "total_amount")
-          ),
-          freight:        to_f(
-            @p.dig("payment", "shipping_fee") ||
-            @p["shipping_fee"] ||
-            @p["freight"]
-          ),
+          # gross_value must be the PRE-discount order total: the rest of
+          # the system (Order#calculate_margin, dashboard) subtracts
+          # `discount` from it. payment.total_amount is the POST-discount
+          # amount the buyer paid (doc: total_amount = sub_total +
+          # shipping_fee + taxes, where sub_total is already net of
+          # seller/platform discounts) — storing it here double-counted the
+          # discount and produced discount > gross_value in production.
+          # Identity kept (taxes are zero outside US/cross-border):
+          #   gross_value - discount == payment.total_amount - taxes
+          gross_value:    extract_gross_value,
+          freight:        extract_freight,
           discount:       extract_discount,
           coupon_code:    extract_coupon_code,
           coupon_discount: extract_coupon_discount,
@@ -130,11 +126,53 @@ module Integrations
         (named || leveled)&.dig("address_name")
       end
 
+      # Pre-discount order total: original_total_product_price (doc: "Total
+      # original price of the products") + the buyer-paid shipping fee —
+      # the same "products + freight, before product discounts" semantics
+      # Yampi's value_total carries into gross_value.
+      def extract_gross_value
+        original_products_total = extract_original_products_total
+        return original_products_total + extract_freight if original_products_total
+
+        # Unknown payload shape without pre-discount info: rebuild the
+        # pre-discount gross from the paid total + discounts so the margin
+        # math (gross - discount) still lands on what the buyer paid.
+        extract_paid_total + extract_discount
+      end
+
+      def extract_original_products_total
+        payment = payment_hash
+        return to_f(payment["original_total_product_price"]) if payment && payment["original_total_product_price"].present?
+
+        line_items = raw_line_items
+        return nil unless line_items.any? { |i| i["original_price"].present? }
+
+        line_items.sum { |i| to_f(i["original_price"].presence || i["sale_price"]) * (i["quantity"] || 1).to_i }
+      end
+
+      def extract_paid_total
+        to_f(
+          @p.dig("payment", "total_amount") ||
+          @p["total_amount"] ||
+          @p["total"] ||
+          @p["payment_amount"] ||
+          @p.dig("order", "total_amount")
+        )
+      end
+
+      def extract_freight
+        to_f(
+          @p.dig("payment", "shipping_fee") ||
+          @p["shipping_fee"] ||
+          @p["freight"]
+        )
+      end
+
       # payment.seller_discount / payment.platform_discount are the
       # product-level discounts (shipping discounts are already reflected
       # in payment.shipping_fee).
       def extract_discount
-        payment = @p["payment"].is_a?(Hash) ? @p["payment"] : nil
+        payment = payment_hash
         return to_f(payment["seller_discount"]) + to_f(payment["platform_discount"]) if payment
 
         to_f(
@@ -143,6 +181,10 @@ module Integrations
           @p["platform_discount"] ||
           @p["total_discount"]
         )
+      end
+
+      def payment_hash
+        @p["payment"].is_a?(Hash) ? @p["payment"] : nil
       end
 
       def extract_coupon_code
@@ -187,9 +229,7 @@ module Integrations
       # sale_price, original_price, seller_discount, platform_discount,
       # is_gift.
       def extract_items
-        line_items = @p["line_items"] || @p["items"] || @p.dig("order", "items") || []
-
-        line_items.group_by { |i| item_group_key(i) }.map do |_key, units|
+        raw_line_items.group_by { |i| item_group_key(i) }.map do |_key, units|
           i = units.first
           {
             sku:           (i["seller_sku"].presence || i["sku_id"] || i["sku"]).to_s,
@@ -205,6 +245,10 @@ module Integrations
             external_product_id: i["product_id"]&.to_s
           }
         end
+      end
+
+      def raw_line_items
+        @p["line_items"] || @p["items"] || @p.dig("order", "items") || []
       end
 
       def item_group_key(item)
