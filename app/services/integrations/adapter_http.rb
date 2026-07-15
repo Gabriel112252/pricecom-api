@@ -21,7 +21,7 @@ module Integrations
         parse_response_body(response.body)
       when 401, 403
         raise AuthenticationError,
-              "#{self.class.name}: credenciais rejeitadas (HTTP #{response.status})"
+              "#{self.class.name}: credenciais rejeitadas (HTTP #{response.status}) — #{response.body}"
       when 429
         raise RateLimitError.new(
           "#{self.class.name}: limite de requisições atingido",
