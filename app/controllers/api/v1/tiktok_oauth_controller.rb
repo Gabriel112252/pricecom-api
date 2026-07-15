@@ -182,7 +182,7 @@ module Api
       end
 
       def frontend_base_url
-        ENV.fetch("FRONTEND_URL", "http://localhost:5173").delete_suffix("/")
+        ENV.fetch("FRONTEND_URL", "https://pricecom-pricecom-web.dzxtro.easypanel.host").delete_suffix("/")
       end
     end
   end
