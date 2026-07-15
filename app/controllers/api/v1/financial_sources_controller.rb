@@ -52,7 +52,7 @@ module Api
 
       def recent_logs_for(source)
         IntegrationSyncLog
-          .where(tenant: current_tenant, action: "pagarme_settlement_sync")
+          .where(tenant: current_tenant, action: [ "pagarme_payable_sync", "pagarme_settlement_sync" ])
           .where("metadata->>'financial_source_id' = ?", source.id.to_s)
           .order(created_at: :desc)
           .limit(5)

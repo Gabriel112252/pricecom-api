@@ -1,40 +1,115 @@
 require "rails_helper"
 
-# Assertions about the order/charge shape (id, code, amount-in-cents,
-# status, paid_at, Basic Auth, page/size/created_since/created_until,
-# paging.next) are verified against docs.pagar.me/reference on 2026-07-10.
-# fee_amount/net_amount are NOT verified — the accessible Charge object
-# docs show no fee field — see the class comment on PagarmeAdapter.
 RSpec.describe Integrations::PagarmeAdapter do
   let(:credentials) { { api_key: "sk_test_abc123" } }
   let(:adapter) { described_class.new(credentials) }
   let(:orders_url) { "https://api.pagar.me/core/v5/orders" }
+  let(:payables_url) { "https://api.pagar.me/core/v5/payables" }
   let(:orders_fixture) { File.read(Rails.root.join("spec/fixtures/integrations/pagarme_orders.json")) }
   let(:expected_auth_header) { "Basic #{Base64.strict_encode64('sk_test_abc123:')}" }
+  let(:payables_page_1) do
+    {
+      data: [
+        {
+          id: "pay_1",
+          status: "waiting_funds",
+          amount: 19990,
+          fee: 1000,
+          anticipation_fee: 550,
+          installment: 1,
+          transaction_id: "tran_1",
+          charge_id: "ch_1",
+          recipient_id: "rp_1",
+          payment_date: "2026-07-20",
+          original_payment_date: "2026-08-01",
+          payment_method: "credit_card",
+          accrual_date: "2026-07-10T12:00:00Z",
+          date_created: "2026-07-10T12:00:01Z"
+        }
+      ],
+      paging: { forward_cursor: "cursor_2" }
+    }.to_json
+  end
+  let(:payables_page_2) do
+    {
+      data: [
+        {
+          id: "pay_2",
+          status: "paid",
+          amount: 5000,
+          fee: 125,
+          anticipation_fee: 0,
+          installment: 1,
+          transaction_id: "tran_2",
+          payment_date: "2026-07-21",
+          payment_method: "pix",
+          accrual_date: "2026-07-11T12:00:00Z",
+          date_created: "2026-07-11T12:00:01Z"
+        }
+      ],
+      paging: { forward_cursor: nil }
+    }.to_json
+  end
 
   describe "#authenticate" do
     it "returns true when Pagar.me accepts the credentials via Basic Auth" do
-      stub_request(:get, orders_url)
-        .with(query: hash_including("page" => "1", "size" => "1"), headers: { "Authorization" => expected_auth_header })
-        .to_return(status: 200, body: orders_fixture, headers: { "Content-Type" => "application/json" })
+      stub_request(:get, payables_url)
+        .with(query: hash_including("size" => "1"), headers: { "Authorization" => expected_auth_header })
+        .to_return(status: 200, body: { data: [], paging: { forward_cursor: nil } }.to_json, headers: { "Content-Type" => "application/json" })
 
       expect(adapter.authenticate).to eq(true)
     end
 
     it "raises AuthenticationError on 401" do
-      stub_request(:get, orders_url).with(query: hash_including("page" => "1"))
+      stub_request(:get, payables_url).with(query: hash_including("size" => "1"))
         .to_return(status: 401, body: { message: "Unauthorized" }.to_json)
 
       expect { adapter.authenticate }.to raise_error(Integrations::AuthenticationError)
     end
 
     it "raises RateLimitError on 429" do
-      stub_request(:get, orders_url).with(query: hash_including("page" => "1"))
+      stub_request(:get, payables_url).with(query: hash_including("size" => "1"))
         .to_return(status: 429, body: { message: "Too Many Requests" }.to_json, headers: { "Retry-After" => "10" })
 
       expect { adapter.authenticate }.to raise_error(Integrations::RateLimitError) do |error|
         expect(error.retry_after).to eq(10)
       end
+    end
+  end
+
+  describe "#fetch_payables" do
+    before do
+      stub_request(:get, payables_url)
+        .with(query: { "payment_date[gte]" => "2026-07-01", "payment_date[lte]" => "2026-07-31", "size" => "30" })
+        .to_return(status: 200, body: payables_page_1, headers: { "Content-Type" => "application/json" })
+
+      stub_request(:get, payables_url)
+        .with(query: { "payment_date[gte]" => "2026-07-01", "payment_date[lte]" => "2026-07-31", "size" => "30", "forward_cursor" => "cursor_2" })
+        .to_return(status: 200, body: payables_page_2, headers: { "Content-Type" => "application/json" })
+    end
+
+    it "uses cursor pagination and maps payable fields with cents converted to BRL" do
+      payables = adapter.fetch_payables(payment_date_from: Date.new(2026, 7, 1), payment_date_to: Date.new(2026, 7, 31))
+
+      expect(payables.size).to eq(2)
+      first = payables.first
+      expect(first).to include(
+        payable_id: "pay_1",
+        status: "waiting_funds",
+        amount: 199.90,
+        fee_amount: 10.00,
+        anticipation_fee_amount: 5.50,
+        net_amount: 184.40,
+        installment: 1,
+        transaction_id: "tran_1",
+        charge_id: "ch_1",
+        recipient_id: "rp_1",
+        payment_method: "credit_card",
+        payment_date: Date.new(2026, 7, 20),
+        original_payment_date: Date.new(2026, 8, 1)
+      )
+      expect(first[:accrual_date]).to eq(Time.zone.parse("2026-07-10T12:00:00Z"))
+      expect(first[:date_created]).to eq(Time.zone.parse("2026-07-10T12:00:01Z"))
     end
   end
 

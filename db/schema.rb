@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_07_13_000100) do
+ActiveRecord::Schema[7.2].define(version: 2026_07_15_090000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -198,6 +198,41 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_13_000100) do
     t.index ["tenant_id", "source_type"], name: "index_financial_sources_on_tenant_id_and_source_type"
     t.index ["tenant_id", "status"], name: "index_financial_sources_on_tenant_id_and_status"
     t.index ["tenant_id"], name: "index_financial_sources_on_tenant_id"
+  end
+
+  create_table "financial_receivables", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "financial_source_id", null: false
+    t.bigint "financial_settlement_item_id"
+    t.bigint "order_id"
+    t.string "payable_id", null: false
+    t.string "status", null: false
+    t.decimal "amount", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "fee_amount", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "anticipation_fee_amount", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "net_amount", precision: 12, scale: 2, default: "0.0", null: false
+    t.integer "installment"
+    t.string "transaction_id"
+    t.string "charge_id"
+    t.string "recipient_id"
+    t.string "payment_method"
+    t.date "payment_date"
+    t.date "original_payment_date"
+    t.datetime "accrual_date"
+    t.datetime "date_created"
+    t.jsonb "raw_payload", default: {}, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["charge_id"], name: "index_financial_receivables_on_charge_id"
+    t.index ["financial_settlement_item_id"], name: "index_financial_receivables_on_financial_settlement_item_id"
+    t.index ["financial_source_id", "payment_date"], name: "idx_financial_receivables_on_source_payment_date"
+    t.index ["financial_source_id"], name: "index_financial_receivables_on_financial_source_id"
+    t.index ["order_id"], name: "index_financial_receivables_on_order_id"
+    t.index ["payment_method"], name: "index_financial_receivables_on_payment_method"
+    t.index ["tenant_id", "financial_source_id", "payable_id"], name: "idx_financial_receivables_on_source_payable", unique: true
+    t.index ["tenant_id", "payment_date", "status"], name: "idx_financial_receivables_on_tenant_payment_status"
+    t.index ["tenant_id"], name: "index_financial_receivables_on_tenant_id"
+    t.index ["transaction_id"], name: "index_financial_receivables_on_transaction_id"
   end
 
   create_table "imports", force: :cascade do |t|
@@ -468,6 +503,10 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_13_000100) do
   add_foreign_key "financial_settlement_items", "financial_settlements"
   add_foreign_key "financial_settlement_items", "orders"
   add_foreign_key "financial_settlement_items", "tenants"
+  add_foreign_key "financial_receivables", "financial_settlement_items"
+  add_foreign_key "financial_receivables", "financial_sources"
+  add_foreign_key "financial_receivables", "orders"
+  add_foreign_key "financial_receivables", "tenants"
   add_foreign_key "financial_settlements", "channels"
   add_foreign_key "financial_settlements", "financial_sources"
   add_foreign_key "financial_settlements", "integrations"

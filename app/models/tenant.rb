@@ -13,6 +13,7 @@ class Tenant < ApplicationRecord
   has_many :financial_sources, dependent: :destroy
   has_many :financial_settlements, dependent: :destroy
   has_many :financial_settlement_items, dependent: :destroy
+  has_many :financial_receivables, dependent: :destroy
   has_many :channel_credentials, dependent: :destroy
   has_many :channel_product_listings, dependent: :destroy
   has_many :data_source_configs, dependent: :destroy

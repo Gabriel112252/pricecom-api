@@ -4,17 +4,45 @@ RSpec.describe "Pagar.me integration", type: :request do
   let(:tenant)   { Tenant.create!(name: "Loja Teste", slug: "loja-teste-#{SecureRandom.hex(4)}") }
   let(:admin)    { tenant.users.create!(name: "Admin", email: "admin@#{SecureRandom.hex(4)}.com", password: "password123", role: "admin") }
   let(:operador) { tenant.users.create!(name: "Operador", email: "op@#{SecureRandom.hex(4)}.com", password: "password123", role: "operador") }
-  let(:orders_fixture) { File.read(Rails.root.join("spec/fixtures/integrations/pagarme_orders.json")) }
+  let(:payables_fixture) do
+    {
+      data: [
+        {
+          id: "pay_1",
+          status: "waiting_funds",
+          amount: 19990,
+          fee: 1000,
+          anticipation_fee: 550,
+          installment: 1,
+          transaction_id: "tran_1",
+          charge_id: "ch_1",
+          recipient_id: "rp_1",
+          payment_date: "2026-07-20",
+          original_payment_date: "2026-08-01",
+          payment_method: "credit_card",
+          accrual_date: "2026-07-10T12:00:00Z",
+          date_created: "2026-07-10T12:00:01Z"
+        }
+      ],
+      paging: { forward_cursor: nil }
+    }.to_json
+  end
 
   def auth_headers(user)
     { "Authorization" => "Bearer #{JsonWebToken.encode(user_id: user.id)}" }
   end
 
   def stub_auth(status: 200)
-    stub_request(:get, "https://api.pagar.me/core/v5/orders")
-      .with(query: hash_including("page" => "1"))
-      .to_return(status: status, body: status == 200 ? orders_fixture : { message: "Unauthorized" }.to_json,
+    stub_request(:get, "https://api.pagar.me/core/v5/payables")
+      .with(query: hash_including("size" => "1"))
+      .to_return(status: status, body: status == 200 ? { data: [], paging: { forward_cursor: nil } }.to_json : { message: "Unauthorized" }.to_json,
                  headers: { "Content-Type" => "application/json" })
+  end
+
+  def stub_payables
+    stub_request(:get, "https://api.pagar.me/core/v5/payables")
+      .with(query: hash_including("payment_date[gte]" => "2026-06-15"))
+      .to_return(status: 200, body: payables_fixture, headers: { "Content-Type" => "application/json" })
   end
 
   describe "POST /api/v1/integrations/pagarme/connect" do
@@ -61,17 +89,19 @@ RSpec.describe "Pagar.me integration", type: :request do
     end
 
     it "runs the settlement sync and returns created/updated/skipped counts" do
-      tenant.channels.create!(name: "Yampi", platform: "yampi")
-      tenant.financial_sources.create!(provider: "pagarme", name: "Pagar.me", source_type: "gateway", status: "active", credentials: { api_key: "sk_test_abc123" })
-      stub_auth
+      travel_to Time.zone.parse("2026-07-15T12:00:00Z") do
+        tenant.channels.create!(name: "Yampi", platform: "yampi")
+        tenant.financial_sources.create!(provider: "pagarme", name: "Pagar.me", source_type: "gateway", status: "active", credentials: { api_key: "sk_test_abc123" })
+        stub_payables
 
-      post "/api/v1/integrations/pagarme/sync", params: { days: 30 }, headers: auth_headers(admin)
+        post "/api/v1/integrations/pagarme/sync", params: { days: 30 }, headers: auth_headers(admin)
 
-      expect(response).to have_http_status(:ok)
-      body = JSON.parse(response.body)
-      expect(body["success"]).to eq(true)
-      expect(body["created_count"]).to eq(1)
-      expect(body["skipped_count"]).to eq(1)
+        expect(response).to have_http_status(:ok)
+        body = JSON.parse(response.body)
+        expect(body["success"]).to eq(true)
+        expect(body["created_count"]).to eq(1)
+        expect(body["skipped_count"]).to eq(0)
+      end
     end
   end
 end

@@ -5,6 +5,7 @@ class Order < ApplicationRecord
   has_many :order_refunds,        dependent: :destroy
   has_many :audit_conflicts,      dependent: :destroy
   has_many :financial_settlement_items, dependent: :nullify
+  has_many :financial_receivables, dependent: :nullify
   has_many :integration_mappings, as: :mappable, dependent: :nullify
 
   ORDER_TYPES = %w[sale refund cancellation exchange].freeze

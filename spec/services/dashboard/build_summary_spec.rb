@@ -159,9 +159,27 @@ RSpec.describe Dashboard::BuildSummary do
         display_discount_total: 20.0,
         uncoded_discount_total: 20.0,
         uncoded_discount_orders_count: 1,
+        commercial_discount_total: 20.0,
+        commercial_discount_orders_count: 1,
         top_coupons: []
       )
       expect(result[:kpis]).to include(coupon_discount_total: 20.0, coupon_orders_count: 1)
+    end
+
+    it "separates shipping subsidy when real freight is greater than charged freight" do
+      make_order(channel_a, gross: 120, margin: 0, ordered_at: 1.day.ago)
+        .update!(state: "SP", discount: 20, freight: 8, real_freight_cost: 18)
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      expect(result[:coupons]).to include(
+        display_discount_total: 30.0,
+        commercial_discount_total: 20.0,
+        shipping_subsidy_total: 10.0,
+        shipping_subsidy_orders_count: 1
+      )
+      expect(result[:coupons][:breakdown].map { |row| row[:key] }).to include("commercial_discount", "shipping_subsidy")
+      expect(result[:kpis]).to include(coupon_discount_total: 30.0, shipping_subsidy_total: 10.0)
     end
   end
 

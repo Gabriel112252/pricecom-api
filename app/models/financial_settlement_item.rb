@@ -2,6 +2,7 @@ class FinancialSettlementItem < ApplicationRecord
   belongs_to :tenant
   belongs_to :financial_settlement
   belongs_to :order, optional: true
+  has_many :financial_receivables, dependent: :nullify
 
   STATUSES = %w[unmatched matched disputed ignored].freeze
 

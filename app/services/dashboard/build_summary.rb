@@ -272,6 +272,10 @@ module Dashboard
         coupon_codes_count: coupons[:codes_count],
         uncoded_discount_total: coupons[:uncoded_discount_total],
         uncoded_discount_orders_count: coupons[:uncoded_discount_orders_count],
+        commercial_discount_total: coupons[:commercial_discount_total],
+        commercial_discount_orders_count: coupons[:commercial_discount_orders_count],
+        shipping_subsidy_total: coupons[:shipping_subsidy_total],
+        shipping_subsidy_orders_count: coupons[:shipping_subsidy_orders_count],
         top_region_state: top_state&.dig(:state),
         top_region_name: top_state&.dig(:name),
         top_region_orders_count: top_state&.dig(:orders_count),
@@ -429,13 +433,21 @@ module Dashboard
       return empty_coupons unless order_has_coupons?
 
       coupon_value_sql = "CASE WHEN COALESCE(coupon_discount, 0) > 0 THEN coupon_discount ELSE COALESCE(discount, 0) END"
-      coupon_scope = scope.where("coupon_code IS NOT NULL AND TRIM(coupon_code) <> ''")
-      uncoded_discount_scope = scope.where("(coupon_code IS NULL OR TRIM(coupon_code) = '') AND COALESCE(discount, 0) > 0")
+      shipping_subsidy_sql = "CASE WHEN real_freight_cost IS NOT NULL AND COALESCE(real_freight_cost, 0) > COALESCE(freight, 0) THEN COALESCE(real_freight_cost, 0) - COALESCE(freight, 0) ELSE 0 END"
+      coupon_predicate = "coupon_code IS NOT NULL AND TRIM(coupon_code) <> ''"
+      uncoded_discount_predicate = "(coupon_code IS NULL OR TRIM(coupon_code) = '') AND COALESCE(discount, 0) > 0"
+      shipping_subsidy_predicate = "real_freight_cost IS NOT NULL AND COALESCE(real_freight_cost, 0) > COALESCE(freight, 0)"
+      coupon_scope = scope.where(coupon_predicate)
+      uncoded_discount_scope = scope.where(uncoded_discount_predicate)
+      shipping_subsidy_scope = scope.where(shipping_subsidy_predicate)
+      incentive_scope = scope.where("(#{coupon_predicate}) OR (#{uncoded_discount_predicate}) OR (#{shipping_subsidy_predicate})")
       total_orders = scope.count
       orders_count = coupon_scope.count
       total_discount = coupon_scope.sum(Arel.sql(coupon_value_sql)).to_f
       uncoded_discount_total = uncoded_discount_scope.sum(:discount).to_f
       uncoded_discount_orders_count = uncoded_discount_scope.count
+      shipping_subsidy_total = scope.sum(Arel.sql(shipping_subsidy_sql)).to_f
+      shipping_subsidy_orders_count = shipping_subsidy_scope.count
       rows = coupon_scope
         .group(Arel.sql("UPPER(TRIM(coupon_code))"))
         .pluck(
@@ -454,8 +466,18 @@ module Dashboard
         }
       end.sort_by { |row| [-row[:orders_count], -row[:discount_total]] }.first(10)
 
-      display_discount_total = total_discount.positive? ? total_discount : uncoded_discount_total
-      display_orders_count = orders_count.positive? ? orders_count : uncoded_discount_orders_count
+      commercial_discount_total = uncoded_discount_total
+      commercial_discount_orders_count = uncoded_discount_orders_count
+      display_discount_total = total_discount + commercial_discount_total + shipping_subsidy_total
+      display_orders_count = incentive_scope.count
+      breakdown = discount_breakdown(
+        coupon_discount_total: total_discount,
+        coupon_orders_count: orders_count,
+        commercial_discount_total: commercial_discount_total,
+        commercial_discount_orders_count: commercial_discount_orders_count,
+        shipping_subsidy_total: shipping_subsidy_total,
+        shipping_subsidy_orders_count: shipping_subsidy_orders_count
+      )
 
       {
         available: true,
@@ -467,9 +489,40 @@ module Dashboard
         codes_count: rows.size,
         uncoded_discount_total: uncoded_discount_total.round(2),
         uncoded_discount_orders_count: uncoded_discount_orders_count,
+        commercial_discount_total: commercial_discount_total.round(2),
+        commercial_discount_orders_count: commercial_discount_orders_count,
+        shipping_subsidy_total: shipping_subsidy_total.round(2),
+        shipping_subsidy_orders_count: shipping_subsidy_orders_count,
         usage_percentage: total_orders.positive? ? (display_orders_count.to_f / total_orders * 100).round(2) : 0,
+        breakdown: breakdown,
         top_coupons: top_coupons
       }
+    end
+
+    def discount_breakdown(coupon_discount_total:, coupon_orders_count:, commercial_discount_total:, commercial_discount_orders_count:, shipping_subsidy_total:, shipping_subsidy_orders_count:)
+      [
+        {
+          key: "coupon",
+          label: "Cupons identificados",
+          amount: coupon_discount_total.round(2),
+          orders_count: coupon_orders_count,
+          evidence: "Pedidos com coupon_code preenchido."
+        },
+        {
+          key: "commercial_discount",
+          label: "Desconto progressivo / comercial",
+          amount: commercial_discount_total.round(2),
+          orders_count: commercial_discount_orders_count,
+          evidence: "Pedidos com discount maior que zero e sem codigo de cupom capturado."
+        },
+        {
+          key: "shipping_subsidy",
+          label: "Subsídio de frete",
+          amount: shipping_subsidy_total.round(2),
+          orders_count: shipping_subsidy_orders_count,
+          evidence: "Estimado quando real_freight_cost e maior que o frete cobrado do cliente."
+        }
+      ]
     end
 
     def build_data_sources
@@ -818,7 +871,12 @@ module Dashboard
         codes_count: 0,
         uncoded_discount_total: 0.0,
         uncoded_discount_orders_count: 0,
+        commercial_discount_total: 0.0,
+        commercial_discount_orders_count: 0,
+        shipping_subsidy_total: 0.0,
+        shipping_subsidy_orders_count: 0,
         usage_percentage: 0.0,
+        breakdown: [],
         top_coupons: []
       }
     end

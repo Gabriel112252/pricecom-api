@@ -4,20 +4,10 @@ module Integrations
   # products/stock, which doesn't apply here — but shares the same HTTP
   # plumbing via AdapterHttp, same as BaseErpAdapter.
   #
-  # Verified against docs.pagar.me/reference on 2026-07-10: GET
-  # /core/v5/orders (Basic Auth, secret key as username/blank password),
-  # `created_since`/`created_until` date filters, `page`/`size` pagination
-  # with a `paging.next` cursor, amounts in BRL cents, and the order's own
-  # `code` field as the merchant-supplied order reference (mapped to
-  # external_order_id for Financials::MatchSettlementItem).
-  #
-  # NOT verified: a per-charge fee/net breakdown. The Charge object sample
-  # in the accessible docs only shows id/code/amount/status/paid_at — no
-  # fee field. fee_amount falls back to 0 (net_amount = gross_amount)
-  # unless the API actually returns one of the candidate fee keys below.
-  # Confirm against a real Pagar.me account before trusting fee_amount for
-  # real reconciliation — an unnoticed 0 fee would make every settlement
-  # look "disputed" against Financials::MatchSettlementItem's tolerance.
+  # Pagar.me v5 uses the same Basic Auth shape for Orders and Payables:
+  # secret key as username, blank password. Orders/Charges remain here only
+  # as a compatibility helper; real fee reconciliation must come from
+  # /payables because that object carries fee and anticipation_fee.
   class PagarmeAdapter
     include AdapterHttp
 
@@ -29,8 +19,41 @@ module Integrations
     end
 
     def authenticate
-      get("orders", page: 1, size: 1)
+      get("payables", size: 1)
       true
+    end
+
+    # → [{ payable_id:, status:, amount:, fee_amount:,
+    #      anticipation_fee_amount:, net_amount:, installment:,
+    #      transaction_id:, charge_id:, recipient_id:, payment_date:,
+    #      original_payment_date:, payment_method:, accrual_date:,
+    #      date_created:, raw_payload: }]
+    #
+    # Cursor pagination only: Pagar.me is deprecating page pagination for
+    # this endpoint, so the request carries forward_cursor when the API
+    # returns one in the paging block.
+    def fetch_payables(payment_date_from:, payment_date_to:, recipient_id: nil)
+      payables = []
+      cursor = nil
+
+      loop do
+        params = {
+          size: PAGE_SIZE,
+          "payment_date[gte]": payment_date_from.to_date.iso8601,
+          "payment_date[lte]": payment_date_to.to_date.iso8601
+        }
+        params[:recipient_id] = recipient_id if recipient_id.present?
+        params[:forward_cursor] = cursor if cursor.present?
+
+        body = with_rate_limit_retry { get("payables", **params) }
+        rows = body["data"] || []
+        rows.each { |payable| payables << normalize_payable(payable) }
+
+        cursor = next_cursor(body)
+        break if rows.empty? || cursor.blank?
+      end
+
+      payables
     end
 
     # → [{ external_id:, external_order_id:, gross_amount:, fee_amount:,
@@ -58,6 +81,39 @@ module Integrations
     private
 
     attr_reader :credentials
+
+    def normalize_payable(payable)
+      amount = to_reais(payable["amount"])
+      fee = to_reais(payable["fee"])
+      anticipation_fee = to_reais(payable["anticipation_fee"])
+
+      {
+        payable_id:              payable["id"],
+        status:                  payable["status"],
+        amount:                  amount,
+        fee_amount:              fee,
+        anticipation_fee_amount: anticipation_fee,
+        net_amount:              (amount - fee - anticipation_fee).round(2),
+        installment:             payable["installment"]&.to_i,
+        transaction_id:          payable["transaction_id"],
+        charge_id:               payable["charge_id"],
+        recipient_id:            payable["recipient_id"],
+        payment_method:          payable["payment_method"],
+        payment_date:            parse_date(payable["payment_date"])&.to_date,
+        original_payment_date:   parse_date(payable["original_payment_date"])&.to_date,
+        accrual_date:            parse_date(payable["accrual_date"]),
+        date_created:            parse_date(payable["date_created"]),
+        raw_payload:             payable
+      }
+    end
+
+    def next_cursor(body)
+      paging = body["paging"] || {}
+      paging["forward_cursor"] ||
+        paging["next"] ||
+        paging.dig("cursors", "next") ||
+        body["forward_cursor"]
+    end
 
     def charges_for(order)
       Array(order["charges"]).map { |charge| normalize_charge(order, charge) }

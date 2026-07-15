@@ -4,6 +4,7 @@ class FinancialSource < ApplicationRecord
   belongs_to :channel,     optional: true
 
   has_many :financial_settlements, dependent: :destroy
+  has_many :financial_receivables, dependent: :destroy
 
   PROVIDERS = %w[
     shopify_payments

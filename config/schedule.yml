@@ -25,3 +25,8 @@ idworks_order_sync_dispatch:
   cron: "*/15 * * * *"
   class: "Integrations::Idworks::ScheduleOrderSyncsJob"
   queue: integrations
+
+pagarme_payable_sync:
+  cron: "*/30 * * * *"
+  class: "Financials::PagarmePayableSyncJob"
+  queue: integrations

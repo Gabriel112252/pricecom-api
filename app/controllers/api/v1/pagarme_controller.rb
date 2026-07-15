@@ -43,13 +43,20 @@ module Api
           return render json: { error: "Pagar.me ainda não está conectado" }, status: :unprocessable_entity
         end
 
-        days   = params[:days].presence || Financials::PagarmeSyncService::DEFAULT_DAYS
-        result = Financials::PagarmeSyncService.call(source, days: days.to_i)
+        days = params[:days].presence || Financials::PagarmePayableSyncService::DEFAULT_DAYS
+        result = Financials::PagarmePayableSyncService.call(
+          source,
+          days: days.to_i,
+          from: params[:from] || params[:payment_date_from],
+          to: params[:to] || params[:payment_date_to]
+        )
 
         render json: {
           success:       result.success?,
           created_count: result.created_count,
           updated_count: result.updated_count,
+          window_from:   result.from,
+          window_to:     result.to,
           skipped_count: result.skipped.size,
           skipped:       result.skipped.first(20),
           error_message: result.error_message
@@ -67,7 +74,8 @@ module Api
           id:             source.id,
           provider:       source.provider,
           status:         source.status,
-          last_synced_at: source.last_synced_at
+          last_synced_at: source.last_synced_at,
+          settings:       source.settings.slice("payables_last_successful_sync_at", "payables_last_window_from", "payables_last_window_to")
         }
       end
     end
