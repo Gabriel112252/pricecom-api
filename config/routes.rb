@@ -56,6 +56,8 @@ Rails.application.routes.draw do
         post  "pagarme/connect", to: "pagarme#connect"
         post  "pagarme/sync",    to: "pagarme#sync"
 
+        get   "tiktok/authorize_url", to: "tiktok_oauth#authorize_url"
+
         post  ":channel/connect", to: "channel_credentials#connect"
         post  ":channel/sync",    to: "channel_credentials#sync"
         patch ":channel/role",    to: "channel_credentials#update_role"
@@ -101,6 +103,10 @@ Rails.application.routes.draw do
 
       # Integration Health
       get "integration_health", to: "integration_health#index"
+
+      # Public OAuth callback from TikTok Shop. TikTok redirects the browser
+      # with GET, while the generic webhook receiver below is POST-only.
+      get "webhooks/tiktok", to: "tiktok_oauth#callback"
 
       # Public webhook receiver — sem autenticação JWT
       post "webhooks/:provider", to: "webhooks#receive"

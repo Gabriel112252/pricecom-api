@@ -29,7 +29,7 @@ module Integrations
         )
       else
         raise ApiError,
-              "#{self.class.name}: resposta inesperada (HTTP #{response.status}) — #{response.body}"
+          "#{self.class.name}: resposta inesperada (HTTP #{response.status}) — #{response.body}"
       end
     end
 
