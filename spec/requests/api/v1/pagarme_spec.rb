@@ -41,7 +41,7 @@ RSpec.describe "Pagar.me integration", type: :request do
 
   def stub_payables
     stub_request(:get, "https://api.pagar.me/core/v5/payables")
-      .with(query: hash_including("payment_date[gte]" => "2026-06-15"))
+      .with(query: hash_including("payment_date_since" => "2026-06-15"))
       .to_return(status: 200, body: payables_fixture, headers: { "Content-Type" => "application/json" })
   end
 
@@ -62,6 +62,17 @@ RSpec.describe "Pagar.me integration", type: :request do
       expect(source.status).to eq("active")
       expect(source.source_type).to eq("gateway")
       expect(DataSourceConfig.source_for(tenant, "payment_reconciliation")).to eq("pagarme")
+    end
+
+    it "stores optional recipient_id in FinancialSource settings" do
+      stub_auth
+
+      post "/api/v1/integrations/pagarme/connect", headers: auth_headers(admin),
+        params: { credentials: { api_key: "sk_test_abc123" }, settings: { recipient_id: "rp_1" } }
+
+      expect(response).to have_http_status(:ok)
+      source = tenant.financial_sources.find_by(provider: "pagarme")
+      expect(source.settings["recipient_id"]).to eq("rp_1")
     end
 
     it "does not duplicate the FinancialSource on a second connect (credential rotation)" do

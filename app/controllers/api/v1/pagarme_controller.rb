@@ -14,6 +14,7 @@ module Api
         source = current_tenant.financial_sources.find_or_initialize_by(provider: "pagarme", name: "Pagar.me")
         source.source_type = "gateway"
         source.credentials  = credential_params
+        source.settings = source.settings.merge(connection_settings)
         source.status = "inactive"
 
         unless source.save
@@ -48,7 +49,8 @@ module Api
           source,
           days: days.to_i,
           from: params[:from] || params[:payment_date_from],
-          to: params[:to] || params[:payment_date_to]
+          to: params[:to] || params[:payment_date_to],
+          status: params[:status]
         )
 
         render json: {
@@ -67,6 +69,14 @@ module Api
 
       def credential_params
         params.require(:credentials).permit!.to_h
+      end
+
+      def connection_settings
+        recipient_id = params.dig(:settings, :recipient_id).presence ||
+          params.dig(:credentials, :recipient_id).presence ||
+          params[:recipient_id].presence
+
+        recipient_id.present? ? { "recipient_id" => recipient_id } : {}
       end
 
       def source_json(source)

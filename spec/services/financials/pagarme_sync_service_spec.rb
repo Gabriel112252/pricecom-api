@@ -63,7 +63,7 @@ RSpec.describe Financials::PagarmeSyncService do
 
   def stub_payables(body: payables_fixture)
     stub_request(:get, "https://api.pagar.me/core/v5/payables")
-      .with(query: hash_including("payment_date[gte]" => "2026-06-15"))
+      .with(query: hash_including("payment_date_since" => "2026-06-15"))
       .to_return(status: 200, body: body, headers: { "Content-Type" => "application/json" })
   end
 

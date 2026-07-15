@@ -9,16 +9,17 @@ module Financials
       def error?   = outcome == :error
     end
 
-    def self.call(financial_source, days: nil, from: nil, to: nil)
-      new(financial_source, days: days, from: from, to: to).call
+    def self.call(financial_source, days: nil, from: nil, to: nil, status: nil)
+      new(financial_source, days: days, from: from, to: to, status: status).call
     end
 
-    def initialize(financial_source, days: nil, from: nil, to: nil)
+    def initialize(financial_source, days: nil, from: nil, to: nil, status: nil)
       @financial_source = financial_source
       @tenant = financial_source.tenant
       @days = days.to_i.positive? ? days.to_i : configured_integer("payables_lookback_days", DEFAULT_DAYS)
       @from = parse_date(from) || inferred_from
       @to = parse_date(to) || inferred_to
+      @status = status.presence
       @created = 0
       @updated = 0
       @skipped = []
@@ -31,7 +32,8 @@ module Financials
       payables = adapter.fetch_payables(
         payment_date_from: from,
         payment_date_to: to,
-        recipient_id: recipient_id
+        recipient_id: recipient_id,
+        status: status
       )
 
       payables.each { |payable| process_payable(payable) }
@@ -64,7 +66,7 @@ module Financials
 
     private
 
-    attr_reader :financial_source, :tenant, :days, :from, :to, :created, :updated, :skipped,
+    attr_reader :financial_source, :tenant, :days, :from, :to, :status, :created, :updated, :skipped,
       :log, :affected_settlement_ids
 
     def process_payable(payable)
@@ -307,7 +309,7 @@ module Financials
         action: LOG_ACTION,
         status: "pending",
         started_at: Time.current,
-        metadata: { financial_source_id: financial_source.id, from: from.iso8601, to: to.iso8601 }
+        metadata: { financial_source_id: financial_source.id, from: from.iso8601, to: to.iso8601, status: status }.compact
       )
     end
 

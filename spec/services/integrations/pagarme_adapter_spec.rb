@@ -80,18 +80,22 @@ RSpec.describe Integrations::PagarmeAdapter do
   describe "#fetch_payables" do
     before do
       stub_request(:get, payables_url)
-        .with(query: { "payment_date[gte]" => "2026-07-01", "payment_date[lte]" => "2026-07-31", "size" => "30" })
+        .with(query: { "payment_date_since" => "2026-07-01", "payment_date_until" => "2026-07-31", "size" => "1000" })
         .to_return(status: 200, body: payables_page_1, headers: { "Content-Type" => "application/json" })
 
       stub_request(:get, payables_url)
-        .with(query: { "payment_date[gte]" => "2026-07-01", "payment_date[lte]" => "2026-07-31", "size" => "30", "forward_cursor" => "cursor_2" })
+        .with(query: { "payment_date_since" => "2026-07-01", "payment_date_until" => "2026-07-31", "size" => "1000", "forward_cursor" => "cursor_2" })
         .to_return(status: 200, body: payables_page_2, headers: { "Content-Type" => "application/json" })
     end
 
-    it "uses cursor pagination and maps payable fields with cents converted to BRL" do
+    it "uses supported payment_date params, cursor pagination and maps payable fields" do
       payables = adapter.fetch_payables(payment_date_from: Date.new(2026, 7, 1), payment_date_to: Date.new(2026, 7, 31))
 
       expect(payables.size).to eq(2)
+      expect(WebMock).to have_requested(:get, payables_url)
+        .with(query: hash_including("payment_date_since" => "2026-07-01", "payment_date_until" => "2026-07-31"))
+      expect(WebMock).to have_not_requested(:get, payables_url)
+        .with(query: hash_including("payment_date[gte]" => "2026-07-01"))
       first = payables.first
       expect(first).to include(
         payable_id: "pay_1",
@@ -110,6 +114,28 @@ RSpec.describe Integrations::PagarmeAdapter do
       )
       expect(first[:accrual_date]).to eq(Time.zone.parse("2026-07-10T12:00:00Z"))
       expect(first[:date_created]).to eq(Time.zone.parse("2026-07-10T12:00:01Z"))
+    end
+
+    it "can include status and recipient_id filters" do
+      stub_request(:get, payables_url)
+        .with(query: {
+          "payment_date_since" => "2026-07-01",
+          "payment_date_until" => "2026-07-31",
+          "size" => "1000",
+          "recipient_id" => "rp_1",
+          "status" => "paid"
+        })
+        .to_return(status: 200, body: { data: [], paging: { forward_cursor: nil } }.to_json, headers: { "Content-Type" => "application/json" })
+
+      adapter.fetch_payables(
+        payment_date_from: Date.new(2026, 7, 1),
+        payment_date_to: Date.new(2026, 7, 31),
+        recipient_id: "rp_1",
+        status: "paid"
+      )
+
+      expect(WebMock).to have_requested(:get, payables_url)
+        .with(query: hash_including("recipient_id" => "rp_1", "status" => "paid"))
     end
   end
 

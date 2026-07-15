@@ -11,8 +11,9 @@ module Integrations
   class PagarmeAdapter
     include AdapterHttp
 
-    BASE_URL  = "https://api.pagar.me/core/v5/".freeze
-    PAGE_SIZE = 30 # Pagar.me's documented max per page
+    BASE_URL = "https://api.pagar.me/core/v5/".freeze
+    ORDERS_PAGE_SIZE = 30
+    PAYABLES_PAGE_SIZE = 1_000
 
     def initialize(credentials)
       @credentials = credentials.to_h.with_indifferent_access
@@ -32,17 +33,18 @@ module Integrations
     # Cursor pagination only: Pagar.me is deprecating page pagination for
     # this endpoint, so the request carries forward_cursor when the API
     # returns one in the paging block.
-    def fetch_payables(payment_date_from:, payment_date_to:, recipient_id: nil)
+    def fetch_payables(payment_date_from:, payment_date_to:, recipient_id: nil, status: nil)
       payables = []
       cursor = nil
 
       loop do
         params = {
-          size: PAGE_SIZE,
-          "payment_date[gte]": payment_date_from.to_date.iso8601,
-          "payment_date[lte]": payment_date_to.to_date.iso8601
+          size: PAYABLES_PAGE_SIZE,
+          payment_date_since: payment_date_from.to_date.iso8601,
+          payment_date_until: payment_date_to.to_date.iso8601
         }
         params[:recipient_id] = recipient_id if recipient_id.present?
+        params[:status] = status if status.present?
         params[:forward_cursor] = cursor if cursor.present?
 
         body = with_rate_limit_retry { get("payables", **params) }
@@ -65,7 +67,7 @@ module Integrations
 
       loop do
         body = with_rate_limit_retry do
-          get("orders", page: page, size: PAGE_SIZE, created_since: from.to_date.iso8601, created_until: to.to_date.iso8601)
+          get("orders", page: page, size: ORDERS_PAGE_SIZE, created_since: from.to_date.iso8601, created_until: to.to_date.iso8601)
         end
         orders = body["data"] || []
         orders.each { |order| transactions.concat(charges_for(order)) }

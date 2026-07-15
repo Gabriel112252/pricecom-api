@@ -9,7 +9,8 @@ RSpec.describe Financials::PagarmePayableSyncService do
       name: "Pagar.me",
       source_type: "gateway",
       status: "active",
-      credentials: { api_key: "sk_test_abc123" }
+      credentials: { api_key: "sk_test_abc123" },
+      settings: { recipient_id: "rp_1" }
     )
   end
   let(:payables_url) { "https://api.pagar.me/core/v5/payables" }
@@ -118,11 +119,11 @@ RSpec.describe Financials::PagarmePayableSyncService do
     travel_to Time.zone.parse("2026-07-15T12:00:00Z")
 
     stub_request(:get, payables_url)
-      .with(query: { "payment_date[gte]" => "2026-07-01", "payment_date[lte]" => "2026-07-31", "size" => "30" })
+      .with(query: { "payment_date_since" => "2026-07-01", "payment_date_until" => "2026-07-31", "recipient_id" => "rp_1", "size" => "1000" })
       .to_return(status: 200, body: page_1, headers: { "Content-Type" => "application/json" })
 
     stub_request(:get, payables_url)
-      .with(query: { "payment_date[gte]" => "2026-07-01", "payment_date[lte]" => "2026-07-31", "size" => "30", "forward_cursor" => "cursor_2" })
+      .with(query: { "payment_date_since" => "2026-07-01", "payment_date_until" => "2026-07-31", "recipient_id" => "rp_1", "size" => "1000", "forward_cursor" => "cursor_2" })
       .to_return(status: 200, body: page_2, headers: { "Content-Type" => "application/json" })
   end
 
@@ -167,5 +168,12 @@ RSpec.describe Financials::PagarmePayableSyncService do
     expect(log.metadata["created_count"]).to eq(2)
     expect(log.metadata["from"]).to eq("2026-07-01")
     expect(log.metadata["to"]).to eq("2026-07-31")
+  end
+
+  it "passes recipient_id persisted in FinancialSource settings to Pagar.me" do
+    described_class.call(financial_source, from: "2026-07-01", to: "2026-07-31")
+
+    expect(WebMock).to have_requested(:get, payables_url)
+      .with(query: hash_including("recipient_id" => "rp_1"))
   end
 end
