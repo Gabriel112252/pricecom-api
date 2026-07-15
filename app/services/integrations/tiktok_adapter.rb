@@ -72,6 +72,7 @@ module Integrations
       response = connection(BASE_URL).post(path) do |req|
         req.params = params
         req.headers["x-tts-access-token"] = credentials[:access_token]
+        req.headers["Content-Type"] = "application/json"
         req.body = encoded_body
       end
 
