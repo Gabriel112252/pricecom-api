@@ -18,7 +18,7 @@ class ChannelCredential < ApplicationRecord
   REQUIRED_FIELDS = {
     "yampi"        => %w[alias token secret_key webhook_secret],
     "shopify"      => %w[shop_domain access_token webhook_secret],
-    "tiktok"       => %w[app_key app_secret access_token],
+    "tiktok"       => %w[app_key app_secret],
     "mercadolivre" => %w[user_id access_token],
     "shopee"       => %w[shop_id partner_id partner_key access_token]
   }.freeze
@@ -56,10 +56,15 @@ class ChannelCredential < ApplicationRecord
   private
 
   def credentials_include_required_fields
-    missing = required_fields.reject { |field| credentials.to_h[field].present? }
+    missing = required_fields.reject { |field| credential_value(field).present? }
     return if missing.empty?
 
     errors.add(:credentials, "faltando campo(s): #{missing.join(', ')}")
+  end
+
+  def credential_value(field)
+    values = credentials.to_h
+    values[field].presence || values[field.to_sym].presence
   end
 
   def stock_source_required_when_consumidor_pedido

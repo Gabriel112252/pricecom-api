@@ -34,6 +34,10 @@ module Api
         # this fix existed.
         Channel.ensure_for!(current_tenant, credential.channel)
 
+        if credential.channel == "tiktok"
+          return render json: channel_json(credential.channel, credential, [])
+        end
+
         # Verify right away rather than making the user wait for the next
         # scheduled sync to find out the credentials don't work.
         begin
@@ -161,6 +165,7 @@ module Api
           channel:              channel,
           status:               credential&.status || "pending",
           required_fields:      ChannelCredential::REQUIRED_FIELDS.fetch(channel),
+          credentials_configured: credentials_configured?(channel, credential),
           last_synced_at:       credential&.last_synced_at,
           orders_sync_cursor_at: credential&.orders_sync_cursor_at,
           polling_enabled:       credential&.polling_enabled,
@@ -169,6 +174,15 @@ module Api
           stock_source_channel: credential&.stock_source_channel&.channel,
           recent_logs:          logs
         }
+      end
+
+      def credentials_configured?(channel, credential)
+        return false unless credential
+
+        credentials = credential.credentials.to_h
+        ChannelCredential::REQUIRED_FIELDS.fetch(channel).all? do |field|
+          credentials[field].present? || credentials[field.to_sym].present?
+        end
       end
 
       def log_json(log)

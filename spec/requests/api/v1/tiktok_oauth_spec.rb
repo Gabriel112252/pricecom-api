@@ -28,9 +28,6 @@ RSpec.describe "TikTok Shop OAuth callback", type: :request do
   end
 
   before do
-    allow(ENV).to receive(:[]).and_call_original
-    allow(ENV).to receive(:[]).with("TIKTOK_APP_KEY").and_return("app-key")
-    allow(ENV).to receive(:[]).with("TIKTOK_APP_SECRET").and_return("app-secret")
     allow(ENV).to receive(:fetch).and_call_original
     allow(ENV).to receive(:fetch).with("FRONTEND_URL", "http://localhost:5173").and_return("https://pricecom-web.example")
   end
@@ -39,7 +36,17 @@ RSpec.describe "TikTok Shop OAuth callback", type: :request do
     { "Authorization" => "Bearer #{JsonWebToken.encode(user_id: user.id)}" }
   end
 
+  def create_tiktok_credential(credentials = { "app_key" => "tenant-app-key", "app_secret" => "tenant-app-secret" })
+    tenant.channel_credentials.create!(
+      channel: "tiktok",
+      status: "pending",
+      credentials: credentials
+    )
+  end
+
   it "returns the TikTok authorization URL with signed tenant state" do
+    create_tiktok_credential
+
     get "/api/v1/integrations/tiktok/authorize_url", headers: auth_headers(admin)
 
     expect(response).to have_http_status(:ok)
@@ -48,25 +55,34 @@ RSpec.describe "TikTok Shop OAuth callback", type: :request do
     query = Rack::Utils.parse_query(uri.query)
 
     expect("#{uri.scheme}://#{uri.host}#{uri.path}").to eq("https://auth.tiktok-shops.com/oauth/authorize")
-    expect(query["app_key"]).to eq("app-key")
+    expect(query["app_key"]).to eq("tenant-app-key")
     expect(query["redirect_uri"]).to eq("https://www.example.com/api/v1/webhooks/tiktok")
 
     signed_state = Rails.application.message_verifier(:tiktok_oauth_state).verify(query.fetch("state"))
     expect(signed_state[:tenant_id] || signed_state["tenant_id"]).to eq(tenant.id)
   end
 
+  it "rejects authorization URL generation before tenant TikTok credentials are saved" do
+    get "/api/v1/integrations/tiktok/authorize_url", headers: auth_headers(admin)
+
+    expect(response).to have_http_status(:unprocessable_entity)
+    expect(JSON.parse(response.body)["error"]).to eq("Cadastre App Key e App Secret antes de autorizar")
+  end
+
   it "exchanges code for tokens, saves the TikTok ChannelCredential and redirects to frontend" do
+    create_tiktok_credential
+
     stub_request(:get, token_url)
       .with(query: {
-        "app_key" => "app-key",
-        "app_secret" => "app-secret",
+        "app_key" => "tenant-app-key",
+        "app_secret" => "tenant-app-secret",
         "auth_code" => "auth-code",
         "grant_type" => "authorized_code"
       })
       .to_return(status: 200, body: token_response, headers: { "Content-Type" => "application/json" })
 
     get "/api/v1/webhooks/tiktok", params: {
-      app_key: "app-key",
+      app_key: "tenant-app-key",
       code: "auth-code",
       state: state,
       locale: "pt-BR",
@@ -79,8 +95,8 @@ RSpec.describe "TikTok Shop OAuth callback", type: :request do
     credential = tenant.channel_credentials.find_by!(channel: "tiktok")
     expect(credential.status).to eq("active")
     expect(credential.credentials).to include(
-      "app_key" => "app-key",
-      "app_secret" => "app-secret",
+      "app_key" => "tenant-app-key",
+      "app_secret" => "tenant-app-secret",
       "access_token" => "access-token",
       "refresh_token" => "refresh-token",
       "open_id" => "open-1",
@@ -93,23 +109,41 @@ RSpec.describe "TikTok Shop OAuth callback", type: :request do
   end
 
   it "redirects with error when TikTok returns code different from zero" do
+    credential = create_tiktok_credential
+
     stub_request(:get, token_url)
+      .with(query: hash_including(
+        "app_key" => "tenant-app-key",
+        "app_secret" => "tenant-app-secret",
+        "auth_code" => "expired-code"
+      ))
       .to_return(
         status: 200,
         body: { code: 105_001, message: "auth code expired", data: nil, request_id: "req-2" }.to_json,
         headers: { "Content-Type" => "application/json" }
       )
 
-    get "/api/v1/webhooks/tiktok", params: { app_key: "app-key", code: "expired-code", state: state }
+    get "/api/v1/webhooks/tiktok", params: { app_key: "tenant-app-key", code: "expired-code", state: state }
 
     expect(response).to redirect_to(/https:\/\/pricecom-web\.example\/integracoes\?/)
     expect(response.location).to include("tiktok=error")
     expect(response.location).to include("auth+code+expired")
-    expect(tenant.channel_credentials.find_by(channel: "tiktok")).to be_nil
+    expect(credential.reload.status).to eq("pending")
+  end
+
+  it "rejects callback when app_key does not match the tenant credential" do
+    create_tiktok_credential
+
+    get "/api/v1/webhooks/tiktok", params: { app_key: "other-app-key", code: "auth-code", state: state }
+
+    expect(response).to redirect_to(/https:\/\/pricecom-web\.example\/integracoes\?/)
+    expect(response.location).to include("tiktok=error")
+    expect(response.location).to include("App+Key+inv%C3%A1lida")
+    expect(WebMock).to have_not_requested(:get, token_url)
   end
 
   it "redirects with error when auth code is missing and does not call TikTok" do
-    get "/api/v1/webhooks/tiktok", params: { app_key: "app-key", state: state }
+    get "/api/v1/webhooks/tiktok", params: { app_key: "tenant-app-key", state: state }
 
     expect(response).to redirect_to(/https:\/\/pricecom-web\.example\/integracoes\?/)
     expect(response.location).to include("tiktok=error")
@@ -117,7 +151,7 @@ RSpec.describe "TikTok Shop OAuth callback", type: :request do
   end
 
   it "redirects with error when tenant cannot be resolved from signed state or tenant_slug" do
-    get "/api/v1/webhooks/tiktok", params: { app_key: "app-key", code: "auth-code" }
+    get "/api/v1/webhooks/tiktok", params: { app_key: "tenant-app-key", code: "auth-code" }
 
     expect(response).to redirect_to(/https:\/\/pricecom-web\.example\/integracoes\?/)
     expect(response.location).to include("tiktok=error")
@@ -128,7 +162,7 @@ RSpec.describe "TikTok Shop OAuth callback", type: :request do
     tenant.channel_credentials.create!(
       channel: "tiktok",
       status: "active",
-      credentials: { app_key: "app-key", app_secret: "webhook-secret", access_token: "tok" }
+      credentials: { "app_key" => "tenant-app-key", "app_secret" => "webhook-secret", "access_token" => "tok" }
     )
     body = { id: 555, event: "order.created" }.to_json
     signature = OpenSSL::HMAC.hexdigest("sha256", "webhook-secret", body)

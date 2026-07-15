@@ -74,6 +74,36 @@ RSpec.describe "Channel Credentials", type: :request do
         .to_return(status: 200, body: { data: [] }.to_json, headers: { "Content-Type" => "application/json" })
     end
 
+    it "lists TikTok setup fields without manual access token" do
+      get "/api/v1/integrations/channels", headers: auth_headers(admin)
+
+      expect(response).to have_http_status(:ok)
+      tiktok = JSON.parse(response.body).find { |channel| channel["channel"] == "tiktok" }
+
+      expect(tiktok["required_fields"]).to eq(%w[app_key app_secret])
+      expect(tiktok["credentials_configured"]).to eq(false)
+    end
+
+    it "stores TikTok App Key and App Secret as pending without authenticating before OAuth" do
+      post "/api/v1/integrations/tiktok/connect", headers: auth_headers(admin),
+        params: { credentials: { app_key: "tenant-app-key", app_secret: "tenant-app-secret" } }
+
+      expect(response).to have_http_status(:ok)
+      body = JSON.parse(response.body)
+      expect(body["status"]).to eq("pending")
+      expect(body["required_fields"]).to eq(%w[app_key app_secret])
+      expect(body["credentials_configured"]).to eq(true)
+
+      credential = tenant.channel_credentials.find_by!(channel: "tiktok")
+      expect(credential.status).to eq("pending")
+      expect(credential.credentials).to include(
+        "app_key" => "tenant-app-key",
+        "app_secret" => "tenant-app-secret"
+      )
+      expect(credential.credentials).not_to have_key("access_token")
+      expect(tenant.channels.find_by(platform: "tiktok")).to be_present
+    end
+
     it "creates the matching Channel the first time a new channel is connected" do
       stub_yampi_auth
       expect(tenant.channels.where(platform: "yampi")).to be_empty
