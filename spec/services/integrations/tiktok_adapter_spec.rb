@@ -1,11 +1,9 @@
 require "rails_helper"
 
-# ⚠️ Unlike the Yampi and Shopify specs, this one is NOT grounded against a
-# confirmed copy of TikTok Shop's real API docs (see TiktokAdapter's class
-# comment — their docs are a JS-rendered SPA that couldn't be fetched here).
-# These assertions only prove the adapter parses/handles the shape it
-# itself assumes, and that the sign/error-classification logic behaves as
-# designed — not that the design matches TikTok's actual API.
+# ⚠️ Unlike the Yampi and Shopify specs, the product payload assertions here
+# still cover the adapter's assumed response shape. The auth/signing contract
+# is grounded against TikTok Shop Partner Center docs: 202309+ APIs send the
+# access token in `x-tts-access-token`, not in the query string.
 RSpec.describe Integrations::TiktokAdapter do
   let(:credentials) { { app_key: "key123", app_secret: "secret456", access_token: "tok789" } }
   let(:adapter) { described_class.new(credentials) }
@@ -18,6 +16,33 @@ RSpec.describe Integrations::TiktokAdapter do
         .to_return(status: 200, body: fixture_body, headers: { "Content-Type" => "application/json" })
 
       expect(adapter.authenticate).to eq(true)
+    end
+
+    it "sends the access token as x-tts-access-token header, not a query param" do
+      captured_request = nil
+
+      stub_request(:post, /\A#{Regexp.escape(search_url)}/)
+        .with { |request| captured_request = request }
+        .to_return(status: 200, body: fixture_body, headers: { "Content-Type" => "application/json" })
+
+      adapter.authenticate
+
+      query = Rack::Utils.parse_query(captured_request.uri.query)
+      expect(query).to include("app_key" => "key123")
+      expect(query).to include("timestamp", "sign")
+      expect(query).not_to include("access_token")
+      expect(captured_request.headers["X-Tts-Access-Token"]).to eq("tok789")
+    end
+
+    it "excludes access_token from the signature and includes the JSON body" do
+      path = "/product/202309/products/search"
+      params = { app_key: "key123", timestamp: 1_623_812_664 }
+      encoded_body = JSON.generate(page_size: 1)
+
+      signature = adapter.send(:sign, path, params.merge(access_token: "tok789"), encoded_body)
+
+      expect(signature).to eq(adapter.send(:sign, path, params, encoded_body))
+      expect(signature).not_to eq(adapter.send(:sign, path, params))
     end
 
     it "raises AuthenticationError when the body code/message indicate a bad signature or token" do
