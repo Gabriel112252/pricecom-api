@@ -53,7 +53,7 @@ module Integrations
           coupon_code:    extract_coupon_code,
           coupon_discount: extract_coupon_discount,
           ordered_at:     parse_date(@p["created_at"]),
-          cart_external_id: extract_cart_external_id,
+          cart_token:     extract_cart_token,
           items:          extract_items
         }
       end
@@ -65,29 +65,13 @@ module Integrations
       end
 
       # Links a finished order back to the checkout cart it came from, so
-      # UpsertOrder can flip the Cart to "converted". The Yampi admin UI
-      # shows a "Cart_ID" under the order's additional information, but the
-      # public API schema doesn't document where it lives on the payload —
-      # UNVERIFIED against a real production order as of 2026-07-16. The
-      # candidates below cover the plausible shapes (flat field, nested
-      # cart object, and the metadata key/value list that backs the UI's
-      # "informações adicionais"); confirm against a live payload and prune.
-      def extract_cart_external_id
-        flat = @p["cart_id"] || @p.dig("cart", "id") || @p.dig("cart", "data", "id")
-        return flat.to_s if flat.present?
-
-        metadata_cart_id&.to_s.presence
-      end
-
-      def metadata_cart_id
-        metadata = @p["metadata"]
-        metadata = metadata["data"] if metadata.is_a?(Hash)
-        return nil unless metadata.is_a?(Array)
-
-        entry = metadata.find do |m|
-          m.is_a?(Hash) && m["key"].to_s.downcase.gsub(/[^a-z]/, "") == "cartid"
-        end
-        entry && (entry["value"] || entry["values"])
+      # UpsertOrder can flip the Cart to "converted". Verified against a
+      # real production order (2026-07-16): the order payload carries a
+      # flat `cart_token` string at the ROOT — the counterpart of
+      # Cart#token, not of Cart#external_id. Present in the default
+      # fetch_orders response, no extra include needed.
+      def extract_cart_token
+        @p["cart_token"].to_s.presence
       end
 
       def extract_status

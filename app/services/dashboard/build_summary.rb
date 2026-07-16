@@ -886,17 +886,18 @@ module Dashboard
       scope = tenant.carts.where(abandoned_at: period_range(period))
       scope = scope.where(channel_id: channel_ids) if channel_ids.present?
 
-      total_count, converted_count, abandoned_count, abandoned_value,
+      total_count, converted_count, abandoned_count, abandoned_value, converted_value,
         promocode, progressive, combos, shipment_discount = scope.pick(
           Arel.sql("COUNT(*)"),
           Arel.sql("COUNT(*) FILTER (WHERE status = 'converted')"),
           Arel.sql("COUNT(*) FILTER (WHERE status = 'abandoned')"),
           Arel.sql("COALESCE(SUM(total) FILTER (WHERE status = 'abandoned'), 0)"),
+          Arel.sql("COALESCE(SUM(total) FILTER (WHERE status = 'converted'), 0)"),
           Arel.sql("COALESCE(SUM(promocode_discount), 0)"),
           Arel.sql("COALESCE(SUM(progressive_discount), 0)"),
           Arel.sql("COALESCE(SUM(combos_discount), 0)"),
           Arel.sql("COALESCE(SUM(shipment_discount), 0)")
-        ) || Array.new(8, 0)
+        ) || Array.new(9, 0)
 
       total_count = total_count.to_i
       converted_count = converted_count.to_i
@@ -904,9 +905,14 @@ module Dashboard
       {
         available: true,
         total_count: total_count,
-        abandoned_count: abandoned_count.to_i,
-        converted_count: converted_count,
-        abandoned_value: abandoned_value.to_f.round(2),
+        recovered: {
+          count: converted_count,
+          value: converted_value.to_f.round(2)
+        },
+        still_abandoned: {
+          count: abandoned_count.to_i,
+          value: abandoned_value.to_f.round(2)
+        },
         conversion_rate_pct: total_count.positive? ? (converted_count.to_f / total_count * 100).round(2) : 0.0,
         discount_composition: [
           { key: "coupon", label: "Cupom", amount: promocode.to_f.round(2) },
@@ -929,9 +935,8 @@ module Dashboard
       {
         available: false,
         total_count: 0,
-        abandoned_count: 0,
-        converted_count: 0,
-        abandoned_value: 0.0,
+        recovered: { count: 0, value: 0.0 },
+        still_abandoned: { count: 0, value: 0.0 },
         conversion_rate_pct: 0.0,
         discount_composition: []
       }

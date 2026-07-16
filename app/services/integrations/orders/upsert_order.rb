@@ -72,6 +72,7 @@ module Integrations
         }
         attrs[:coupon_code] = @normalized[:coupon_code].presence if order_has_coupons?
         attrs[:coupon_discount] = @normalized[:coupon_discount].to_f if order_has_coupons?
+        attrs[:cart_token] = @normalized[:cart_token].presence if order_has_cart_token?
 
         order.assign_attributes(attrs)
         order.save!
@@ -165,6 +166,10 @@ module Integrations
         @order_has_coupons ||= Order.column_names.include?("coupon_code")
       end
 
+      def order_has_cart_token?
+        @order_has_cart_token ||= Order.column_names.include?("cart_token")
+      end
+
       def upsert_order_mapping(order)
         return unless @integration
 
@@ -188,20 +193,21 @@ module Integrations
       end
 
       # Cart → order conversion: the normalizer surfaces the originating
-      # checkout cart id (Yampi's Cart_ID) as :cart_external_id when it can
-      # find one. Best-effort by design — a missing cart (not yet polled,
-      # other channel, wrong id shape) must never fail order ingestion.
+      # checkout cart's token (the order payload's root-level `cart_token`,
+      # verified in production) as :cart_token. The match key on the Cart
+      # side is `token`, NOT external_id. Best-effort by design — a missing
+      # cart (not yet polled, other channel) must never fail order ingestion.
       def mark_cart_converted(order)
-        cart_external_id = @normalized[:cart_external_id].to_s
-        return if cart_external_id.blank?
+        cart_token = @normalized[:cart_token].to_s
+        return if cart_token.blank?
 
-        cart = @tenant.carts.find_by(channel: order.channel, external_id: cart_external_id)
+        cart = @tenant.carts.find_by(channel: order.channel, token: cart_token)
         return unless cart
         return if cart.status == "converted" && cart.converted_order_id == order.id
 
         cart.mark_converted!(order)
       rescue => e
-        Rails.logger.error("[Integrations::Orders::UpsertOrder] mark_cart_converted failed for order_id=#{order.id} cart_external_id=#{cart_external_id}: #{e.message}")
+        Rails.logger.error("[Integrations::Orders::UpsertOrder] mark_cart_converted failed for order_id=#{order.id} cart_token=#{cart_token}: #{e.message}")
       end
 
       def run_conflict_detection(order)
