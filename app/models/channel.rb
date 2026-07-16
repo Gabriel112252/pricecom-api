@@ -2,6 +2,8 @@ class Channel < ApplicationRecord
   belongs_to :tenant
   has_many :orders, dependent: :nullify
   has_many :carts,  dependent: :destroy
+  has_many :freight_quotes, dependent: :destroy
+  has_many :freight_margin_dailies, dependent: :destroy
   has_many :pricing_rules, dependent: :destroy
   has_many :channel_operational_costs, dependent: :destroy
   has_many :integrations, dependent: :nullify

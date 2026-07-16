@@ -39,6 +39,21 @@ idworks_order_sync_dispatch:
   class: "Integrations::Idworks::ScheduleOrderSyncsJob"
   queue: integrations
 
+# LucroFrete: custo real de frete cotado no checkout Yampi. Incremental
+# barato (para na primeira página com registros conhecidos), então 15min.
+lucrofrete_quotes_polling_dispatch:
+  cron: "*/15 * * * *"
+  class: "Integrations::Lucrofrete::QuotesPollingSchedulerJob"
+  queue: integrations
+
+# Margem de frete (pedidos reais casados pelo LucroFrete) — dado diário,
+# 1x/dia basta; cada execução re-sincroniza os últimos 3 dias porque o
+# dia corrente muda ao longo do dia (ver MarginSyncService).
+lucrofrete_margin_sync_dispatch:
+  cron: "20 4 * * *"
+  class: "Integrations::Lucrofrete::MarginSyncSchedulerJob"
+  queue: integrations
+
 pagarme_payable_sync:
   cron: "*/30 * * * *"
   class: "Financials::PagarmePayableSyncJob"

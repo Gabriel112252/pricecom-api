@@ -32,6 +32,22 @@ module Api
         # fine. See Channel.ensure_for! and the one-off
         # channels:backfill_missing rake task for tenants connected before
         # this fix existed.
+        #
+        # lucrofrete is a freight-quote service, not a sales channel —
+        # Channel::PLATFORMS doesn't (and shouldn't) include it, so no
+        # Channel row is created and product-sync auth doesn't apply.
+        if credential.channel == "lucrofrete"
+          begin
+            Integrations::LucrofreteClient.new(credential).authenticate!
+            credential.update!(status: "active")
+          rescue Integrations::AuthenticationError, Integrations::ApiError, Integrations::RateLimitError => e
+            credential.update!(status: "error")
+            return render json: { errors: [ e.message ] }, status: :unprocessable_entity
+          end
+
+          return render json: channel_json(credential.channel, credential, [])
+        end
+
         Channel.ensure_for!(current_tenant, credential.channel)
 
         if credential.channel == "tiktok"

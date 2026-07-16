@@ -2,10 +2,14 @@ class DataSourceConfig < ApplicationRecord
   belongs_to :tenant
 
   DATA_TYPES = %w[cost freight tax payment_reconciliation].freeze
-  SOURCES    = %w[idworks pagarme].freeze
+  SOURCES    = %w[idworks pagarme lucrofrete].freeze
+  # "lucrofrete" fornece o custo real de frete cotado no checkout Yampi
+  # (Order#real_freight_cost via Integrations::Lucrofrete::ApplyRealFreightCost)
+  # — alternativa ao idworks para o tipo "freight". Sem default automático
+  # no connect: a troca de fonte é uma decisão explícita do tenant.
   AVAILABLE_SOURCES_BY_DATA_TYPE = {
     "cost" => %w[idworks],
-    "freight" => %w[idworks],
+    "freight" => %w[idworks lucrofrete],
     "tax" => [],
     "payment_reconciliation" => %w[pagarme]
   }.freeze

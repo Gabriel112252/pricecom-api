@@ -73,6 +73,7 @@ module Integrations
         attrs[:coupon_code] = @normalized[:coupon_code].presence if order_has_coupons?
         attrs[:coupon_discount] = @normalized[:coupon_discount].to_f if order_has_coupons?
         attrs[:cart_token] = @normalized[:cart_token].presence if order_has_cart_token?
+        attrs[:shipping_service] = @normalized[:shipping_service].presence if order_has_shipping_service?
 
         order.assign_attributes(attrs)
         order.save!
@@ -170,6 +171,10 @@ module Integrations
         @order_has_cart_token ||= Order.column_names.include?("cart_token")
       end
 
+      def order_has_shipping_service?
+        @order_has_shipping_service ||= Order.column_names.include?("shipping_service")
+      end
+
       def upsert_order_mapping(order)
         return unless @integration
 
@@ -203,9 +208,15 @@ module Integrations
 
         cart = @tenant.carts.find_by(channel: order.channel, token: cart_token)
         return unless cart
-        return if cart.status == "converted" && cart.converted_order_id == order.id
 
-        cart.mark_converted!(order)
+        unless cart.status == "converted" && cart.converted_order_id == order.id
+          cart.mark_converted!(order)
+        end
+
+        # Custo real de frete (LucroFrete) — roda mesmo quando o cart já
+        # estava converted, porque a cotação pode ter chegado depois da
+        # conversão. No-op a menos que a fonte de frete seja "lucrofrete".
+        Integrations::Lucrofrete::ApplyRealFreightCost.call(order: order, cart: cart)
       rescue => e
         Rails.logger.error("[Integrations::Orders::UpsertOrder] mark_cart_converted failed for order_id=#{order.id} cart_token=#{cart_token}: #{e.message}")
       end

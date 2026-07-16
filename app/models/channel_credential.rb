@@ -5,7 +5,11 @@ class ChannelCredential < ApplicationRecord
   # ChannelCredential by looking up `order.channel.platform`, so this
   # string has to agree with Channel::PLATFORMS or that lookup silently
   # fails to match.
-  CHANNELS = %w[yampi shopify tiktok mercadolivre shopee].freeze
+  # "lucrofrete" is NOT a sales channel (no Channel row, no orders, no
+  # stock) — it's a freight-quote service credential (see
+  # Integrations::LucrofreteClient). It lives here to reuse the encrypted
+  # credentials storage + the dynamic credential form, same as the others.
+  CHANNELS = %w[yampi shopify tiktok mercadolivre shopee lucrofrete].freeze
   STATUSES = %w[pending active error].freeze
 
   # Required credential keys per channel — drives both validation and the
@@ -20,7 +24,11 @@ class ChannelCredential < ApplicationRecord
     "shopify"      => %w[shop_domain access_token webhook_secret],
     "tiktok"       => %w[app_key app_secret],
     "mercadolivre" => %w[user_id access_token],
-    "shopee"       => %w[shop_id partner_id partner_key access_token]
+    "shopee"       => %w[shop_id partner_id partner_key access_token],
+    # LucrofreteClient also caches session state inside the same JSONB
+    # (access_token + token_expires_at, TikTok-style) — those are managed
+    # fields, not required user input, so they're not listed here.
+    "lucrofrete"   => %w[email password]
   }.freeze
 
   belongs_to :tenant

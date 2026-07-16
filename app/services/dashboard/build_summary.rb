@@ -84,6 +84,7 @@ module Dashboard
         conflicts:                build_conflicts,
         reconciliation:           build_reconciliation(period),
         cart_abandonment:         build_cart_abandonment(period),
+        freight_margin:           build_freight_margin(period),
         top_products_by_margin:   build_top_products_by_margin(period),
         top_products_by_revenue:  build_top_products_by_revenue(period),
         product_turnover_summary: build_product_turnover_summary(period)
@@ -588,7 +589,7 @@ module Dashboard
         .where("order_items.product_id IS NULL OR order_items.unit_cost IS NULL OR order_items.unit_cost <= 0")
         .distinct
         .pluck(:order_id)).uniq
-      missing_freight_order_ids = data_source_for("freight") == "idworks" ? scope.where(real_freight_cost: nil).pluck(:id) : []
+      missing_freight_order_ids = real_freight_source? ? scope.where(real_freight_cost: nil).pluck(:id) : []
       missing_tax_order_ids = tax_source_configured? ? scope.where(tax_amount: nil).pluck(:id) : []
       incomplete_order_ids = (missing_cost_order_ids + missing_freight_order_ids + missing_tax_order_ids).uniq
       total_orders = scope.count
@@ -981,6 +982,79 @@ module Dashboard
       counts.values.sort_by { |e| [ -e[:carts_count], -e[:total_qty] ] }.first(limit)
     end
 
+    # Freight margin from LucroFrete's matched real orders, read from the
+    # locally synced freight_margin_dailies (see
+    # Integrations::Lucrofrete::MarginSyncService) — never hits the
+    # LucroFrete API on dashboard load. Honors the summary's period and
+    # channel filters. margin_percent is recomputed as a weighted total
+    # (margin / charged), not an average of daily percents.
+    def build_freight_margin(period)
+      return empty_freight_margin unless freight_margin_available?
+
+      scope = tenant.freight_margin_dailies.where(date: period[:from]..period[:to])
+      scope = scope.where(channel_id: channel_ids) if channel_ids.present?
+
+      order_count, charged, cost, margin = scope.pick(
+        Arel.sql("COALESCE(SUM(order_count), 0)"),
+        Arel.sql("COALESCE(SUM(freight_charged), 0)"),
+        Arel.sql("COALESCE(SUM(freight_cost), 0)"),
+        Arel.sql("COALESCE(SUM(margin_value), 0)")
+      ) || Array.new(4, 0)
+
+      charged_f = charged.to_f
+      margin_f = margin.to_f
+      rows = scope.order(:date).group(:date).pluck(
+        :date,
+        Arel.sql("COALESCE(SUM(order_count), 0)"),
+        Arel.sql("COALESCE(SUM(freight_charged), 0)"),
+        Arel.sql("COALESCE(SUM(freight_cost), 0)"),
+        Arel.sql("COALESCE(SUM(margin_value), 0)")
+      ).to_h { |date, *values| [ date, values ] }
+
+      daily_series = (period[:from]..period[:to]).map do |date|
+        day_orders, day_charged, day_cost, day_margin = rows[date] || [ 0, 0, 0, 0 ]
+        {
+          date: date.iso8601,
+          order_count: day_orders.to_i,
+          freight_charged: day_charged.to_f.round(2),
+          freight_cost: day_cost.to_f.round(2),
+          margin_value: day_margin.to_f.round(2)
+        }
+      end
+
+      {
+        available: true,
+        order_count: order_count.to_i,
+        freight_charged: charged_f.round(2),
+        freight_cost: cost.to_f.round(2),
+        margin_value: margin_f.round(2),
+        margin_percent: charged_f.positive? ? (margin_f / charged_f * 100).round(2) : nil,
+        last_synced_at: scope.maximum(:synced_at),
+        daily_series: daily_series
+      }
+    end
+
+    def freight_margin_available?
+      return @freight_margin_available if defined?(@freight_margin_available)
+
+      @freight_margin_available = FreightMarginDaily.table_exists?
+    rescue StandardError
+      @freight_margin_available = false
+    end
+
+    def empty_freight_margin
+      {
+        available: false,
+        order_count: 0,
+        freight_charged: 0.0,
+        freight_cost: 0.0,
+        margin_value: 0.0,
+        margin_percent: nil,
+        last_synced_at: nil,
+        daily_series: []
+      }
+    end
+
     def carts_available?
       return @carts_available if defined?(@carts_available)
 
@@ -1048,11 +1122,17 @@ module Dashboard
     end
 
     def freight_for(scope)
-      if data_source_for("freight") == "idworks"
+      if real_freight_source?
         scope.where.not(real_freight_cost: nil).sum(:real_freight_cost).to_f
       else
         scope.sum(:freight).to_f
       end
+    end
+
+    # Fontes que persistem o custo real em real_freight_cost (espelha
+    # Order::REAL_FREIGHT_COST_SOURCES).
+    def real_freight_source?
+      Order::REAL_FREIGHT_COST_SOURCES.include?(data_source_for("freight"))
     end
 
     def taxes_for(scope)
@@ -1064,7 +1144,11 @@ module Dashboard
     end
 
     def freight_tooltip
-      data_source_for("freight") == "idworks" ? "Soma de real_freight_cost importado do IDWorks." : "Soma de freight dos pedidos."
+      case data_source_for("freight")
+      when "idworks" then "Soma de real_freight_cost importado do IDWorks."
+      when "lucrofrete" then "Soma de real_freight_cost cotado via LucroFrete."
+      else "Soma de freight dos pedidos."
+      end
     end
 
     def composition_line(value, status, tooltip, reason = nil)

@@ -54,6 +54,7 @@ module Integrations
           coupon_discount: extract_coupon_discount,
           ordered_at:     parse_date(@p["created_at"]),
           cart_token:     extract_cart_token,
+          shipping_service: extract_shipping_service,
           items:          extract_items
         }
       end
@@ -72,6 +73,17 @@ module Integrations
       # fetch_orders response, no extra include needed.
       def extract_cart_token
         @p["cart_token"].to_s.presence
+      end
+
+      # Chosen freight service, used to match the LucroFrete quote option
+      # (see Integrations::Lucrofrete::ApplyRealFreightCost). CONFIRMED on
+      # a real CART payload as "shipping_service" (ex:
+      # "ECONOMICO_-_LOGGI_EXPRESS"); NOT yet confirmed that the ORDER
+      # payload uses the same key — "shipment_service" is kept as a
+      # candidate until a real order payload settles it. Confirm in
+      # production and prune the wrong one.
+      def extract_shipping_service
+        (@p["shipping_service"] || @p["shipment_service"]).to_s.presence
       end
 
       def extract_status

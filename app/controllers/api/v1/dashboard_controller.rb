@@ -13,8 +13,49 @@ module Api
       PER_PAGE_DEFAULT = 25
       PER_PAGE_MAX = 100
 
+      FREIGHT_ORDER_SORTS = {
+        "freight_margin" => "(COALESCE(orders.freight, 0) - orders.real_freight_cost)",
+        "freight" => "orders.freight",
+        "real_freight_cost" => "orders.real_freight_cost",
+        "ordered_at" => "orders.ordered_at"
+      }.freeze
+      FREIGHT_ORDERS_PER_PAGE_DEFAULT = 50
+
       def summary
         render json: Dashboard::BuildSummary.call(tenant: current_tenant, params: params)
+      end
+
+      # GET /api/v1/dashboard/freight_orders — per-order freight comparison
+      # (charged vs real carrier cost via LucroFrete/idworks). Same period/
+      # channel filters as the summary. Only orders WITH real_freight_cost
+      # enter the table (the comparison is meaningless without it); the
+      # ones without are counted separately in `coverage` so data coverage
+      # stays visible.
+      def freight_orders
+        scope = freight_comparable_orders
+
+        without_real_cost = scope.where(real_freight_cost: nil).count
+        with_real_cost_scope = scope.where.not(real_freight_cost: nil)
+        with_real_cost = with_real_cost_scope.count
+
+        sort = FREIGHT_ORDER_SORTS.fetch(params[:sort].to_s, FREIGHT_ORDER_SORTS["freight_margin"])
+        direction = params[:direction].to_s.downcase == "desc" ? "DESC" : "ASC"
+
+        per = [ [ params.fetch(:per_page, FREIGHT_ORDERS_PER_PAGE_DEFAULT).to_i, 1 ].max, PER_PAGE_MAX ].min
+        paged = with_real_cost_scope
+          .reorder(Arel.sql("#{sort} #{direction}"), id: :asc)
+          .page(params[:page])
+          .per(per)
+
+        render json: {
+          rows: paged.map { |order| freight_order_json(order) },
+          meta: pagination_meta(paged),
+          coverage: {
+            with_real_cost: with_real_cost,
+            without_real_cost: without_real_cost,
+            total: with_real_cost + without_real_cost
+          }
+        }
       end
 
       def financial
@@ -35,6 +76,46 @@ module Api
       end
 
       private
+
+      # Mirrors Dashboard::BuildSummary's period/channel/validity filters
+      # (sale+refund, non-canceled) so the table agrees with the summary's
+      # freight numbers.
+      def freight_comparable_orders
+        period = resolve_freight_period
+        scope = current_tenant.orders
+          .where(ordered_at: period[:from].beginning_of_day..period[:to].end_of_day)
+          .where(order_type: %w[sale refund])
+          .where.not("LOWER(COALESCE(orders.status, '')) IN (?)", Dashboard::BuildSummary::CANCELED_STATUS_ALIASES)
+
+        channel_ids = Array(params[:channel_ids]).reject(&:blank?)
+        scope = scope.where(channel_id: channel_ids) if channel_ids.present?
+        scope
+      end
+
+      def resolve_freight_period
+        to   = params[:to].present?   ? Date.parse(params[:to])   : Date.current
+        from = params[:from].present? ? Date.parse(params[:from]) : to - 29.days
+        { from: from, to: to }
+      rescue ArgumentError
+        { from: Date.current - 29.days, to: Date.current }
+      end
+
+      def freight_order_json(order)
+        freight = order.freight.to_f
+        real_cost = order.real_freight_cost&.to_f
+
+        {
+          id: order.id,
+          order_number: order.order_number,
+          customer_name: order.customer_name,
+          ordered_at: order.ordered_at,
+          status: order.status,
+          state: order.state,
+          freight: freight.round(2),
+          real_freight_cost: real_cost&.round(2),
+          freight_margin: real_cost.nil? ? nil : (freight - real_cost).round(2)
+        }
+      end
 
       def apply_financial_filters(scope)
         reconciliation_source = DataSourceConfig.source_for(current_tenant, "payment_reconciliation")

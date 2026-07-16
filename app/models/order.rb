@@ -42,8 +42,13 @@ class Order < ApplicationRecord
     (net_margin / gross_value.to_f * 100).round(2).clamp(MARGIN_PCT_RANGE.min, MARGIN_PCT_RANGE.max)
   end
 
+  # Fontes cujo custo real de frete é persistido em real_freight_cost —
+  # idworks (sync do ERP) e lucrofrete (cotação real do checkout, ver
+  # Integrations::Lucrofrete::ApplyRealFreightCost).
+  REAL_FREIGHT_COST_SOURCES = %w[idworks lucrofrete].freeze
+
   def effective_freight_cost
-    DataSourceConfig.source_for(tenant, "freight") == "idworks" ? real_freight_cost.to_f : freight.to_f
+    REAL_FREIGHT_COST_SOURCES.include?(DataSourceConfig.source_for(tenant, "freight")) ? real_freight_cost.to_f : freight.to_f
   end
 
   def effective_tax_amount
