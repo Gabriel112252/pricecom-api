@@ -6,6 +6,7 @@ class Order < ApplicationRecord
   has_many :audit_conflicts,      dependent: :destroy
   has_many :financial_settlement_items, dependent: :nullify
   has_many :financial_receivables, dependent: :nullify
+  has_many :lucrofrete_order_reports, dependent: :nullify
   has_many :integration_mappings, as: :mappable, dependent: :nullify
   has_many :converted_carts, class_name: "Cart", foreign_key: :converted_order_id,
     dependent: :nullify, inverse_of: :converted_order

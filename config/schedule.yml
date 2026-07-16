@@ -47,14 +47,6 @@ lucrofrete_orders_sync_dispatch:
   class: "Integrations::Lucrofrete::OrdersSyncSchedulerJob"
   queue: integrations
 
-# Margem de frete (pedidos reais casados pelo LucroFrete) — dado diário,
-# 1x/dia basta; cada execução re-sincroniza os últimos 3 dias porque o
-# dia corrente muda ao longo do dia (ver MarginSyncService).
-lucrofrete_margin_sync_dispatch:
-  cron: "20 4 * * *"
-  class: "Integrations::Lucrofrete::MarginSyncSchedulerJob"
-  queue: integrations
-
 pagarme_payable_sync:
   cron: "*/30 * * * *"
   class: "Financials::PagarmePayableSyncJob"

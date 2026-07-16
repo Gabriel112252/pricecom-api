@@ -1,9 +1,15 @@
 module Integrations
   module Lucrofrete
-    # Syncs LucroFrete's /api/reports/timeline (REAL matched orders, not raw
+    # Legacy sync for LucroFrete's /api/reports/timeline (REAL matched orders, not raw
     # quotes) into the local freight_margin_dailies table, so the dashboard
     # reads local data with the standard period/channel filters instead of
     # hitting the LucroFrete API on every page load.
+    #
+    # The scheduled LucroFrete dashboard feed now comes from
+    # OrdersSyncService + /api/reports/orders, whose payload carries the
+    # per-order freight_charged/freight_cost/margin fields observed in
+    # production. Keep this class only as a fallback for the old timeline
+    # endpoint.
     #
     # Window: first run (no rows for the tenant) backfills BACKFILL_DAYS;
     # after that each run re-syncs only the last RESYNC_DAYS — "today"

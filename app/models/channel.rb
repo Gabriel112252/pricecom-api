@@ -4,6 +4,7 @@ class Channel < ApplicationRecord
   has_many :carts,  dependent: :destroy
   has_many :freight_quotes, dependent: :destroy
   has_many :freight_margin_dailies, dependent: :destroy
+  has_many :lucrofrete_order_reports, dependent: :destroy
   has_many :pricing_rules, dependent: :destroy
   has_many :channel_operational_costs, dependent: :destroy
   has_many :integrations, dependent: :nullify

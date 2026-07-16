@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_07_15_090000) do
+ActiveRecord::Schema[7.2].define(version: 2026_07_16_000700) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -355,6 +355,41 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_15_090000) do
     t.index ["kit_product_id"], name: "index_kit_components_on_kit_product_id"
   end
 
+  create_table "lucrofrete_order_reports", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "channel_id", null: false
+    t.bigint "order_id"
+    t.string "lucrofrete_order_id", null: false
+    t.string "shopify_order_id"
+    t.string "order_number", null: false
+    t.datetime "order_created_at"
+    t.string "customer_state"
+    t.string "customer_city"
+    t.string "customer_zipcode"
+    t.decimal "total_order_value", precision: 12, scale: 2
+    t.integer "total_items"
+    t.decimal "freight_charged", precision: 12, scale: 2
+    t.decimal "freight_cost", precision: 12, scale: 2
+    t.decimal "margin_value", precision: 12, scale: 2
+    t.decimal "margin_percent", precision: 10, scale: 2
+    t.boolean "is_free_shipping"
+    t.string "shipping_method_title"
+    t.string "slot_name"
+    t.string "carrier_name"
+    t.string "match_status"
+    t.string "quote_log_id"
+    t.jsonb "raw_payload", default: {}, null: false
+    t.datetime "synced_at"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["order_id"], name: "index_lucrofrete_order_reports_on_order_id"
+    t.index ["quote_log_id"], name: "index_lucrofrete_order_reports_on_quote_log_id"
+    t.index ["tenant_id", "channel_id", "order_number"], name: "idx_lucrofrete_reports_tenant_channel_order"
+    t.index ["tenant_id", "lucrofrete_order_id"], name: "idx_lucrofrete_reports_tenant_lf_id", unique: true
+    t.index ["tenant_id", "match_status"], name: "idx_lucrofrete_reports_tenant_match_status"
+    t.index ["tenant_id", "order_created_at"], name: "idx_lucrofrete_reports_tenant_created_at"
+  end
+
   create_table "order_items", force: :cascade do |t|
     t.bigint "order_id", null: false
     t.bigint "product_id"
@@ -526,6 +561,9 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_15_090000) do
   add_foreign_key "integrations", "tenants"
   add_foreign_key "kit_components", "products", column: "component_product_id"
   add_foreign_key "kit_components", "products", column: "kit_product_id"
+  add_foreign_key "lucrofrete_order_reports", "channels"
+  add_foreign_key "lucrofrete_order_reports", "orders"
+  add_foreign_key "lucrofrete_order_reports", "tenants"
   add_foreign_key "order_items", "orders"
   add_foreign_key "order_items", "products"
   add_foreign_key "order_refunds", "integrations"

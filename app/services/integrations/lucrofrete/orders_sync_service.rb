@@ -1,6 +1,7 @@
 module Integrations
   module Lucrofrete
-    # Syncs LucroFrete's GET /api/reports/orders into Order#real_freight_cost.
+    # Syncs LucroFrete's GET /api/reports/orders into Order#real_freight_cost
+    # and freight_margin_dailies.
     #
     # This endpoint returns real orders already matched by LucroFrete
     # internally, including match_status. It is now the authoritative source
@@ -10,7 +11,7 @@ module Integrations
       MODES = %w[backfill incremental].freeze
       DEFAULT_PER_PAGE = 50
       INCREMENTAL_DAYS = 2
-      BACKFILL_PAGE_SLEEP = 60
+      BACKFILL_PAGE_SLEEP = 120
       MAX_EXAMPLES = 10
 
       Result = Struct.new(:outcome, :synced_count, :error_message, :metadata, keyword_init: true) do
@@ -19,7 +20,7 @@ module Integrations
         def skipped? = outcome == :skipped
       end
 
-      def self.call(channel_credential, mode:, start_date: nil, end_date: nil, page: 1, per_page: DEFAULT_PER_PAGE, trigger: "scheduled")
+      def self.call(channel_credential, mode:, start_date: nil, end_date: nil, page: 1, per_page: DEFAULT_PER_PAGE, page_sleep: nil, trigger: "scheduled")
         new(
           channel_credential,
           mode: mode,
@@ -27,11 +28,12 @@ module Integrations
           end_date: end_date,
           page: page,
           per_page: per_page,
+          page_sleep: page_sleep,
           trigger: trigger
         ).call
       end
 
-      def initialize(channel_credential, mode:, start_date: nil, end_date: nil, page: 1, per_page: DEFAULT_PER_PAGE, trigger: "scheduled")
+      def initialize(channel_credential, mode:, start_date: nil, end_date: nil, page: 1, per_page: DEFAULT_PER_PAGE, page_sleep: nil, trigger: "scheduled")
         @channel_credential = channel_credential
         @tenant = channel_credential.tenant
         @mode = mode.to_s
@@ -39,6 +41,7 @@ module Integrations
         @end_date = end_date
         @first_page = [ page.to_i, 1 ].max
         @per_page = per_page.to_i.positive? ? per_page.to_i : DEFAULT_PER_PAGE
+        @page_sleep_seconds = resolve_page_sleep(page_sleep)
         @trigger = trigger
         @integration = tenant.integrations.active.find_by(provider: "lucrofrete")
         @client = Integrations::LucrofreteClient.new(channel_credential)
@@ -58,6 +61,7 @@ module Integrations
 
         @channel = Channel.ensure_for!(tenant, "yampi")
         fetch_and_process_pages
+        upsert_freight_margin_days
 
         channel_credential.update!(last_synced_at: Time.current, status: "active")
         finish_log(status: item_errors.empty? ? "success" : "error", error_message: item_errors.first&.fetch(:message, nil))
@@ -77,7 +81,7 @@ module Integrations
       private
 
       attr_reader :channel_credential, :tenant, :mode, :trigger, :integration, :client,
-        :started_at, :log, :window_from, :window_to, :channel, :per_page,
+        :started_at, :log, :window_from, :window_to, :channel, :per_page, :page_sleep_seconds,
         :item_errors
 
       def reset_counts
@@ -89,16 +93,30 @@ module Integrations
         @not_found_count = 0
         @unmatched_count = 0
         @invalid_cost_count = 0
+        @freight_margin_orders_count = 0
+        @freight_margin_days_upserted = 0
+        @freight_margin_skipped_count = 0
+        @reports_upserted_count = 0
+        @reports_skipped_count = 0
         @total_orders_reported = nil
         @total_pages = nil
         @estimated_minimum_sleep_seconds = 0
         @actual_sleep_seconds = 0
         @item_errors = []
+        @daily_margin_totals = {}
         @updated_examples = []
         @not_found_examples = []
         @unmatched_examples = []
         @invalid_cost_examples = []
+        @freight_margin_skipped_examples = []
+        @reports_skipped_examples = []
         @backfill_plan_logged = false
+      end
+
+      def resolve_page_sleep(value)
+        seconds = value.to_i
+        seconds = BACKFILL_PAGE_SLEEP unless seconds.positive?
+        [ seconds, 60 ].max
       end
 
       def validate_mode!
@@ -178,7 +196,7 @@ module Integrations
         return unless mode == "backfill"
         return if @backfill_plan_logged
 
-        @estimated_minimum_sleep_seconds = [ @total_pages.to_i - 1, 0 ].max * BACKFILL_PAGE_SLEEP
+        @estimated_minimum_sleep_seconds = [ @total_pages.to_i - 1, 0 ].max * page_sleep_seconds
         Rails.logger.info(
           "[Integrations::Lucrofrete::OrdersSyncService] backfill tenant=#{tenant.slug} " \
           "periodo=#{window_from}..#{window_to} total_orders=#{@total_orders_reported || 'desconhecido'} " \
@@ -201,10 +219,10 @@ module Integrations
 
         Rails.logger.info(
           "[Integrations::Lucrofrete::OrdersSyncService] backfill tenant=#{tenant.slug} " \
-          "sleep=#{BACKFILL_PAGE_SLEEP}s antes da pagina #{next_page}"
+          "sleep=#{page_sleep_seconds}s antes da pagina #{next_page}"
         )
-        sleep(BACKFILL_PAGE_SLEEP)
-        @actual_sleep_seconds += BACKFILL_PAGE_SLEEP
+        sleep(page_sleep_seconds)
+        @actual_sleep_seconds += page_sleep_seconds
       end
 
       def process_report_order(raw_order)
@@ -216,6 +234,7 @@ module Integrations
         raw = raw_order.with_indifferent_access
         order_number = raw["order_number"].to_s.strip
         match_status = raw["match_status"].to_s
+        report = upsert_order_report(raw)
 
         unless matched_status?(match_status)
           @unmatched_count += 1
@@ -224,6 +243,8 @@ module Integrations
         end
 
         @matched_count += 1
+        aggregate_freight_margin(raw)
+
         order = find_local_order(order_number)
         unless order
           @not_found_count += 1
@@ -231,6 +252,7 @@ module Integrations
           return
         end
 
+        link_order_report(report, order)
         cost = parse_money(raw["freight_cost"])
         unless cost
           @invalid_cost_count += 1
@@ -267,6 +289,154 @@ module Integrations
         BigDecimal(value.to_s)
       rescue ArgumentError
         nil
+      end
+
+      def upsert_order_report(raw)
+        return nil unless order_reports_available?
+
+        lucrofrete_order_id = raw["id"].to_s
+        if lucrofrete_order_id.blank?
+          record_order_report_skip(raw, "missing_lucrofrete_order_id")
+          return nil
+        end
+
+        report = tenant.lucrofrete_order_reports.find_or_initialize_by(lucrofrete_order_id: lucrofrete_order_id)
+        report.assign_attributes(
+          channel: channel,
+          shopify_order_id: raw["shopify_order_id"].presence&.to_s,
+          order_number: raw["order_number"].to_s,
+          order_created_at: parse_report_order_time(raw["order_created_at"]),
+          customer_state: raw["customer_state"].presence&.to_s,
+          customer_city: raw["customer_city"].presence&.to_s,
+          customer_zipcode: raw["customer_zipcode"].presence&.to_s,
+          total_order_value: parse_money(raw["total_order_value"]),
+          total_items: raw["total_items"].presence&.to_i,
+          freight_charged: parse_money(raw["freight_charged"]),
+          freight_cost: parse_money(raw["freight_cost"]),
+          margin_value: parse_money(raw["margin_value"]),
+          margin_percent: parse_money(raw["margin_percent"]),
+          is_free_shipping: raw["is_free_shipping"],
+          shipping_method_title: raw["shipping_method_title"].presence&.to_s,
+          slot_name: raw["slot_name"].presence&.to_s,
+          carrier_name: raw["carrier_name"].presence&.to_s,
+          match_status: raw["match_status"].presence&.to_s,
+          quote_log_id: raw["quote_log_id"].presence&.to_s,
+          raw_payload: raw.to_h,
+          synced_at: Time.current
+        )
+        report.save!
+        @reports_upserted_count += 1
+        report
+      rescue => e
+        record_order_report_skip(raw, e.message)
+        nil
+      end
+
+      def link_order_report(report, order)
+        return unless report && order
+        return if report.order_id == order.id
+
+        report.update!(order: order)
+      rescue => e
+        record_order_report_skip(report.raw_payload || {}, "link_order_failed: #{e.message}")
+      end
+
+      def order_reports_available?
+        return @order_reports_available if defined?(@order_reports_available)
+
+        @order_reports_available = LucrofreteOrderReport.table_exists?
+      rescue StandardError
+        @order_reports_available = false
+      end
+
+      def aggregate_freight_margin(raw)
+        return unless freight_margin_available?
+
+        date = parse_report_order_date(raw["order_created_at"])
+        charged = parse_money(raw["freight_charged"])
+        cost = parse_money(raw["freight_cost"])
+        margin = parse_money(raw["margin_value"])
+        margin ||= charged - cost if charged && cost
+
+        unless date && charged && cost && margin
+          record_freight_margin_skip(raw, "invalid_daily_margin_fields")
+          return
+        end
+
+        totals = daily_margin_totals_for(date)
+        totals[:order_count] += 1
+        totals[:freight_charged] += charged
+        totals[:freight_cost] += cost
+        totals[:margin_value] += margin
+        totals[:free_shipping_count] += 1 if raw["is_free_shipping"] == true
+        @freight_margin_orders_count += 1
+      rescue => e
+        record_freight_margin_skip(raw, e.message)
+      end
+
+      def parse_report_order_date(value)
+        return nil if value.blank?
+
+        parsed_time = parse_report_order_time(value)
+        return parsed_time.to_date if parsed_time
+
+        Date.parse(value.to_s)
+      rescue ArgumentError, TypeError
+        nil
+      end
+
+      def parse_report_order_time(value)
+        return nil if value.blank?
+
+        Time.zone.parse(value.to_s)
+      rescue ArgumentError, TypeError
+        nil
+      end
+
+      def daily_margin_totals_for(date)
+        @daily_margin_totals[date] ||= {
+          order_count: 0,
+          freight_charged: BigDecimal("0"),
+          freight_cost: BigDecimal("0"),
+          margin_value: BigDecimal("0"),
+          free_shipping_count: 0
+        }
+      end
+
+      def upsert_freight_margin_days
+        return unless freight_margin_available?
+
+        existing_by_date = tenant.freight_margin_dailies
+          .where(channel: channel, date: window_from..window_to)
+          .index_by(&:date)
+        dates = (@daily_margin_totals.keys + existing_by_date.keys).uniq.sort
+
+        dates.each do |date|
+          totals = @daily_margin_totals[date] || daily_margin_totals_for(date)
+          row = existing_by_date[date] || tenant.freight_margin_dailies.find_or_initialize_by(channel: channel, date: date)
+          charged = totals[:freight_charged]
+          margin = totals[:margin_value]
+
+          row.assign_attributes(
+            order_count: totals[:order_count],
+            freight_charged: charged.round(2),
+            freight_cost: totals[:freight_cost].round(2),
+            margin_value: margin.round(2),
+            margin_percent: charged.positive? ? (margin / charged * 100).round(2) : nil,
+            free_shipping_count: totals[:free_shipping_count],
+            synced_at: Time.current
+          )
+          row.save!
+          @freight_margin_days_upserted += 1
+        end
+      end
+
+      def freight_margin_available?
+        return @freight_margin_available if defined?(@freight_margin_available)
+
+        @freight_margin_available = FreightMarginDaily.table_exists?
+      rescue StandardError
+        @freight_margin_available = false
       end
 
       def record_updated_example(raw, order, rounded_cost)
@@ -318,6 +488,32 @@ module Integrations
         }
       end
 
+      def record_freight_margin_skip(raw, reason)
+        @freight_margin_skipped_count += 1
+        return if @freight_margin_skipped_examples.size >= MAX_EXAMPLES
+
+        @freight_margin_skipped_examples << {
+          lucrofrete_order_id: raw["id"],
+          order_number: raw["order_number"],
+          order_created_at: raw["order_created_at"],
+          freight_charged: raw["freight_charged"],
+          freight_cost: raw["freight_cost"],
+          margin_value: raw["margin_value"],
+          reason: reason
+        }
+      end
+
+      def record_order_report_skip(raw, reason)
+        @reports_skipped_count += 1
+        return if @reports_skipped_examples.size >= MAX_EXAMPLES
+
+        @reports_skipped_examples << {
+          lucrofrete_order_id: raw["id"],
+          order_number: raw["order_number"],
+          reason: reason
+        }
+      end
+
       def record_item_error(raw_order, message)
         item_errors << {
           lucrofrete_order_id: raw_order.is_a?(Hash) ? raw_order["id"] : nil,
@@ -343,7 +539,8 @@ module Integrations
             source_endpoint: "reports/orders",
             window_from: window_from.iso8601,
             window_to: window_to.iso8601,
-            per_page: per_page
+            per_page: per_page,
+            page_sleep_seconds: mode == "backfill" ? page_sleep_seconds : 0
           }
         )
       end
@@ -377,11 +574,18 @@ module Integrations
           not_found_count: @not_found_count,
           unmatched_count: @unmatched_count,
           invalid_cost_count: @invalid_cost_count,
+          freight_margin_orders_count: @freight_margin_orders_count,
+          freight_margin_days_upserted: @freight_margin_days_upserted,
+          freight_margin_skipped_count: @freight_margin_skipped_count,
+          reports_upserted_count: @reports_upserted_count,
+          reports_skipped_count: @reports_skipped_count,
           error_count: item_errors.size,
           updated_examples: @updated_examples,
           not_found_examples: @not_found_examples,
           unmatched_examples: @unmatched_examples,
           invalid_cost_examples: @invalid_cost_examples,
+          freight_margin_skipped_examples: @freight_margin_skipped_examples,
+          reports_skipped_examples: @reports_skipped_examples,
           errors: item_errors.first(MAX_EXAMPLES)
         }
       end
@@ -392,7 +596,7 @@ module Integrations
           total_orders_reported: @total_orders_reported,
           estimated_minimum_sleep_seconds: @estimated_minimum_sleep_seconds,
           estimated_minimum_sleep_human: format_duration(@estimated_minimum_sleep_seconds),
-          backfill_sleep_seconds_per_page: BACKFILL_PAGE_SLEEP
+          backfill_sleep_seconds_per_page: page_sleep_seconds
         }
       end
 

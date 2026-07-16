@@ -6,6 +6,7 @@ class Tenant < ApplicationRecord
   has_many :carts,         dependent: :destroy
   has_many :freight_quotes, dependent: :destroy
   has_many :freight_margin_dailies, dependent: :destroy
+  has_many :lucrofrete_order_reports, dependent: :destroy
   has_many :order_refunds, dependent: :destroy
   has_many :imports, dependent: :destroy
   has_many :integrations,          dependent: :destroy

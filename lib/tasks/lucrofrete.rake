@@ -21,6 +21,8 @@ namespace :lucrofrete do
     until_date = parse_date.call("UNTIL", ENV["UNTIL"] || ENV["END_DATE"]) || Date.current
     per_page = (ENV["PER_PAGE"].presence || Integrations::Lucrofrete::OrdersSyncService::DEFAULT_PER_PAGE).to_i
     abort "PER_PAGE precisa ser maior que zero" unless per_page.positive?
+    sleep_seconds = (ENV["SLEEP_SECONDS"].presence || Integrations::Lucrofrete::OrdersSyncService::BACKFILL_PAGE_SLEEP).to_i
+    abort "SLEEP_SECONDS precisa ser maior que zero" unless sleep_seconds.positive?
 
     credentials = ChannelCredential.active.where(channel: "lucrofrete")
     credentials = credentials.where(tenant_id: ENV["TENANT_ID"]) if ENV["TENANT_ID"].present?
@@ -47,8 +49,8 @@ namespace :lucrofrete do
         next
       end
 
-      puts "Iniciando backfill LucroFrete tenant=#{tenant.slug} periodo=#{tenant_since}..#{until_date} per_page=#{per_page}."
-      puts "O servico respeitara sleep obrigatorio de 60s entre paginas no modo backfill."
+      puts "Iniciando backfill LucroFrete tenant=#{tenant.slug} periodo=#{tenant_since}..#{until_date} per_page=#{per_page} sleep=#{[ sleep_seconds, 60 ].max}s."
+      puts "O servico respeitara sleep minimo obrigatorio de 60s entre paginas no modo backfill."
 
       result = Integrations::Lucrofrete::OrdersSyncService.call(
         credential,
@@ -56,6 +58,7 @@ namespace :lucrofrete do
         start_date: tenant_since,
         end_date: until_date,
         per_page: per_page,
+        page_sleep: sleep_seconds,
         trigger: "rake"
       )
       metadata = result.metadata.with_indifferent_access
