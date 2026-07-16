@@ -180,4 +180,42 @@ RSpec.describe Integrations::TiktokAdapter do
       expect { adapter.fetch_orders_page }.to raise_error(Integrations::AuthenticationError, /escopo/)
     end
   end
+
+  describe "#fetch_order_details" do
+    let(:detail_url) { "https://open-api.tiktokglobalshop.com/order/202309/orders" }
+    let(:detail_body) do
+      {
+        code: 0,
+        message: "Success",
+        data: { orders: [ { id: "576461413038785752", status: "AWAITING_SHIPMENT" } ] }
+      }.to_json
+    end
+
+    it "GETs the ids as a comma-separated query param, signed and shop-scoped, with no body" do
+      captured_request = nil
+
+      stub_request(:get, /\A#{Regexp.escape(detail_url)}/)
+        .with { |request| captured_request = request }
+        .to_return(status: 200, body: detail_body, headers: { "Content-Type" => "application/json" })
+
+      orders = adapter.fetch_order_details([ "576461413038785752", 576_461_413_038_785_753 ])
+
+      query = Rack::Utils.parse_query(captured_request.uri.query)
+      expect(query).to include("ids" => "576461413038785752,576461413038785753")
+      expect(query).to include("shop_cipher" => "GCP_cipher")
+      expect(query).to include("timestamp", "sign")
+      expect(captured_request.headers["X-Tts-Access-Token"]).to eq("tok789")
+      expect(orders.first).to include("id" => "576461413038785752", "status" => "AWAITING_SHIPMENT")
+    end
+
+    it "returns [] without calling the API when there are no ids" do
+      expect(adapter.fetch_order_details([])).to eq([])
+    end
+
+    it "rejects more than ORDER_DETAIL_MAX_IDS ids per call" do
+      ids = Array.new(described_class::ORDER_DETAIL_MAX_IDS + 1) { |i| i.to_s }
+
+      expect { adapter.fetch_order_details(ids) }.to raise_error(ArgumentError)
+    end
+  end
 end

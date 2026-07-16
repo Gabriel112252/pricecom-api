@@ -183,6 +183,119 @@ RSpec.describe Dashboard::BuildSummary do
     end
   end
 
+  describe "non-revenue statuses (unpaid / status_unknown)" do
+    let(:tiktok_channel) { tenant.channels.create!(name: "TikTok Shop", platform: "tiktok") }
+
+    it "excludes unpaid and status_unknown orders from revenue, order count and top products" do
+      make_order(channel_a, gross: 100, margin: 30, ordered_at: 1.day.ago)
+      product = tenant.products.create!(sku: "SKU-U", name: "Produto", cost_price: 10)
+
+      unpaid = make_order(tiktok_channel, gross: 500, margin: 0, ordered_at: 1.day.ago)
+      unpaid.update!(status: "unpaid")
+      unpaid.order_items.create!(product: product, sku: product.sku, name: product.name, quantity: 3, unit_price: 100, unit_cost: 10)
+
+      unknown = make_order(tiktok_channel, gross: 300, margin: 0, ordered_at: 1.day.ago)
+      unknown.update!(status: "status_unknown")
+
+      verbatim = make_order(tiktok_channel, gross: 200, margin: 0, ordered_at: 1.day.ago)
+      verbatim.update_column(:status, "UNPAID") # legado pré-normalização
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      expect(result[:revenue][:gross]).to eq(100.0)
+      expect(result[:orders][:count]).to eq(1)
+      expect(result[:top_products_by_revenue]).to eq([])
+      expect(result[:product_turnover_summary]).to eq([])
+    end
+
+    it "exposes how many orders (and how much) were excluded, for the UI transparency badge" do
+      make_order(channel_a, gross: 100, margin: 30, ordered_at: 1.day.ago)
+      make_order(tiktok_channel, gross: 500, margin: 0, ordered_at: 1.day.ago).update!(status: "unpaid")
+      make_order(tiktok_channel, gross: 300, margin: 0, ordered_at: 1.day.ago).update!(status: "status_unknown")
+      # Fora do período — não entra no selo
+      make_order(tiktok_channel, gross: 900, margin: 0, ordered_at: 60.days.ago).update!(status: "unpaid")
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      expect(result[:kpis]).to include(
+        non_revenue_excluded_count: 2,
+        non_revenue_excluded_amount: 800.0
+      )
+    end
+
+    it "scopes the exclusion badge to the channel filter and zeroes it when nothing was excluded" do
+      make_order(tiktok_channel, gross: 500, margin: 0, ordered_at: 1.day.ago).update!(status: "unpaid")
+
+      tiktok_only = described_class.call(
+        tenant: tenant,
+        params: ActionController::Parameters.new(
+          from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601, channel_ids: [ tiktok_channel.id.to_s ]
+        )
+      )
+      yampi_only = described_class.call(
+        tenant: tenant,
+        params: ActionController::Parameters.new(
+          from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601, channel_ids: [ channel_a.id.to_s ]
+        )
+      )
+
+      expect(tiktok_only[:kpis]).to include(non_revenue_excluded_count: 1, non_revenue_excluded_amount: 500.0)
+      expect(yampi_only[:kpis]).to include(non_revenue_excluded_count: 0, non_revenue_excluded_amount: 0.0)
+    end
+  end
+
+  describe "cart abandonment" do
+    let(:tiktok_channel) { tenant.channels.create!(name: "TikTok Shop", platform: "tiktok") }
+
+    def make_cart(channel, total:, status: "abandoned", abandoned_at: 1.day.ago)
+      tenant.carts.create!(
+        channel: channel, external_id: "cart-#{SecureRandom.hex(4)}",
+        total: total, status: status, abandoned_at: abandoned_at
+      )
+    end
+
+    it "keeps the yampi_checkout mode by default and counts only the filtered channel's carts" do
+      make_cart(channel_a, total: 50)
+      make_cart(tiktok_channel, total: 80)
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      expect(result[:cart_abandonment][:mode]).to eq("yampi_checkout")
+      expect(result[:cart_abandonment][:total_count]).to eq(2)
+    end
+
+    it "switches to tiktok_unpaid mode when the channel filter is TikTok-only" do
+      make_cart(channel_a, total: 50)
+      make_cart(tiktok_channel, total: 80)
+      make_cart(tiktok_channel, total: 30, status: "converted")
+
+      result = described_class.call(
+        tenant: tenant,
+        params: ActionController::Parameters.new(
+          from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601, channel_ids: [ tiktok_channel.id.to_s ]
+        )
+      )
+
+      cart_abandonment = result[:cart_abandonment]
+      expect(cart_abandonment[:mode]).to eq("tiktok_unpaid")
+      expect(cart_abandonment[:total_count]).to eq(2)
+      expect(cart_abandonment[:still_abandoned]).to eq(count: 1, value: 80.0)
+      expect(cart_abandonment[:recovered]).to eq(count: 1, value: 30.0)
+    end
+
+    it "keeps yampi_checkout mode on a mixed channel selection" do
+      result = described_class.call(
+        tenant: tenant,
+        params: ActionController::Parameters.new(
+          from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601,
+          channel_ids: [ channel_a.id.to_s, tiktok_channel.id.to_s ]
+        )
+      )
+
+      expect(result[:cart_abandonment][:mode]).to eq("yampi_checkout")
+    end
+  end
+
   describe "conflicts" do
     it "sums the absolute value of open financial conflicts as value_at_risk, ignoring resolved ones and non-financial types" do
       make_conflict(conflict_type: "nf_discount_mismatch", difference: -15.5)

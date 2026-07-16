@@ -30,11 +30,40 @@ RSpec.describe Integrations::Normalizers::TiktokOrderNormalizer do
       expect(normalized[:freight]).to be_within(0.001).of(6.84)
     end
 
+    it "keeps the shipping fee decomposition for freight-margin auditing" do
+      expect(normalized[:original_shipping_fee]).to be_within(0.001).of(10.00)
+      expect(normalized[:shipping_fee_seller_discount]).to be_within(0.001).of(3.16)
+      expect(normalized[:shipping_fee_platform_discount]).to eq(0.0)
+    end
+
+    it "leaves shipping fee audit fields nil when the payload has no payment object" do
+      bare = described_class.new({ "id" => "1", "status" => "UNPAID" }, "order.polling").normalize
+
+      expect(bare[:original_shipping_fee]).to be_nil
+      expect(bare[:shipping_fee_seller_discount]).to be_nil
+      expect(bare[:shipping_fee_platform_discount]).to be_nil
+    end
+
     it "keeps gross_value - discount == payment.total_amount (taxes are zero)" do
       total_amount = raw_order.dig("payment", "total_amount").to_f
 
       expect(normalized[:gross_value] - normalized[:discount]).to be_within(0.001).of(total_amount)
       expect(normalized[:discount]).to be <= normalized[:gross_value]
+    end
+  end
+
+  describe "status normalization" do
+    it "maps UNPAID (any casing) to the canonical 'unpaid'" do
+      %w[UNPAID unpaid Unpaid].each do |raw_status|
+        result = described_class.new(raw_order.merge("status" => raw_status), "order.polling").normalize
+        expect(result[:status]).to eq("unpaid")
+        expect(result[:order_type]).to eq("sale")
+      end
+    end
+
+    it "keeps every other status verbatim" do
+      result = described_class.new(raw_order.merge("status" => "AWAITING_SHIPMENT"), "order.polling").normalize
+      expect(result[:status]).to eq("AWAITING_SHIPMENT")
     end
   end
 

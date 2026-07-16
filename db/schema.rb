@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_07_16_000700) do
+ActiveRecord::Schema[7.2].define(version: 2026_07_16_120000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -41,6 +41,36 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_16_000700) do
     t.index ["tenant_id"], name: "index_audit_conflicts_on_tenant_id"
   end
 
+  create_table "carts", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "channel_id", null: false
+    t.string "external_id", null: false
+    t.string "token"
+    t.string "customer_name"
+    t.string "customer_email"
+    t.decimal "subtotal", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "discount", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "promocode_discount", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "progressive_discount", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "combos_discount", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "shipment_discount", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "shipment", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "total", precision: 12, scale: 2, default: "0.0", null: false
+    t.string "status", default: "abandoned", null: false
+    t.bigint "converted_order_id"
+    t.datetime "abandoned_at"
+    t.jsonb "raw_payload", default: {}, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["channel_id"], name: "index_carts_on_channel_id"
+    t.index ["converted_order_id"], name: "index_carts_on_converted_order_id"
+    t.index ["tenant_id", "abandoned_at"], name: "index_carts_on_tenant_id_and_abandoned_at"
+    t.index ["tenant_id", "channel_id", "external_id"], name: "index_carts_on_tenant_id_and_channel_id_and_external_id", unique: true
+    t.index ["tenant_id", "status"], name: "index_carts_on_tenant_id_and_status"
+    t.index ["tenant_id"], name: "index_carts_on_tenant_id"
+    t.index ["token"], name: "index_carts_on_token"
+  end
+
   create_table "channel_credentials", force: :cascade do |t|
     t.bigint "tenant_id", null: false
     t.string "channel", null: false
@@ -53,6 +83,7 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_16_000700) do
     t.bigint "stock_source_channel_id"
     t.datetime "orders_sync_cursor_at"
     t.boolean "polling_enabled", default: false, null: false
+    t.datetime "carts_sync_cursor_at"
     t.index ["stock_source_channel_id"], name: "index_channel_credentials_on_stock_source_channel_id"
     t.index ["tenant_id", "channel"], name: "index_channel_credentials_on_tenant_id_and_channel", unique: true
     t.index ["tenant_id"], name: "index_channel_credentials_on_tenant_id"
@@ -111,6 +142,41 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_16_000700) do
     t.datetime "updated_at", null: false
     t.index ["tenant_id", "data_type"], name: "index_data_source_configs_on_tenant_id_and_data_type", unique: true
     t.index ["tenant_id"], name: "index_data_source_configs_on_tenant_id"
+  end
+
+  create_table "financial_receivables", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "financial_source_id", null: false
+    t.bigint "financial_settlement_item_id"
+    t.bigint "order_id"
+    t.string "payable_id", null: false
+    t.string "status", null: false
+    t.decimal "amount", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "fee_amount", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "anticipation_fee_amount", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "net_amount", precision: 12, scale: 2, default: "0.0", null: false
+    t.integer "installment"
+    t.string "transaction_id"
+    t.string "charge_id"
+    t.string "recipient_id"
+    t.string "payment_method"
+    t.date "payment_date"
+    t.date "original_payment_date"
+    t.datetime "accrual_date"
+    t.datetime "date_created"
+    t.jsonb "raw_payload", default: {}, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["charge_id"], name: "index_financial_receivables_on_charge_id"
+    t.index ["financial_settlement_item_id"], name: "index_financial_receivables_on_financial_settlement_item_id"
+    t.index ["financial_source_id", "payment_date"], name: "idx_financial_receivables_on_source_payment_date"
+    t.index ["financial_source_id"], name: "index_financial_receivables_on_financial_source_id"
+    t.index ["order_id"], name: "index_financial_receivables_on_order_id"
+    t.index ["payment_method"], name: "index_financial_receivables_on_payment_method"
+    t.index ["tenant_id", "financial_source_id", "payable_id"], name: "idx_financial_receivables_on_source_payable", unique: true
+    t.index ["tenant_id", "payment_date", "status"], name: "idx_financial_receivables_on_tenant_payment_status"
+    t.index ["tenant_id"], name: "index_financial_receivables_on_tenant_id"
+    t.index ["transaction_id"], name: "index_financial_receivables_on_transaction_id"
   end
 
   create_table "financial_settlement_items", force: :cascade do |t|
@@ -200,39 +266,43 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_16_000700) do
     t.index ["tenant_id"], name: "index_financial_sources_on_tenant_id"
   end
 
-  create_table "financial_receivables", force: :cascade do |t|
+  create_table "freight_margin_dailies", force: :cascade do |t|
     t.bigint "tenant_id", null: false
-    t.bigint "financial_source_id", null: false
-    t.bigint "financial_settlement_item_id"
-    t.bigint "order_id"
-    t.string "payable_id", null: false
-    t.string "status", null: false
-    t.decimal "amount", precision: 12, scale: 2, default: "0.0", null: false
-    t.decimal "fee_amount", precision: 12, scale: 2, default: "0.0", null: false
-    t.decimal "anticipation_fee_amount", precision: 12, scale: 2, default: "0.0", null: false
-    t.decimal "net_amount", precision: 12, scale: 2, default: "0.0", null: false
-    t.integer "installment"
-    t.string "transaction_id"
-    t.string "charge_id"
-    t.string "recipient_id"
-    t.string "payment_method"
-    t.date "payment_date"
-    t.date "original_payment_date"
-    t.datetime "accrual_date"
-    t.datetime "date_created"
-    t.jsonb "raw_payload", default: {}, null: false
+    t.bigint "channel_id", null: false
+    t.date "date", null: false
+    t.integer "order_count", default: 0, null: false
+    t.decimal "freight_charged", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "freight_cost", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "margin_value", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "margin_percent", precision: 8, scale: 2
+    t.integer "free_shipping_count"
+    t.datetime "synced_at"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
-    t.index ["charge_id"], name: "index_financial_receivables_on_charge_id"
-    t.index ["financial_settlement_item_id"], name: "index_financial_receivables_on_financial_settlement_item_id"
-    t.index ["financial_source_id", "payment_date"], name: "idx_financial_receivables_on_source_payment_date"
-    t.index ["financial_source_id"], name: "index_financial_receivables_on_financial_source_id"
-    t.index ["order_id"], name: "index_financial_receivables_on_order_id"
-    t.index ["payment_method"], name: "index_financial_receivables_on_payment_method"
-    t.index ["tenant_id", "financial_source_id", "payable_id"], name: "idx_financial_receivables_on_source_payable", unique: true
-    t.index ["tenant_id", "payment_date", "status"], name: "idx_financial_receivables_on_tenant_payment_status"
-    t.index ["tenant_id"], name: "index_financial_receivables_on_tenant_id"
-    t.index ["transaction_id"], name: "index_financial_receivables_on_transaction_id"
+    t.index ["channel_id"], name: "index_freight_margin_dailies_on_channel_id"
+    t.index ["tenant_id", "channel_id", "date"], name: "idx_on_tenant_id_channel_id_date_905468f3a5", unique: true
+    t.index ["tenant_id", "date"], name: "index_freight_margin_dailies_on_tenant_id_and_date"
+    t.index ["tenant_id"], name: "index_freight_margin_dailies_on_tenant_id"
+  end
+
+  create_table "freight_quotes", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "channel_id", null: false
+    t.string "external_id", null: false
+    t.string "cart_external_id"
+    t.string "origin_cep"
+    t.string "destination_cep"
+    t.string "destination_state"
+    t.integer "total_weight_grams"
+    t.datetime "quoted_at"
+    t.jsonb "quotes", default: [], null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["channel_id"], name: "index_freight_quotes_on_channel_id"
+    t.index ["tenant_id", "cart_external_id"], name: "index_freight_quotes_on_tenant_id_and_cart_external_id"
+    t.index ["tenant_id", "external_id"], name: "index_freight_quotes_on_tenant_id_and_external_id", unique: true
+    t.index ["tenant_id", "quoted_at"], name: "index_freight_quotes_on_tenant_id_and_quoted_at"
+    t.index ["tenant_id"], name: "index_freight_quotes_on_tenant_id"
   end
 
   create_table "imports", force: :cascade do |t|
@@ -382,12 +452,14 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_16_000700) do
     t.datetime "synced_at"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.index ["channel_id"], name: "index_lucrofrete_order_reports_on_channel_id"
     t.index ["order_id"], name: "index_lucrofrete_order_reports_on_order_id"
     t.index ["quote_log_id"], name: "index_lucrofrete_order_reports_on_quote_log_id"
     t.index ["tenant_id", "channel_id", "order_number"], name: "idx_lucrofrete_reports_tenant_channel_order"
     t.index ["tenant_id", "lucrofrete_order_id"], name: "idx_lucrofrete_reports_tenant_lf_id", unique: true
     t.index ["tenant_id", "match_status"], name: "idx_lucrofrete_reports_tenant_match_status"
     t.index ["tenant_id", "order_created_at"], name: "idx_lucrofrete_reports_tenant_created_at"
+    t.index ["tenant_id"], name: "index_lucrofrete_order_reports_on_tenant_id"
   end
 
   create_table "order_items", force: :cascade do |t|
@@ -461,7 +533,14 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_16_000700) do
     t.decimal "tax_amount", precision: 10, scale: 2
     t.string "coupon_code"
     t.decimal "coupon_discount", precision: 10, scale: 2, default: "0.0", null: false
+    t.string "cart_token"
+    t.string "shipping_service"
+    t.decimal "original_shipping_fee", precision: 10, scale: 2
+    t.decimal "shipping_fee_platform_discount", precision: 10, scale: 2
+    t.decimal "shipping_fee_seller_discount", precision: 10, scale: 2
+    t.index "tenant_id, lower((status)::text)", name: "index_orders_on_tenant_id_and_lower_status"
     t.index ["channel_id"], name: "index_orders_on_channel_id"
+    t.index ["tenant_id", "cart_token"], name: "index_orders_on_tenant_id_and_cart_token"
     t.index ["tenant_id", "coupon_code"], name: "index_orders_on_tenant_id_and_coupon_code"
     t.index ["tenant_id", "external_id"], name: "index_orders_on_tenant_id_and_external_id"
     t.index ["tenant_id", "order_type"], name: "index_orders_on_tenant_id_and_order_type"
@@ -527,6 +606,9 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_16_000700) do
   add_foreign_key "audit_conflicts", "products"
   add_foreign_key "audit_conflicts", "tenants"
   add_foreign_key "audit_conflicts", "users", column: "resolved_by_id"
+  add_foreign_key "carts", "channels"
+  add_foreign_key "carts", "orders", column: "converted_order_id"
+  add_foreign_key "carts", "tenants"
   add_foreign_key "channel_credentials", "channel_credentials", column: "stock_source_channel_id"
   add_foreign_key "channel_credentials", "tenants"
   add_foreign_key "channel_operational_costs", "channels"
@@ -535,13 +617,13 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_16_000700) do
   add_foreign_key "channel_product_listings", "tenants"
   add_foreign_key "channels", "tenants"
   add_foreign_key "data_source_configs", "tenants"
-  add_foreign_key "financial_settlement_items", "financial_settlements"
-  add_foreign_key "financial_settlement_items", "orders"
-  add_foreign_key "financial_settlement_items", "tenants"
   add_foreign_key "financial_receivables", "financial_settlement_items"
   add_foreign_key "financial_receivables", "financial_sources"
   add_foreign_key "financial_receivables", "orders"
   add_foreign_key "financial_receivables", "tenants"
+  add_foreign_key "financial_settlement_items", "financial_settlements"
+  add_foreign_key "financial_settlement_items", "orders"
+  add_foreign_key "financial_settlement_items", "tenants"
   add_foreign_key "financial_settlements", "channels"
   add_foreign_key "financial_settlements", "financial_sources"
   add_foreign_key "financial_settlements", "integrations"
@@ -549,6 +631,10 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_16_000700) do
   add_foreign_key "financial_sources", "channels"
   add_foreign_key "financial_sources", "integrations"
   add_foreign_key "financial_sources", "tenants"
+  add_foreign_key "freight_margin_dailies", "channels"
+  add_foreign_key "freight_margin_dailies", "tenants"
+  add_foreign_key "freight_quotes", "channels"
+  add_foreign_key "freight_quotes", "tenants"
   add_foreign_key "imports", "channels"
   add_foreign_key "imports", "tenants"
   add_foreign_key "integration_events", "integrations"

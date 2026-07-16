@@ -74,6 +74,11 @@ module Integrations
         attrs[:coupon_discount] = @normalized[:coupon_discount].to_f if order_has_coupons?
         attrs[:cart_token] = @normalized[:cart_token].presence if order_has_cart_token?
         attrs[:shipping_service] = @normalized[:shipping_service].presence if order_has_shipping_service?
+        if order_has_shipping_fee_audit?
+          attrs[:original_shipping_fee]          = @normalized[:original_shipping_fee]
+          attrs[:shipping_fee_platform_discount] = @normalized[:shipping_fee_platform_discount]
+          attrs[:shipping_fee_seller_discount]   = @normalized[:shipping_fee_seller_discount]
+        end
 
         order.assign_attributes(attrs)
         order.save!
@@ -173,6 +178,10 @@ module Integrations
 
       def order_has_shipping_service?
         @order_has_shipping_service ||= Order.column_names.include?("shipping_service")
+      end
+
+      def order_has_shipping_fee_audit?
+        @order_has_shipping_fee_audit ||= Order.column_names.include?("original_shipping_fee")
       end
 
       def upsert_order_mapping(order)

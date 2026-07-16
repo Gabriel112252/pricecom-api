@@ -66,10 +66,12 @@ module Dashboard
       coupons        = build_coupons(orders_scope)
       regional_sales = build_regional_sales(orders_scope, current_totals)
 
+      exclusions = build_non_revenue_exclusions(orders_in_period(period))
+
       {
         period:                   { from: period[:from].iso8601, to: period[:to].iso8601 },
         granularity:              granularity,
-        kpis:                     build_kpis(current_totals, prev_totals, data_quality, coupons, regional_sales),
+        kpis:                     build_kpis(current_totals, prev_totals, data_quality, coupons, regional_sales).merge(exclusions),
         financial_composition:    build_financial_composition(current_totals, data_quality),
         revenue_timeline:         build_revenue_timeline(period_rows, granularity),
         sales_by_channel:         build_sales_by_channel(orders_scope, current_totals),
@@ -128,6 +130,24 @@ module Dashboard
       scope
         .where(order_type: %w[sale refund])
         .where.not("LOWER(COALESCE(status, '')) IN (?)", CANCELED_STATUS_ALIASES)
+        .revenue_countable
+    end
+
+    # Contrapartida de transparência do revenue_countable: os pedidos
+    # unpaid/status_unknown ficam FORA de receita/pedidos/ticket, e a UI
+    # mostra um selo "Exclui N pedidos não pagos/indeterminados (R$ X)" nos
+    # cards afetados. Mesmo escopo período+canal dos KPIs, invertendo só o
+    # filtro de status.
+    def build_non_revenue_exclusions(scope)
+      count, amount = scope
+        .where(order_type: %w[sale refund])
+        .where("LOWER(COALESCE(status, '')) IN (?)", Order::NON_REVENUE_STATUSES)
+        .pick(Arel.sql("COUNT(*)"), Arel.sql("COALESCE(SUM(gross_value), 0)"))
+
+      {
+        non_revenue_excluded_count: count.to_i,
+        non_revenue_excluded_amount: amount.to_f.round(2)
+      }
     end
 
     def format_bucket(bucket, granularity)
@@ -797,6 +817,7 @@ module Dashboard
     def build_top_products_by_margin(period)
       rows = OrderItem
         .joins(:order, :product)
+        .merge(Order.revenue_countable)
         .where(orders: { tenant_id: tenant.id, ordered_at: period_range(period) })
         .where(is_gift: false)
         .where("order_items.unit_cost IS NOT NULL AND order_items.unit_cost > 0")
@@ -825,6 +846,7 @@ module Dashboard
     def build_top_products_by_revenue(period)
       rows = OrderItem
         .joins(:order, :product)
+        .merge(Order.revenue_countable)
         .where(orders: { tenant_id: tenant.id, ordered_at: period_range(period) })
         .where(is_gift: false)
         .group("products.id", "products.sku", "products.name")
@@ -845,6 +867,7 @@ module Dashboard
     def build_product_turnover_summary(period, limit: 15)
       items = OrderItem
         .joins(:order, :product)
+        .merge(Order.revenue_countable)
         .where(orders: { tenant_id: tenant.id, ordered_at: period_range(period) })
         .where(is_gift: false)
 
@@ -877,10 +900,14 @@ module Dashboard
       period[:from].beginning_of_day..period[:to].end_of_day
     end
 
-    # Abandoned-cart panel (Yampi-only for now — carts are only ingested by
-    # the Yampi polling/webhook pipeline). Scoped by abandoned_at, honoring
-    # the same channel filter as the rest of the summary. Guarded so the
-    # summary keeps working before the carts migration has run.
+    # Abandoned-cart panel. Yampi feeds it real checkout carts (polling +
+    # webhook); TikTok Shop has no pre-checkout cart API, so its proxy is
+    # UNPAID orders materialized as Cart rows by
+    # Integrations::Tiktok::UnpaidOrdersSyncService — same Cart#status
+    # abandoned/converted semantics, so conversion ("recovered") means the
+    # same thing on both channels. Scoped by abandoned_at, honoring the same
+    # channel filter as the rest of the summary. Guarded so the summary
+    # keeps working before the carts migration has run.
     def build_cart_abandonment(period)
       return empty_cart_abandonment unless carts_available?
 
@@ -907,6 +934,7 @@ module Dashboard
 
       {
         available: true,
+        mode: cart_abandonment_mode,
         total_count: total_count,
         recovered: {
           count: converted_count,
@@ -957,8 +985,10 @@ module Dashboard
       counts = {}
 
       scope.abandoned.select(:id, :raw_payload).find_each do |cart|
-        items = cart.raw_payload.is_a?(Hash) ? cart.raw_payload.dig("items", "data") : nil
-        items = cart.raw_payload["items"] if !items.is_a?(Array) && cart.raw_payload.is_a?(Hash)
+        raw_items = cart.raw_payload.is_a?(Hash) ? cart.raw_payload["items"] : nil
+        # Yampi listing: { "items" => { "data" => [...] } }; webhook e o
+        # proxy TikTok (UnpaidOrdersSyncService): { "items" => [...] }.
+        items = raw_items.is_a?(Hash) ? raw_items["data"] : raw_items
         next unless items.is_a?(Array)
 
         seen_in_cart = Set.new
@@ -1063,9 +1093,20 @@ module Dashboard
       @carts_available = false
     end
 
+    # Drives the gadget's per-channel subtitle/labels: "tiktok_unpaid" only
+    # when the channel filter is TikTok-only; any other selection (empty =
+    # all channels, Yampi, mixed) keeps the current Yampi checkout framing.
+    def cart_abandonment_mode
+      return "yampi_checkout" if channel_ids.blank?
+
+      platforms = tenant.channels.where(id: channel_ids).distinct.pluck(:platform)
+      platforms.present? && platforms.all?("tiktok") ? "tiktok_unpaid" : "yampi_checkout"
+    end
+
     def empty_cart_abandonment
       {
         available: false,
+        mode: cart_abandonment_mode,
         total_count: 0,
         recovered: { count: 0, value: 0.0 },
         still_abandoned: { count: 0, value: 0.0 },

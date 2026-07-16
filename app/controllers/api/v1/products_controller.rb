@@ -42,6 +42,7 @@ module Api
 
         items_in_period = OrderItem
           .joins(:order)
+          .merge(Order.revenue_countable)
           .where(orders: { tenant_id: current_tenant.id, ordered_at: period[:from].beginning_of_day..period[:to].end_of_day })
 
         direct_sales_qty = items_in_period.where(product_id: product.id).sum(:quantity)

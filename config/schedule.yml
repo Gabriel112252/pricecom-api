@@ -24,6 +24,21 @@ tiktok_order_polling_dispatch:
   class: "Integrations::Tiktok::OrdersPollingSchedulerJob"
   queue: integrations
 
+# Proxy de carrinho abandonado do TikTok Shop (não existe carrinho
+# pré-checkout na API): varre pedidos UNPAID e materializa em orders
+# (status unpaid, fora do faturamento) + carts (mesmo gadget do Yampi).
+tiktok_unpaid_orders_sync_dispatch:
+  cron: "*/20 * * * *"
+  class: "Integrations::Tiktok::UnpaidOrdersSyncSchedulerJob"
+  queue: integrations
+
+# Desfecho dos pedidos unpaid: converteu (PAID+), cancelou ou, após 5 dias
+# sem resposta determinável, status_unknown (para de reconsultar).
+tiktok_unpaid_reconciliation_dispatch:
+  cron: "*/30 * * * *"
+  class: "Integrations::Tiktok::UnpaidReconciliationSchedulerJob"
+  queue: integrations
+
 # idworks (ERP) has no webhooks — polling is the only option (see
 # Integrations::Idworks::OrderSyncService/ProductCostSyncService class
 # comments). Product cost changes infrequently, so a 6h full sync is

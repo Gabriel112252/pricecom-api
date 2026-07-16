@@ -22,11 +22,14 @@ module Integrations
     PRODUCT_SEARCH_PATH = "/product/202309/products/search".freeze
     INVENTORY_SEARCH_PATH = "/product/202309/inventory/search".freeze
     ORDER_SEARCH_PATH = "/order/202309/orders/search".freeze
+    ORDER_DETAIL_PATH = "/order/202309/orders".freeze
     SHOP_SCOPED_PATHS = [
       PRODUCT_SEARCH_PATH,
       INVENTORY_SEARCH_PATH,
-      ORDER_SEARCH_PATH
+      ORDER_SEARCH_PATH,
+      ORDER_DETAIL_PATH
     ].freeze
+    ORDER_DETAIL_MAX_IDS = 50
     PAGE_SIZE = 100
     ORDERS_PAGE_SIZE = 50
 
@@ -108,6 +111,22 @@ module Integrations
       body["data"] || {}
     end
 
+    # Get Order Detail 202309
+    # (partner.tiktokshop.com/docv2/page/get-order-detail-202309): GET with
+    # the order ids as a comma-separated `ids` query param, up to 50 per
+    # call. Returns the "orders" array (same order shape as Get Order List,
+    # plus detail-only fields).
+    def fetch_order_details(order_ids)
+      ids = Array(order_ids).map(&:to_s).reject(&:blank?)
+      return [] if ids.empty?
+      if ids.size > ORDER_DETAIL_MAX_IDS
+        raise ArgumentError, "TiktokAdapter#fetch_order_details aceita no máximo #{ORDER_DETAIL_MAX_IDS} ids por chamada"
+      end
+
+      body = get(ORDER_DETAIL_PATH, query_params: { ids: ids.join(",") })
+      body.dig("data", "orders") || []
+    end
+
     private
 
     def post(path, body, query_params: {})
@@ -124,6 +143,26 @@ module Integrations
         req.headers["x-tts-access-token"] = credentials[:access_token]
         req.headers["Content-Type"] = "application/json"
         req.body = encoded_body
+      end
+
+      parsed = handle_response(response)
+      raise_on_body_error(parsed, path)
+      parsed
+    end
+
+    # Same signing scheme as #post, but with no JSON body appended to the
+    # signable string (GET endpoints sign only path + query params).
+    def get(path, query_params: {})
+      params = {
+        app_key: credentials[:app_key],
+        timestamp: Time.now.to_i
+      }.merge(query_params.compact).merge(shop_scoped_query_params(path))
+      params[:sign] = sign(path, params)
+
+      response = connection(BASE_URL).get(path) do |req|
+        req.params = params
+        req.headers["x-tts-access-token"] = credentials[:access_token]
+        req.headers["Content-Type"] = "application/json"
       end
 
       parsed = handle_response(response)

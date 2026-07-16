@@ -7,6 +7,13 @@ module Integrations
     # internally, including match_status. It is now the authoritative source
     # for LucroFrete real freight cost. Raw /api/logs quote polling remains
     # available for quote analysis, but must not write real_freight_cost.
+    #
+    # Channel-aware: local orders are matched by order_number in the Yampi
+    # channel first (historical behavior), then tenant-wide — so TikTok Shop
+    # (and future channels) shipments dispatched through the same carrier
+    # account also get real_freight_cost and their own per-channel
+    # freight_margin_dailies rows, which is what makes the dashboard's
+    # "Margem de frete" gadget respond to the TikTok channel filter.
     class OrdersSyncService
       MODES = %w[backfill incremental].freeze
       DEFAULT_PER_PAGE = 50
@@ -243,9 +250,9 @@ module Integrations
         end
 
         @matched_count += 1
-        aggregate_freight_margin(raw)
-
         order = find_local_order(order_number)
+        aggregate_freight_margin(raw, order)
+
         unless order
           @not_found_count += 1
           record_not_found_example(raw, order_number)
@@ -277,10 +284,18 @@ module Integrations
         value.to_s.casecmp?("matched")
       end
 
+      # Yampi primeiro (comportamento histórico), com fallback tenant-wide
+      # para os demais canais (ex: pedidos TikTok Shop despachados pela
+      # mesma conta LucroFrete/transportadora). O fallback só aceita match
+      # inequívoco — order_number repetido entre canais fica de fora.
       def find_local_order(order_number)
         return nil if order_number.blank?
 
-        tenant.orders.find_by(channel: channel, order_number: order_number)
+        order = tenant.orders.find_by(channel: channel, order_number: order_number)
+        return order if order
+
+        candidates = tenant.orders.where(order_number: order_number).limit(2).to_a
+        candidates.size == 1 ? candidates.first : nil
       end
 
       def parse_money(value)
@@ -349,21 +364,35 @@ module Integrations
         @order_reports_available = false
       end
 
-      def aggregate_freight_margin(raw)
+      # A agregação diária é por canal do pedido local casado. Pedidos do
+      # canal padrão (yampi) — e os não encontrados localmente, como sempre
+      # foi — usam os valores do próprio LucroFrete. Pedidos de outros
+      # canais (ex: TikTok Shop) usam como "cobrado" o frete que o canal
+      # cobrou do cliente (orders.freight ← payment.shipping_fee) e como
+      # custo o valor real da transportadora vindo do LucroFrete; a margem
+      # é recalculada dessa dupla.
+      def aggregate_freight_margin(raw, order = nil)
         return unless freight_margin_available?
 
+        bucket_channel = order && order.channel_id != channel.id ? order.channel : channel
         date = parse_report_order_date(raw["order_created_at"])
-        charged = parse_money(raw["freight_charged"])
         cost = parse_money(raw["freight_cost"])
-        margin = parse_money(raw["margin_value"])
-        margin ||= charged - cost if charged && cost
+
+        if bucket_channel == channel
+          charged = parse_money(raw["freight_charged"])
+          margin = parse_money(raw["margin_value"])
+          margin ||= charged - cost if charged && cost
+        else
+          charged = parse_money(order.freight)
+          margin = charged - cost if charged && cost
+        end
 
         unless date && charged && cost && margin
           record_freight_margin_skip(raw, "invalid_daily_margin_fields")
           return
         end
 
-        totals = daily_margin_totals_for(date)
+        totals = daily_margin_totals_for(bucket_channel, date)
         totals[:order_count] += 1
         totals[:freight_charged] += charged
         totals[:freight_cost] += cost
@@ -393,8 +422,8 @@ module Integrations
         nil
       end
 
-      def daily_margin_totals_for(date)
-        @daily_margin_totals[date] ||= {
+      def daily_margin_totals_for(bucket_channel, date)
+        @daily_margin_totals[[ bucket_channel, date ]] ||= {
           order_count: 0,
           freight_charged: BigDecimal("0"),
           freight_cost: BigDecimal("0"),
@@ -403,17 +432,26 @@ module Integrations
         }
       end
 
+      # O canal padrão (yampi) mantém a semântica histórica: toda data da
+      # janela é reescrita, zerando dias que sumiram do report. Os demais
+      # canais só reescrevem datas agregadas NESTA execução — a presença
+      # deles no bucket depende do pedido local já ter sido ingerido pelo
+      # polling do canal, então zerar a janela inteira apagaria dias válidos
+      # num run em que o polling estivesse atrasado.
       def upsert_freight_margin_days
         return unless freight_margin_available?
 
-        existing_by_date = tenant.freight_margin_dailies
+        existing_default_by_date = tenant.freight_margin_dailies
           .where(channel: channel, date: window_from..window_to)
           .index_by(&:date)
-        dates = (@daily_margin_totals.keys + existing_by_date.keys).uniq.sort
+        default_dates = (@daily_margin_totals.keys.select { |ch, _| ch == channel }.map(&:last) +
+          existing_default_by_date.keys).uniq
+        keys = (@daily_margin_totals.keys + default_dates.map { |date| [ channel, date ] }).uniq.sort_by { |ch, date| [ ch.id, date ] }
 
-        dates.each do |date|
-          totals = @daily_margin_totals[date] || daily_margin_totals_for(date)
-          row = existing_by_date[date] || tenant.freight_margin_dailies.find_or_initialize_by(channel: channel, date: date)
+        keys.each do |bucket_channel, date|
+          totals = @daily_margin_totals[[ bucket_channel, date ]] || daily_margin_totals_for(bucket_channel, date)
+          row = (bucket_channel == channel && existing_default_by_date[date]) ||
+            tenant.freight_margin_dailies.find_or_initialize_by(channel: bucket_channel, date: date)
           charged = totals[:freight_charged]
           margin = totals[:margin_value]
 
@@ -534,7 +572,7 @@ module Integrations
             trigger: trigger,
             mode: mode,
             channel: "lucrofrete",
-            local_order_channel: "yampi",
+            local_order_channel: "yampi (fallback tenant-wide para outros canais)",
             channel_credential_id: channel_credential.id,
             source_endpoint: "reports/orders",
             window_from: window_from.iso8601,

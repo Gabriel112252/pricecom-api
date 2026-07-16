@@ -13,11 +13,19 @@ class Order < ApplicationRecord
 
   ORDER_TYPES = %w[sale refund cancellation exchange].freeze
 
+  # Statuses que nunca contam como venda: 'unpaid' (pedido TikTok criado sem
+  # pagamento — o proxy de carrinho abandonado do canal) e 'status_unknown'
+  # (unpaid cujo desfecho não pôde ser determinado pela reconciliação).
+  # Toda query de faturamento/volume/ticket deve passar por
+  # `revenue_countable` para não ser contaminada por eles.
+  NON_REVENUE_STATUSES = %w[unpaid status_unknown].freeze
+
   validates :order_type, inclusion: { in: ORDER_TYPES }
 
   before_save :calculate_margin
 
   scope :active,       -> { where.not(status: "Cancelado") }
+  scope :revenue_countable, -> { where.not("LOWER(COALESCE(orders.status, '')) IN (?)", NON_REVENUE_STATUSES) }
   scope :sales,        -> { where(order_type: "sale") }
   scope :cancellations, -> { where(order_type: "cancellation") }
   scope :refunds,      -> { where(order_type: "refund") }

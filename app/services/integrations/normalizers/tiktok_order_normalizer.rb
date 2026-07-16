@@ -54,6 +54,13 @@ module Integrations
           #   gross_value - discount == payment.total_amount - taxes
           gross_value:    extract_gross_value,
           freight:        extract_freight,
+          # Decomposição do frete do payment object (Get Order Detail),
+          # guardada para auditoria da margem de frete: original_shipping_fee
+          # é o frete cheio; os dois descontos explicam a diferença até o
+          # shipping_fee efetivamente cobrado do cliente (orders.freight).
+          original_shipping_fee:          payment_audit_value("original_shipping_fee"),
+          shipping_fee_platform_discount: payment_audit_value("shipping_fee_platform_discount"),
+          shipping_fee_seller_discount:   payment_audit_value("shipping_fee_seller_discount"),
           discount:       extract_discount,
           coupon_code:    extract_coupon_code,
           coupon_discount: extract_coupon_discount,
@@ -70,11 +77,15 @@ module Integrations
 
       # Doc enum: UNPAID / ON_HOLD / AWAITING_SHIPMENT / PARTIALLY_SHIPPING
       # / AWAITING_COLLECTION / IN_TRANSIT / DELIVERED / COMPLETED /
-      # CANCELLED — stored verbatim, like the other channels.
+      # CANCELLED — stored verbatim, like the other channels. Exception:
+      # UNPAID maps to the canonical Order::NON_REVENUE_STATUSES value
+      # 'unpaid', so the revenue_countable exclusion and the TikTok unpaid
+      # reconciliation see one single spelling.
       def extract_status
-        @p["status"] ||
+        raw = @p["status"] ||
           @p["order_status"] ||
           @p.dig("order", "status").to_s
+        raw.to_s.casecmp?("unpaid") ? "unpaid" : raw
       end
 
       def extract_order_type
@@ -185,6 +196,13 @@ module Integrations
 
       def payment_hash
         @p["payment"].is_a?(Hash) ? @p["payment"] : nil
+      end
+
+      # nil (não 0.0) quando o payload não traz o campo — a auditoria
+      # distingue "veio zero" de "não informado".
+      def payment_audit_value(key)
+        value = payment_hash&.dig(key)
+        value.present? ? to_f(value) : nil
       end
 
       def extract_coupon_code
