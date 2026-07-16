@@ -887,17 +887,19 @@ module Dashboard
       scope = scope.where(channel_id: channel_ids) if channel_ids.present?
 
       total_count, converted_count, abandoned_count, abandoned_value, converted_value,
-        promocode, progressive, combos, shipment_discount = scope.pick(
+        abandoned_avg_ticket, generic_discount, promocode, progressive, combos, shipment_discount = scope.pick(
           Arel.sql("COUNT(*)"),
           Arel.sql("COUNT(*) FILTER (WHERE status = 'converted')"),
           Arel.sql("COUNT(*) FILTER (WHERE status = 'abandoned')"),
           Arel.sql("COALESCE(SUM(total) FILTER (WHERE status = 'abandoned'), 0)"),
           Arel.sql("COALESCE(SUM(total) FILTER (WHERE status = 'converted'), 0)"),
+          Arel.sql("COALESCE(AVG(total) FILTER (WHERE status = 'abandoned'), 0)"),
+          Arel.sql("COALESCE(SUM(discount), 0)"),
           Arel.sql("COALESCE(SUM(promocode_discount), 0)"),
           Arel.sql("COALESCE(SUM(progressive_discount), 0)"),
           Arel.sql("COALESCE(SUM(combos_discount), 0)"),
           Arel.sql("COALESCE(SUM(shipment_discount), 0)")
-        ) || Array.new(9, 0)
+        ) || Array.new(11, 0)
 
       total_count = total_count.to_i
       converted_count = converted_count.to_i
@@ -914,13 +916,69 @@ module Dashboard
           value: abandoned_value.to_f.round(2)
         },
         conversion_rate_pct: total_count.positive? ? (converted_count.to_f / total_count * 100).round(2) : 0.0,
+        abandoned_avg_ticket: abandoned_avg_ticket.to_f.round(2),
+        # Confirmed against real production payloads (2026-07-16):
+        # totalizers.promocode_discount_value never shows up in practice —
+        # the observed discount lives in the generic totalizers.discount
+        # (e.g. Pix/payment-method discount via metadata.discount_highlight,
+        # coupon, etc). "other" is the real-world bucket; "coupon"
+        # (promocode_discount) is kept as a legacy line, almost always zero.
         discount_composition: [
-          { key: "coupon", label: "Cupom", amount: promocode.to_f.round(2) },
+          { key: "other", label: "Outros descontos (pagamento/cupom)", amount: generic_discount.to_f.round(2) },
           { key: "progressive", label: "Desconto progressivo", amount: progressive.to_f.round(2) },
           { key: "combo", label: "Combos", amount: combos.to_f.round(2) },
-          { key: "shipping", label: "Desconto de frete", amount: shipment_discount.to_f.round(2) }
-        ]
+          { key: "shipping", label: "Desconto de frete", amount: shipment_discount.to_f.round(2) },
+          { key: "coupon", label: "Cupom (legado)", amount: promocode.to_f.round(2) }
+        ],
+        daily_series: build_cart_daily_series(scope, period),
+        top_abandoned_products: build_top_abandoned_products(scope)
       }
+    end
+
+    def build_cart_daily_series(scope, period)
+      grouped = scope.group(Arel.sql("DATE(abandoned_at)"), :status).count
+
+      (period[:from]..period[:to]).map do |date|
+        {
+          date: date.iso8601,
+          abandoned_count: grouped[[ date, "abandoned" ]].to_i,
+          recovered_count: grouped[[ date, "converted" ]].to_i
+        }
+      end
+    end
+
+    # Frequency of products inside still-abandoned carts, read from the
+    # cart's stored raw_payload (items.data, the shape the listing include
+    # returns). Ruby-side extraction on purpose: item shape isn't uniform
+    # across listing vs webhook payloads, so defensive digging beats a
+    # rigid jsonb SQL path.
+    def build_top_abandoned_products(scope, limit: 10)
+      counts = {}
+
+      scope.abandoned.select(:id, :raw_payload).find_each do |cart|
+        items = cart.raw_payload.is_a?(Hash) ? cart.raw_payload.dig("items", "data") : nil
+        items = cart.raw_payload["items"] if !items.is_a?(Array) && cart.raw_payload.is_a?(Hash)
+        next unless items.is_a?(Array)
+
+        seen_in_cart = Set.new
+        items.each do |item|
+          next unless item.is_a?(Hash)
+
+          sku = (item["item_sku"] ||
+            (item["sku"].is_a?(String) ? item["sku"] : nil) ||
+            item.dig("sku", "data", "sku")).to_s
+          name = (item["name"].presence || item.dig("sku", "data", "title").presence || sku).to_s
+          next if sku.blank? && name.blank?
+
+          key = sku.presence || name
+          entry = counts[key] ||= { sku: sku.presence, name: name, carts_count: 0, total_qty: 0 }
+          entry[:total_qty] += (item["quantity"] || item["qty"] || 1).to_i
+          entry[:carts_count] += 1 unless seen_in_cart.include?(key)
+          seen_in_cart << key
+        end
+      end
+
+      counts.values.sort_by { |e| [ -e[:carts_count], -e[:total_qty] ] }.first(limit)
     end
 
     def carts_available?
@@ -938,7 +996,10 @@ module Dashboard
         recovered: { count: 0, value: 0.0 },
         still_abandoned: { count: 0, value: 0.0 },
         conversion_rate_pct: 0.0,
-        discount_composition: []
+        abandoned_avg_ticket: 0.0,
+        discount_composition: [],
+        daily_series: [],
+        top_abandoned_products: []
       }
     end
 
