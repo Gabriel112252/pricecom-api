@@ -25,6 +25,7 @@ module Integrations
           upsert_items(order)
           recalculate_costs(order, channel)
           upsert_order_mapping(order)
+          mark_cart_converted(order)
           run_conflict_detection(order)
           run_stock_deduction(order)
           Result.new(ok: true, order: order, error_message: nil)
@@ -184,6 +185,23 @@ module Integrations
           )
         )
         mapping.save!
+      end
+
+      # Cart → order conversion: the normalizer surfaces the originating
+      # checkout cart id (Yampi's Cart_ID) as :cart_external_id when it can
+      # find one. Best-effort by design — a missing cart (not yet polled,
+      # other channel, wrong id shape) must never fail order ingestion.
+      def mark_cart_converted(order)
+        cart_external_id = @normalized[:cart_external_id].to_s
+        return if cart_external_id.blank?
+
+        cart = @tenant.carts.find_by(channel: order.channel, external_id: cart_external_id)
+        return unless cart
+        return if cart.status == "converted" && cart.converted_order_id == order.id
+
+        cart.mark_converted!(order)
+      rescue => e
+        Rails.logger.error("[Integrations::Orders::UpsertOrder] mark_cart_converted failed for order_id=#{order.id} cart_external_id=#{cart_external_id}: #{e.message}")
       end
 
       def run_conflict_detection(order)

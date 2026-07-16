@@ -22,6 +22,8 @@ module Integrations
       when "yampi"
         if event_type.include?("order")
           Processors::YampiOrderProcessor.call(@event)
+        elsif event_type.include?("cart")
+          Processors::YampiCartProcessor.call(@event)
         else
           skipped("No processor configured for yampi/#{event_type}")
         end

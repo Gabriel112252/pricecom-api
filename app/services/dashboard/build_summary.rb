@@ -83,6 +83,7 @@ module Dashboard
         data_quality:             data_quality,
         conflicts:                build_conflicts,
         reconciliation:           build_reconciliation(period),
+        cart_abandonment:         build_cart_abandonment(period),
         top_products_by_margin:   build_top_products_by_margin(period),
         top_products_by_revenue:  build_top_products_by_revenue(period),
         product_turnover_summary: build_product_turnover_summary(period)
@@ -495,8 +496,38 @@ module Dashboard
         shipping_subsidy_orders_count: shipping_subsidy_orders_count,
         usage_percentage: total_orders.positive? ? (display_orders_count.to_f / total_orders * 100).round(2) : 0,
         breakdown: breakdown,
-        top_coupons: top_coupons
+        top_coupons: top_coupons,
+        by_product: build_discount_by_product(scope)
       }
+    end
+
+    # Item-level discount composition — which products concentrate the
+    # discounts given in the period. Uses order_items.discount (populated by
+    # the channel normalizers), so it only sees discounts the channel
+    # attributes to a specific item; order-level discounts with no item
+    # split stay out of this cut (they're covered by the type breakdown).
+    def build_discount_by_product(scope)
+      rows = OrderItem
+        .where(order_id: scope.select(:id), is_gift: false)
+        .where("COALESCE(order_items.discount, 0) > 0")
+        .group(:sku, :name)
+        .order(Arel.sql("COALESCE(SUM(order_items.discount), 0) DESC"))
+        .limit(10)
+        .pluck(
+          :sku,
+          :name,
+          Arel.sql("COALESCE(SUM(order_items.discount), 0)"),
+          Arel.sql("COUNT(DISTINCT order_items.order_id)")
+        )
+
+      rows.map do |sku, name, discount_total, orders_count|
+        {
+          sku: sku,
+          name: name.presence || sku,
+          discount_total: discount_total.to_f.round(2),
+          orders_count: orders_count.to_i
+        }
+      end
     end
 
     def discount_breakdown(coupon_discount_total:, coupon_orders_count:, commercial_discount_total:, commercial_discount_orders_count:, shipping_subsidy_total:, shipping_subsidy_orders_count:)
@@ -845,6 +876,67 @@ module Dashboard
       period[:from].beginning_of_day..period[:to].end_of_day
     end
 
+    # Abandoned-cart panel (Yampi-only for now — carts are only ingested by
+    # the Yampi polling/webhook pipeline). Scoped by abandoned_at, honoring
+    # the same channel filter as the rest of the summary. Guarded so the
+    # summary keeps working before the carts migration has run.
+    def build_cart_abandonment(period)
+      return empty_cart_abandonment unless carts_available?
+
+      scope = tenant.carts.where(abandoned_at: period_range(period))
+      scope = scope.where(channel_id: channel_ids) if channel_ids.present?
+
+      total_count, converted_count, abandoned_count, abandoned_value,
+        promocode, progressive, combos, shipment_discount = scope.pick(
+          Arel.sql("COUNT(*)"),
+          Arel.sql("COUNT(*) FILTER (WHERE status = 'converted')"),
+          Arel.sql("COUNT(*) FILTER (WHERE status = 'abandoned')"),
+          Arel.sql("COALESCE(SUM(total) FILTER (WHERE status = 'abandoned'), 0)"),
+          Arel.sql("COALESCE(SUM(promocode_discount), 0)"),
+          Arel.sql("COALESCE(SUM(progressive_discount), 0)"),
+          Arel.sql("COALESCE(SUM(combos_discount), 0)"),
+          Arel.sql("COALESCE(SUM(shipment_discount), 0)")
+        ) || Array.new(8, 0)
+
+      total_count = total_count.to_i
+      converted_count = converted_count.to_i
+
+      {
+        available: true,
+        total_count: total_count,
+        abandoned_count: abandoned_count.to_i,
+        converted_count: converted_count,
+        abandoned_value: abandoned_value.to_f.round(2),
+        conversion_rate_pct: total_count.positive? ? (converted_count.to_f / total_count * 100).round(2) : 0.0,
+        discount_composition: [
+          { key: "coupon", label: "Cupom", amount: promocode.to_f.round(2) },
+          { key: "progressive", label: "Desconto progressivo", amount: progressive.to_f.round(2) },
+          { key: "combo", label: "Combos", amount: combos.to_f.round(2) },
+          { key: "shipping", label: "Desconto de frete", amount: shipment_discount.to_f.round(2) }
+        ]
+      }
+    end
+
+    def carts_available?
+      return @carts_available if defined?(@carts_available)
+
+      @carts_available = Cart.table_exists?
+    rescue StandardError
+      @carts_available = false
+    end
+
+    def empty_cart_abandonment
+      {
+        available: false,
+        total_count: 0,
+        abandoned_count: 0,
+        converted_count: 0,
+        abandoned_value: 0.0,
+        conversion_rate_pct: 0.0,
+        discount_composition: []
+      }
+    end
+
     def data_source_for(data_type)
       @data_sources ||= tenant.data_source_configs.enabled.pluck(:data_type, :source).to_h
       @data_sources[data_type]
@@ -877,7 +969,8 @@ module Dashboard
         shipping_subsidy_orders_count: 0,
         usage_percentage: 0.0,
         breakdown: [],
-        top_coupons: []
+        top_coupons: [],
+        by_product: []
       }
     end
 

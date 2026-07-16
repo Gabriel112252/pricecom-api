@@ -136,6 +136,7 @@ module Api
       def infer_type_from_event(event_type)
         et = event_type.to_s.downcase
         return "order"   if et.include?("order")
+        return "cart"    if et.include?("cart")
         return "product" if et.include?("product")
         "unknown"
       end

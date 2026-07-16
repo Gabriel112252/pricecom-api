@@ -17,6 +17,7 @@ module Integrations
     BASE_URL = "https://api.dooki.com.br/v2/".freeze
     PER_PAGE = 50
     ORDERS_LIMIT = 100
+    CARTS_LIMIT = 100
 
     OrderPage = Struct.new(:status, :body, :headers, :duration_ms, :params, keyword_init: true) do
       def data
@@ -112,6 +113,60 @@ module Integrations
 
       started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       response = connection(BASE_URL).get(alias_path("/orders"), params) do |req|
+        req.headers["User-Token"]      = credentials[:token]
+        req.headers["User-Secret-Key"] = credentials[:secret_key]
+      end
+
+      OrderPage.new(
+        status: response.status,
+        body: parse_response_body(response.body),
+        headers: response.headers.transform_keys { |key| key.to_s.downcase },
+        duration_ms: ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1000).round,
+        params: params
+      )
+    end
+
+    # Abandoned carts (GET /checkout/carts). Same page/limit/date-filter
+    # shape as /orders, per docs.yampi.com.br/api-reference/checkout/
+    # carrinhos-abandonados/listar-carrinhos-abandonados (verified
+    # 2026-07-16). The include list uses the doc's real relation names —
+    # "promocode", not "promotions" (the latter doesn't exist on this
+    # endpoint). "payment" is available but unused by the normalizer, so
+    # it's not requested.
+    def fetch_carts(since:, until_date: Time.current)
+      date_filter = "created_at:#{since.to_date.iso8601}|#{until_date.to_date.iso8601}"
+      carts = []
+      page = 1
+
+      loop do
+        body = with_rate_limit_retry do
+          response = fetch_carts_page(page: page, date_filter: date_filter)
+          handle_order_page_response(response)
+        end
+        page_carts = body["data"] || []
+        carts.concat(page_carts)
+
+        pagination = body.dig("meta", "pagination") || {}
+        total_pages = pagination["total_pages"].to_i
+        break if total_pages <= page || page_carts.empty?
+
+        page += 1
+      end
+
+      carts
+    end
+
+    def fetch_carts_page(page:, date_filter:, limit: CARTS_LIMIT, skip_cache: true)
+      params = {
+        page: page,
+        limit: limit,
+        include: "customer,items,promocode",
+        date: date_filter,
+        skipCache: skip_cache
+      }
+
+      started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      response = connection(BASE_URL).get(alias_path("/checkout/carts"), params) do |req|
         req.headers["User-Token"]      = credentials[:token]
         req.headers["User-Secret-Key"] = credentials[:secret_key]
       end

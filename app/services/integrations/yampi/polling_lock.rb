@@ -17,11 +17,13 @@ module Integrations
 
       attr_reader :key, :token
 
-      def initialize(channel_credential, ttl_seconds: DEFAULT_TTL_SECONDS)
+      # `scope` keeps orders and carts polling on independent locks — the
+      # two syncs may legitimately run at the same time for one credential.
+      def initialize(channel_credential, ttl_seconds: DEFAULT_TTL_SECONDS, scope: "orders_polling")
         @channel_credential = channel_credential
         @ttl_seconds = ttl_seconds.to_i.positive? ? ttl_seconds.to_i : DEFAULT_TTL_SECONDS
         @token = SecureRandom.uuid
-        @key = "pricecom:yampi:orders_polling:#{channel_credential.tenant_id}:#{channel_credential.id}"
+        @key = "pricecom:yampi:#{scope}:#{channel_credential.tenant_id}:#{channel_credential.id}"
       end
 
       def acquire

@@ -7,6 +7,8 @@ class Order < ApplicationRecord
   has_many :financial_settlement_items, dependent: :nullify
   has_many :financial_receivables, dependent: :nullify
   has_many :integration_mappings, as: :mappable, dependent: :nullify
+  has_many :converted_carts, class_name: "Cart", foreign_key: :converted_order_id,
+    dependent: :nullify, inverse_of: :converted_order
 
   ORDER_TYPES = %w[sale refund cancellation exchange].freeze
 
@@ -19,9 +21,12 @@ class Order < ApplicationRecord
   scope :cancellations, -> { where(order_type: "cancellation") }
   scope :refunds,      -> { where(order_type: "refund") }
 
+  # margin_pct e a coluna decimal(5,2): valores fora de +-999.99 estouram o insert
+  MARGIN_PCT_RANGE = (-999.99..999.99)
+
   def calculate_margin
     self.margin = gross_value.to_f - cost_price.to_f - effective_freight_cost - discount.to_f - commission.to_f - operational_cost.to_f - effective_tax_amount
-    self.margin_pct = gross_value.to_f > 0 ? (margin / gross_value.to_f * 100).round(2) : 0
+    self.margin_pct = gross_value.to_f > 0 ? (margin / gross_value.to_f * 100).round(2).clamp(MARGIN_PCT_RANGE.min, MARGIN_PCT_RANGE.max) : 0
   end
 
   def net_gross_value
@@ -34,7 +39,7 @@ class Order < ApplicationRecord
 
   def net_margin_pct
     return 0.0 unless gross_value.to_f > 0
-    (net_margin / gross_value.to_f * 100).round(2)
+    (net_margin / gross_value.to_f * 100).round(2).clamp(MARGIN_PCT_RANGE.min, MARGIN_PCT_RANGE.max)
   end
 
   def effective_freight_cost

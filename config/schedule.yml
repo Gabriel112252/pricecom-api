@@ -11,6 +11,14 @@ yampi_order_polling_dispatch:
   class: "Integrations::Yampi::OrdersPollingSchedulerJob"
   queue: integrations
 
+# Abandoned carts move slower than orders (a cart only matters after the
+# customer walked away), so 15min is enough; the cart.reminder webhook
+# covers real-time capture between polls.
+yampi_cart_polling_dispatch:
+  cron: "*/15 * * * *"
+  class: "Integrations::Yampi::CartsPollingSchedulerJob"
+  queue: integrations
+
 tiktok_order_polling_dispatch:
   cron: "*/15 * * * *"
   class: "Integrations::Tiktok::OrdersPollingSchedulerJob"
