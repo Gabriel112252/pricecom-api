@@ -1146,7 +1146,7 @@ module Dashboard
     def freight_tooltip
       case data_source_for("freight")
       when "idworks" then "Soma de real_freight_cost importado do IDWorks."
-      when "lucrofrete" then "Soma de real_freight_cost cotado via LucroFrete."
+      when "lucrofrete" then "Soma de real_freight_cost dos pedidos casados via LucroFrete."
       else "Soma de freight dos pedidos."
       end
     end

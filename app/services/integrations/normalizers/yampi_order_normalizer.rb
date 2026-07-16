@@ -75,8 +75,9 @@ module Integrations
         @p["cart_token"].to_s.presence
       end
 
-      # Chosen freight service, used to match the LucroFrete quote option
-      # (see Integrations::Lucrofrete::ApplyRealFreightCost). CONFIRMED on
+      # Chosen freight service. Kept for local order context/analytics; no
+      # longer used to apply LucroFrete real_freight_cost, which now comes
+      # from /api/reports/orders already matched by LucroFrete. CONFIRMED on
       # a real CART payload as "shipping_service" (ex:
       # "ECONOMICO_-_LOGGI_EXPRESS"); NOT yet confirmed that the ORDER
       # payload uses the same key — "shipment_service" is kept as a

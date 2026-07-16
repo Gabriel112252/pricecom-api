@@ -43,8 +43,8 @@ class Order < ApplicationRecord
   end
 
   # Fontes cujo custo real de frete é persistido em real_freight_cost —
-  # idworks (sync do ERP) e lucrofrete (cotação real do checkout, ver
-  # Integrations::Lucrofrete::ApplyRealFreightCost).
+  # idworks (sync do ERP) e lucrofrete (pedidos casados pelo parceiro, ver
+  # Integrations::Lucrofrete::OrdersSyncService).
   REAL_FREIGHT_COST_SOURCES = %w[idworks lucrofrete].freeze
 
   def effective_freight_cost

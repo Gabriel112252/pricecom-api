@@ -2,6 +2,10 @@ module Integrations
   module Lucrofrete
     # Pulls freight-quote logs from LucroFrete's GET /api/logs.
     #
+    # Legacy note: /api/logs is kept only as a raw quote-analysis source.
+    # It must not write Order#real_freight_cost anymore; the authoritative
+    # real freight source is /api/reports/orders via OrdersSyncService.
+    #
     # That endpoint takes NO date filter (confirmed in production —
     # start_date/end_date are silently ignored, unlike /api/reports/*), so
     # incremental sync works by walking pages sequentially and STOPPING at
@@ -39,7 +43,6 @@ module Integrations
         @updated_count = 0
         @existing_count = 0
         @new_after_existing_count = 0
-        @freight_applied_count = 0
         @error_count = 0
         @item_errors = []
       end
@@ -150,24 +153,7 @@ module Integrations
           quotes:             normalize_quotes(raw_log["response_payload"])
         )
         @created_count += 1
-
-        try_apply_freight_cost(quote, channel)
-      end
-
-      # Se o carrinho dessa cotação já converteu num pedido, tenta vincular
-      # o custo real imediatamente (o caminho inverso — pedido chegando
-      # depois — é coberto pelo UpsertOrder).
-      def try_apply_freight_cost(quote, channel)
-        return if quote.cart_external_id.blank?
-
-        cart = tenant.carts.find_by(channel: channel, external_id: quote.cart_external_id)
-        order = cart&.converted_order
-        return unless order
-
-        applied = Integrations::Lucrofrete::ApplyRealFreightCost.call(order: order, freight_quote: quote)
-        @freight_applied_count += 1 if applied
-      rescue => e
-        Rails.logger.error("[Integrations::Lucrofrete::QuotesPollingService] apply freight falhou para quote #{quote.external_id}: #{e.message}")
+        quote
       end
 
       # CEP de origem/destino: shape do request_payload NÃO confirmado em
@@ -270,7 +256,7 @@ module Integrations
           created_count: @created_count,
           existing_count: @existing_count,
           new_after_existing_count: @new_after_existing_count,
-          freight_applied_count: @freight_applied_count,
+          real_freight_cost_application: "disabled; reports/orders is authoritative",
           error_count: @error_count,
           errors: @item_errors
         }

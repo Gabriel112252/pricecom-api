@@ -1,8 +1,15 @@
 module Integrations
   module Lucrofrete
-    # Fills Order#real_freight_cost with the REAL carrier cost (cost_price)
-    # of the freight option the customer actually chose, matched from the
-    # LucroFrete quote recorded for the originating cart.
+    # LEGACY / disabled real_freight_cost path.
+    #
+    # This class is kept only as historical reference for the previous raw
+    # /api/logs quote-matching experiment. Production real_freight_cost must
+    # come from LucroFrete's /api/reports/orders via OrdersSyncService,
+    # because that endpoint returns orders already matched by LucroFrete.
+    #
+    # Previous behavior: fill Order#real_freight_cost with the REAL carrier
+    # cost (cost_price) of the freight option the customer actually chose,
+    # matched from the LucroFrete quote recorded for the originating cart.
     #
     # Matching: Order#shipping_service (ex: "ECONOMICO_-_LOGGI_EXPRESS") is
     # tokenized (transliterate → upcase → split em não-alfanuméricos) e

@@ -3,6 +3,10 @@ module Integrations
     class QuotesPollingSchedulerJob < ApplicationJob
       queue_as :integrations
 
+      # Legacy raw quote-log dispatcher. This class is intentionally no
+      # longer wired in config/schedule.yml for real_freight_cost; the
+      # recurring 15min sync uses OrdersSyncSchedulerJob instead.
+      #
       # Sem filtro de polling_enabled: essa flag é a chave liga/desliga do
       # polling de PEDIDOS Yampi (rate-limit-sensível); a credencial
       # LucroFrete conectada e ativa já é o opt-in do polling de cotações.

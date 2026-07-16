@@ -3,8 +3,9 @@ class DataSourceConfig < ApplicationRecord
 
   DATA_TYPES = %w[cost freight tax payment_reconciliation].freeze
   SOURCES    = %w[idworks pagarme lucrofrete].freeze
-  # "lucrofrete" fornece o custo real de frete cotado no checkout Yampi
-  # (Order#real_freight_cost via Integrations::Lucrofrete::ApplyRealFreightCost)
+  # "lucrofrete" fornece o custo real de frete dos pedidos Yampi ja
+  # casados pelo parceiro (Order#real_freight_cost via
+  # Integrations::Lucrofrete::OrdersSyncService)
   # — alternativa ao idworks para o tipo "freight". Sem default automático
   # no connect: a troca de fonte é uma decisão explícita do tenant.
   AVAILABLE_SOURCES_BY_DATA_TYPE = {

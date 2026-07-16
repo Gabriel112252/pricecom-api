@@ -93,6 +93,23 @@ module Integrations
       authorized_get("reports/timeline", start_date: start_date.to_date.iso8601, end_date: end_date.to_date.iso8601)
     end
 
+    # GET /api/reports/orders — paginated REAL orders already matched by
+    # LucroFrete internally. This is now the authoritative source for
+    # Order#real_freight_cost (via Lucrofrete::OrdersSyncService), replacing
+    # the old best-effort matching against raw /api/logs freight quotes.
+    def fetch_orders_report(start_date:, end_date:, page:, per_page: 50)
+      page_number = [ page.to_i, 1 ].max
+      page_size = per_page.to_i.positive? ? per_page.to_i : 50
+
+      authorized_get(
+        "reports/orders",
+        start_date: start_date.to_date.iso8601,
+        end_date: end_date.to_date.iso8601,
+        page: page_number,
+        per_page: page_size
+      )
+    end
+
     private
 
     attr_reader :channel_credential

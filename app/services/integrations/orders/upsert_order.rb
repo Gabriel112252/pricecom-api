@@ -213,10 +213,9 @@ module Integrations
           cart.mark_converted!(order)
         end
 
-        # Custo real de frete (LucroFrete) — roda mesmo quando o cart já
-        # estava converted, porque a cotação pode ter chegado depois da
-        # conversão. No-op a menos que a fonte de frete seja "lucrofrete".
-        Integrations::Lucrofrete::ApplyRealFreightCost.call(order: order, cart: cart)
+        # LucroFrete real_freight_cost is no longer derived from raw cart
+        # quote logs here. The scheduled OrdersSyncService consumes
+        # /api/reports/orders, where LucroFrete already matched the order.
       rescue => e
         Rails.logger.error("[Integrations::Orders::UpsertOrder] mark_cart_converted failed for order_id=#{order.id} cart_token=#{cart_token}: #{e.message}")
       end
