@@ -196,6 +196,52 @@ RSpec.describe Dashboard::BuildSummary do
       expect(result[:kpis]).to include(coupon_discount_total: 35.0, coupon_orders_count: 3, top_region_state: "SP")
     end
 
+    describe "per-platform discount breakdown (Yampi coupons vs TikTok aggregate)" do
+      let(:channel_tiktok) { tenant.channels.create!(name: "TikTok Shop", platform: "tiktok") }
+
+      before do
+        make_order(channel_a, gross: 120, margin: 0, ordered_at: 1.day.ago)
+          .update!(discount: 20, coupon_code: "BEMVINDO", coupon_discount: 20)
+        make_order(channel_a, gross: 80, margin: 0, ordered_at: 1.day.ago)
+          .update!(discount: 5, coupon_code: "VIP", coupon_discount: 5)
+        make_order(channel_tiktok, gross: 200, margin: 0, ordered_at: 1.day.ago).update!(discount: 30)
+        make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago)
+      end
+
+      def summary_for(channel_ids: nil)
+        params = { from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601 }
+        params[:channel_ids] = channel_ids if channel_ids
+        described_class.call(tenant: tenant, params: ActionController::Parameters.new(**params))
+      end
+
+      it "exposes both blocks when no channel filter is applied" do
+        result = summary_for
+
+        yampi = result[:coupons][:discount_breakdown_yampi]
+        expect(yampi).to include(available: true, orders_count: 2, discount_total: 25.0)
+        expect(yampi[:top_coupons].map { |row| row[:code] }).to eq(%w[BEMVINDO VIP])
+        expect(result[:coupons][:discount_breakdown_tiktok]).to include(
+          available: true, orders_count: 1, discount_total: 30.0
+        )
+      end
+
+      it "marks the TikTok block unavailable under a Yampi-only filter" do
+        result = summary_for(channel_ids: [ channel_a.id.to_s ])
+
+        expect(result[:coupons][:discount_breakdown_yampi]).to include(available: true, orders_count: 2, discount_total: 25.0)
+        expect(result[:coupons][:discount_breakdown_tiktok]).to include(available: false, orders_count: 0, discount_total: 0.0)
+      end
+
+      it "marks the Yampi block unavailable under a TikTok-only filter" do
+        result = summary_for(channel_ids: [ channel_tiktok.id.to_s ])
+
+        yampi = result[:coupons][:discount_breakdown_yampi]
+        expect(yampi).to include(available: false, orders_count: 0, discount_total: 0.0)
+        expect(yampi[:top_coupons]).to eq([])
+        expect(result[:coupons][:discount_breakdown_tiktok]).to include(available: true, orders_count: 1, discount_total: 30.0)
+      end
+    end
+
     it "surfaces uncoded discounts without inventing coupon rankings" do
       make_order(channel_a, gross: 120, margin: 0, ordered_at: 1.day.ago).update!(state: "SP", discount: 20)
 

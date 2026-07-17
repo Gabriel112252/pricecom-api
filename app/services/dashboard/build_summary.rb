@@ -528,7 +528,38 @@ module Dashboard
           discount_total: discount.to_f.round(2),
           net_revenue: net_revenue.to_f.round(2)
         }
-      end.sort_by { |row| [ -row[:orders_count], -row[:discount_total] ] }.first(10)
+      end.sort_by { |row| [ -row[:discount_total], -row[:orders_count] ] }.first(10)
+
+      # Blocos por plataforma: Yampi tem cupom identificado (coupon_code);
+      # TikTok só expõe o desconto agregado do pedido (seller + platform,
+      # ver TiktokOrderNormalizer#extract_discount), sem decompor por tipo.
+      # `available` segue o filtro de canal do dashboard (channel_ids), não
+      # a presença de dados — com filtro só-TikTok o card Yampi some em vez
+      # de aparecer vazio.
+      yampi_coupon_scope = coupon_scope.joins(:channel).where(channels: { platform: "yampi" })
+      yampi_rows = yampi_coupon_scope
+        .group(Arel.sql("UPPER(TRIM(coupon_code))"))
+        .pluck(
+          Arel.sql("UPPER(TRIM(coupon_code))"),
+          Arel.sql("COUNT(*)"),
+          Arel.sql("COALESCE(SUM(#{coupon_value_sql}), 0)")
+        )
+      yampi_top_coupons = yampi_rows.map do |code, count, discount|
+        { code: code, orders_count: count.to_i, discount_total: discount.to_f.round(2) }
+      end.sort_by { |row| [ -row[:discount_total], -row[:orders_count] ] }.first(10)
+
+      tiktok_scope = scope.joins(:channel).where(channels: { platform: "tiktok" })
+      discount_breakdown_yampi = {
+        available: filtered_platforms.include?("yampi"),
+        orders_count: yampi_coupon_scope.count,
+        discount_total: yampi_coupon_scope.sum(Arel.sql(coupon_value_sql)).to_f.round(2),
+        top_coupons: yampi_top_coupons
+      }
+      discount_breakdown_tiktok = {
+        available: filtered_platforms.include?("tiktok"),
+        orders_count: tiktok_scope.where("COALESCE(discount, 0) > 0").count,
+        discount_total: tiktok_scope.sum(:discount).to_f.round(2)
+      }
 
       commercial_discount_total = uncoded_discount_total
       commercial_discount_orders_count = uncoded_discount_orders_count
@@ -560,8 +591,20 @@ module Dashboard
         usage_percentage: total_orders.positive? ? (display_orders_count.to_f / total_orders * 100).round(2) : 0,
         breakdown: breakdown,
         top_coupons: top_coupons,
+        discount_breakdown_yampi: discount_breakdown_yampi,
+        discount_breakdown_tiktok: discount_breakdown_tiktok,
         by_product: build_discount_by_product(scope)
       }
+    end
+
+    # Plataformas cobertas pelo filtro de canal atual do dashboard — sem
+    # filtro, todas as plataformas com Channel do tenant.
+    def filtered_platforms
+      @filtered_platforms ||= begin
+        scope = tenant.channels
+        scope = scope.where(id: channel_ids) if channel_ids.present?
+        scope.distinct.pluck(:platform)
+      end
     end
 
     # Item-level discount composition — which products concentrate the
@@ -1258,6 +1301,8 @@ module Dashboard
         usage_percentage: 0.0,
         breakdown: [],
         top_coupons: [],
+        discount_breakdown_yampi: { available: false, orders_count: 0, discount_total: 0.0, top_coupons: [] },
+        discount_breakdown_tiktok: { available: false, orders_count: 0, discount_total: 0.0 },
         by_product: []
       }
     end
