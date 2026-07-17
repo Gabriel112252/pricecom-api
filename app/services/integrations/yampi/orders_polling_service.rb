@@ -195,7 +195,48 @@ module Integrations
         end
       end
 
+      # TEMP(coupon-audit): dump das chaves coupon/promo/discount do payload
+      # BRUTO, antes do normalizer, pra confirmar se o campo de cupom existe
+      # no payload real do polling (que usa include=items,customer,status,
+      # SEM promocode — diferente do fetch de carrinhos). Loga o 1º pedido de
+      # cada execução (mesmo sem desconto, pra ver quais chaves existem) e
+      # até 3 pedidos com desconto > 0. Grep: "TEMP coupon-audit yampi".
+      # REMOVER este bloco e a chamada em process_order após confirmação.
+      TEMP_COUPON_KEY_PATTERN = /coupon|promo|discount/i
+
+      def temp_log_coupon_keys(raw_order)
+        @temp_coupon_dumps ||= 0
+        matches = temp_collect_coupon_keys(raw_order)
+        has_value = matches.any? { |_, value| value.to_s.to_f > 0 }
+        return unless @temp_coupon_dumps.zero? || (has_value && @temp_coupon_dumps < 4)
+
+        @temp_coupon_dumps += 1
+        rendered = matches.map { |path, value| "#{path}=#{value.inspect.truncate(300)}" }.join(" | ")
+        Rails.logger.info(
+          "[TEMP coupon-audit yampi] order_id=#{raw_order['id']} number=#{raw_order['number']} " \
+          "root_keys=#{raw_order.keys.sort.join(',')} " \
+          "matches=#{rendered.presence || '(nenhuma chave coupon/promo/discount no payload)'}"
+        )
+      rescue => e
+        Rails.logger.warn("[TEMP coupon-audit yampi] dump falhou: #{e.class}: #{e.message}")
+      end
+
+      def temp_collect_coupon_keys(obj, path = "", acc = [])
+        case obj
+        when Hash
+          obj.each do |key, value|
+            current = path.empty? ? key.to_s : "#{path}.#{key}"
+            acc << [ current, value ] if key.to_s.match?(TEMP_COUPON_KEY_PATTERN)
+            temp_collect_coupon_keys(value, current, acc)
+          end
+        when Array
+          obj.each_with_index { |value, index| temp_collect_coupon_keys(value, "#{path}[#{index}]", acc) }
+        end
+        acc
+      end
+
       def process_order(raw_order)
+        temp_log_coupon_keys(raw_order)
         event = PollingEvent.new(tenant: tenant, payload: raw_order, event_type: "order.polling", integration: integration)
         normalized = Integrations::Normalizers::YampiOrderNormalizer.call(event)
         external_id = normalized[:external_id].to_s

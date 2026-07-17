@@ -103,10 +103,12 @@ module Integrations
     end
 
     def fetch_orders_page(page:, date_filter:, limit: ORDERS_LIMIT, skip_cache: true)
+      # promocode: mesma relação já pedida no fetch de carrinhos — sem ela a
+      # API não embarca o cupom e o normalizer nunca vê coupon_code.
       params = {
         page: page,
         limit: limit,
-        include: "items,customer,status",
+        include: "items,customer,status,promocode",
         date: date_filter,
         skipCache: skip_cache
       }

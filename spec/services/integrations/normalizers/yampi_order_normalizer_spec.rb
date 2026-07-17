@@ -54,6 +54,28 @@ RSpec.describe Integrations::Normalizers::YampiOrderNormalizer do
     end
   end
 
+  describe "promocode embedded via ?include=promocode" do
+    it "reads coupon code and discount from the { data => {...} } envelope shape" do
+      order = raw_order.merge(
+        "promocode" => { "data" => { "code" => "BEMVINDO10", "discount" => 15.5 } }
+      )
+
+      normalized = described_class.new(order, "").normalize
+
+      expect(normalized[:coupon_code]).to eq("BEMVINDO10")
+      expect(normalized[:coupon_discount]).to eq(15.5)
+    end
+
+    it "still reads a flat promocode hash" do
+      order = raw_order.merge("promocode" => { "code" => "FLAT5", "discount" => 5.0 })
+
+      normalized = described_class.new(order, "").normalize
+
+      expect(normalized[:coupon_code]).to eq("FLAT5")
+      expect(normalized[:coupon_discount]).to eq(5.0)
+    end
+  end
+
   describe "webhook envelope shape (resource-wrapped, *.data nesting)" do
     let(:event_type) { "order.created" }
     let(:webhook_payload) do

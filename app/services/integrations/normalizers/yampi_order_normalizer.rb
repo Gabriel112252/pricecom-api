@@ -144,10 +144,15 @@ module Integrations
         )
       end
 
+      # promocode chega embarcado via ?include=promocode e, pelo padrão Yampi
+      # de relações embarcadas (customer/status/sku), deve vir no envelope
+      # { "data" => {...} } — unwrap_data cobre as duas formas (flat ou
+      # envelope). Forma exata (objeto vs array) pendente de confirmação no
+      # dump TEMP(coupon-audit) de produção.
       def extract_coupon_code
         coupon_hash = unwrap_data(@p["coupon"])
-        discount_coupon_hash = @p["discount_coupon"].is_a?(Hash) ? @p["discount_coupon"] : {}
-        promocode_hash = @p["promocode"].is_a?(Hash) ? @p["promocode"] : {}
+        discount_coupon_hash = unwrap_data(@p["discount_coupon"])
+        promocode_hash = unwrap_data(@p["promocode"])
         coupon_string = @p["coupon"] if @p["coupon"].is_a?(String)
         code = @p["coupon_code"] ||
           @p["coupon_name"] ||
@@ -163,8 +168,8 @@ module Integrations
 
       def extract_coupon_discount
         coupon_hash = unwrap_data(@p["coupon"])
-        discount_coupon_hash = @p["discount_coupon"].is_a?(Hash) ? @p["discount_coupon"] : {}
-        promocode_hash = @p["promocode"].is_a?(Hash) ? @p["promocode"] : {}
+        discount_coupon_hash = unwrap_data(@p["discount_coupon"])
+        promocode_hash = unwrap_data(@p["promocode"])
         explicit_value = to_f(
           @p["coupon_discount"] ||
           @p["coupon_value"] ||
