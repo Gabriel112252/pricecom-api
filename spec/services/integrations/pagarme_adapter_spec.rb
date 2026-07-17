@@ -23,8 +23,8 @@ RSpec.describe Integrations::PagarmeAdapter do
           payment_date: "2026-07-20",
           original_payment_date: "2026-08-01",
           payment_method: "credit_card",
-          accrual_date: "2026-07-10T12:00:00Z",
-          date_created: "2026-07-10T12:00:01Z"
+          accrual_at: "2026-07-10T12:00:00Z",
+          created_at: "2026-07-10T12:00:01Z"
         }
       ],
       paging: { forward_cursor: "cursor_2" }
@@ -43,8 +43,8 @@ RSpec.describe Integrations::PagarmeAdapter do
           transaction_id: "tran_2",
           payment_date: "2026-07-21",
           payment_method: "pix",
-          accrual_date: "2026-07-11T12:00:00Z",
-          date_created: "2026-07-11T12:00:01Z"
+          accrual_at: "2026-07-11T12:00:00Z",
+          created_at: "2026-07-11T12:00:01Z"
         }
       ],
       paging: { forward_cursor: nil }

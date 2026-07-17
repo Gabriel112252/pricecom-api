@@ -86,8 +86,8 @@ RSpec.describe Financials::PagarmePayableSyncService do
           payment_date: "2026-07-20",
           original_payment_date: "2026-08-01",
           payment_method: "credit_card",
-          accrual_date: "2026-07-10T12:00:00Z",
-          date_created: "2026-07-10T12:00:01Z"
+          accrual_at: "2026-07-10T12:00:00Z",
+          created_at: "2026-07-10T12:00:01Z"
         }
       ],
       paging: { forward_cursor: "cursor_2" }
@@ -108,8 +108,8 @@ RSpec.describe Financials::PagarmePayableSyncService do
           payment_date: "2026-07-21",
           original_payment_date: "2026-07-21",
           payment_method: "pix",
-          accrual_date: "2026-07-11T12:00:00Z",
-          date_created: "2026-07-11T12:00:01Z"
+          accrual_at: "2026-07-11T12:00:00Z",
+          created_at: "2026-07-11T12:00:01Z"
         }
       ],
       paging: { forward_cursor: nil }
@@ -220,8 +220,8 @@ RSpec.describe Financials::PagarmePayableSyncService do
             payment_date: "2026-07-22",
             original_payment_date: "2026-07-22",
             payment_method: "pix",
-            accrual_date: "2026-07-12T12:00:00Z",
-            date_created: "2026-07-12T12:00:01Z"
+            accrual_at: "2026-07-12T12:00:00Z",
+            created_at: "2026-07-12T12:00:01Z"
           }
         ],
         paging: { forward_cursor: nil }
@@ -318,8 +318,8 @@ RSpec.describe Financials::PagarmePayableSyncService do
             original_payment_date: original_payment_date,
             payment_method: payment_method,
             card: (card_brand ? { brand: card_brand } : nil),
-            accrual_date: "2026-07-10T12:00:00Z",
-            date_created: "2026-07-10T12:00:01Z"
+            accrual_at: "2026-07-10T12:00:00Z",
+            created_at: "2026-07-10T12:00:01Z"
           }.compact
         ],
         paging: { forward_cursor: nil }

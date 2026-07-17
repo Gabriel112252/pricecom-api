@@ -53,8 +53,8 @@ RSpec.describe Financials::PagarmeSyncService do
           payment_date: "2026-07-20",
           original_payment_date: "2026-07-20",
           payment_method: "credit_card",
-          accrual_date: "2026-07-10T12:00:00Z",
-          date_created: "2026-07-10T12:00:01Z"
+          accrual_at: "2026-07-10T12:00:00Z",
+          created_at: "2026-07-10T12:00:01Z"
         }
       ],
       paging: { forward_cursor: nil }

@@ -104,8 +104,14 @@ module Integrations
         card_brand:              extract_card_brand(payable),
         payment_date:            parse_date(payable["payment_date"])&.to_date,
         original_payment_date:   parse_date(payable["original_payment_date"])&.to_date,
-        accrual_date:            parse_date(payable["accrual_date"]),
-        date_created:            parse_date(payable["date_created"]),
+        # Confirmado via payables.first[:raw_payload].keys em produção
+        # (2026-07-17): o payload real usa "accrual_at"/"created_at", não
+        # "accrual_date"/"date_created" — os nomes antigos nunca bateram
+        # com nenhum payload visto, então transaction_date ficava sempre
+        # nil em FinancialSettlementItem. Sem fallback pros nomes antigos
+        # de propósito: não é um formato alternativo, é o campo errado.
+        accrual_date:            parse_date(payable["accrual_at"]),
+        date_created:            parse_date(payable["created_at"]),
         raw_payload:             payable
       }
     end

@@ -20,8 +20,8 @@ RSpec.describe "Pagar.me integration", type: :request do
           payment_date: "2026-07-20",
           original_payment_date: "2026-08-01",
           payment_method: "credit_card",
-          accrual_date: "2026-07-10T12:00:00Z",
-          date_created: "2026-07-10T12:00:01Z"
+          accrual_at: "2026-07-10T12:00:00Z",
+          created_at: "2026-07-10T12:00:01Z"
         }
       ],
       paging: { forward_cursor: nil }
@@ -43,6 +43,13 @@ RSpec.describe "Pagar.me integration", type: :request do
     stub_request(:get, "https://api.pagar.me/core/v5/payables")
       .with(query: hash_including("payment_date_since" => "2026-06-15"))
       .to_return(status: 200, body: payables_fixture, headers: { "Content-Type" => "application/json" })
+  end
+
+  # charge_id → external_order_id map (build_charge_to_order_map): vazio
+  # aqui de propósito, este spec não exercita a resolução de pedido.
+  def stub_orders
+    stub_request(:get, %r{\Ahttps://api\.pagar\.me/core/v5/orders})
+      .to_return(status: 200, body: { data: [], paging: { next: nil } }.to_json, headers: { "Content-Type" => "application/json" })
   end
 
   describe "POST /api/v1/integrations/pagarme/connect" do
@@ -104,6 +111,7 @@ RSpec.describe "Pagar.me integration", type: :request do
         tenant.channels.create!(name: "Yampi", platform: "yampi")
         tenant.financial_sources.create!(provider: "pagarme", name: "Pagar.me", source_type: "gateway", status: "active", credentials: { api_key: "sk_test_abc123" })
         stub_payables
+        stub_orders
 
         post "/api/v1/integrations/pagarme/sync", params: { days: 30 }, headers: auth_headers(admin)
 
