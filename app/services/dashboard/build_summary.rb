@@ -58,8 +58,8 @@ module Dashboard
       orders_scope = financial_orders(orders_in_period(period))
       prev_scope   = financial_orders(orders_in_period(previous_period(period)))
 
-      current_totals = period_totals(orders_scope)
-      prev_totals    = period_totals(prev_scope)
+      current_totals = period_totals(orders_scope, period)
+      prev_totals    = period_totals(prev_scope, previous_period(period))
       period_rows    = revenue_rows(orders_scope, granularity)
       data_quality   = build_data_quality(orders_scope)
       coupons        = build_coupons(orders_scope)
@@ -80,7 +80,7 @@ module Dashboard
         discount_ticket_summary:  build_discount_ticket_summary(orders_scope),
         product_discount_exposure: build_product_discount_exposure(orders_scope),
         revenue:                  build_revenue(orders_scope, period_rows, granularity, current_totals, prev_totals),
-        financial:                build_financial(current_totals, prev_totals, data_quality),
+        financial:                build_financial(current_totals, prev_totals, data_quality, period),
         margin:                   build_margin(period_rows, granularity, current_totals, prev_totals, data_quality),
         orders:                   build_orders(orders_scope, granularity, current_totals, prev_totals),
         data_sources:             build_data_sources,
@@ -161,7 +161,7 @@ module Dashboard
       ((current - previous) / previous.to_f * 100).round(2)
     end
 
-    def period_totals(scope)
+    def period_totals(scope, period)
       count, gross, refund, discount_amount, commission_amount, operational_cost = scope.pick(
         Arel.sql("COUNT(*)"),
         Arel.sql("COALESCE(SUM(gross_value), 0)"),
@@ -178,7 +178,8 @@ module Dashboard
       product_cost_f = product_cost_for(scope)
       freight_f = freight_for(scope)
       taxes_f = taxes_for(scope)
-      result_f = net_f - product_cost_f - freight_f - commission_amount.to_f - taxes_f - operational_cost.to_f
+      gateway_fees_f = gateway_fees_for(period)
+      result_f = net_f - product_cost_f - freight_f - commission_amount.to_f - taxes_f - operational_cost.to_f - gateway_fees_f
 
       {
         count:            count,
@@ -191,6 +192,7 @@ module Dashboard
         commissions:      commission_amount.to_f,
         operational_cost: operational_cost.to_f,
         taxes:            taxes_f,
+        gateway_fees:     gateway_fees_f,
         result:           result_f,
         profit:           result_f,
         margin:           result_f,
@@ -234,7 +236,7 @@ module Dashboard
       }
     end
 
-    def build_financial(current_totals, prev_totals, data_quality)
+    def build_financial(current_totals, prev_totals, data_quality, period)
       product_cost = current_totals[:product_cost].round(2)
       financial_available = data_quality[:financial_status] == "complete"
 
@@ -245,6 +247,7 @@ module Dashboard
         discounts: current_totals[:discounts].round(2),
         commissions: current_totals[:commissions].round(2),
         operational_cost: current_totals[:operational_cost].round(2),
+        gateway_fees: current_totals[:gateway_fees].round(2),
         refunds: current_totals[:refunds].round(2),
         profit: financial_available ? current_totals[:profit].round(2) : nil,
         margin: financial_available ? current_totals[:margin].round(2) : nil,
@@ -253,7 +256,16 @@ module Dashboard
         margin_available: financial_available,
         unavailable_reason: financial_available ? nil : data_quality[:financial_status_reason],
         product_cost_vs_previous_pct: pct_change(product_cost, prev_totals[:product_cost]),
-        profit_vs_previous_pct: financial_available ? pct_change(current_totals[:profit], prev_totals[:profit]) : nil
+        profit_vs_previous_pct: financial_available ? pct_change(current_totals[:profit], prev_totals[:profit]) : nil,
+        # Estatística isolada, independente do filtro de canal do dashboard:
+        # sempre taxa Pagar.me (todo o histórico é atribuído ao canal Yampi
+        # na origem) dividida por pedidos do canal Yampi no período — nunca
+        # por pedido individual, porque o vínculo pedido↔pagamento da
+        # Pagar.me não é confiável (código de pedido da API não bate com
+        # nenhum campo salvo em Order). Não usar em listas/tabelas de
+        # pedidos, só como card/stat agregado.
+        gateway_fee_avg_per_order: gateway_fee_avg_per_order(period),
+        gateway_fee_avg_per_order_available: payment_reconciliation_source_configured?
       }
     end
 
@@ -376,10 +388,17 @@ module Dashboard
           data_quality[:orders_without_tax].positive? ? "Existem pedidos sem imposto." : nil
         ),
         operational_costs: composition_line(current_totals[:operational_cost], "available", "Soma de operational_cost persistida nos pedidos."),
+        gateway_fees: composition_line(
+          payment_reconciliation_source_configured? ? current_totals[:gateway_fees] : nil,
+          payment_reconciliation_source_configured? ? "available" : "not_configured",
+          payment_reconciliation_source_configured? ?
+            "Soma de fee_amount dos FinancialSettlementItem do Pagar.me (inclui antecipação quando houver). Fonte única — não soma com FinancialReceivable, que reflete o mesmo payable." :
+            "Pagar.me não está configurado como fonte de conciliação de pagamentos (data_source_configs payment_reconciliation)."
+        ),
         result: composition_line(
           result_available ? current_totals[:result] : nil,
           result_available ? "available" : "incomplete",
-          "Receita líquida - CMV - frete - comissões - impostos - custos operacionais.",
+          "Receita líquida - CMV - frete - comissões - impostos - custos operacionais - taxa de gateway.",
           result_available ? nil : incomplete_reason
         ),
         result_available: result_available,
@@ -1334,6 +1353,58 @@ module Dashboard
 
     def tax_source_configured?
       data_source_for("tax").present?
+    end
+
+    # Fonte única de taxa de gateway: FinancialSettlementItem.fee_amount
+    # (já inclui anticipation_fee, ver PagarmePayableSyncService#total_fee).
+    # FinancialReceivable também guarda fee_amount do MESMO payable, mas
+    # separado de anticipation_fee_amount — somar os dois registros pra
+    # essa métrica duplicaria o valor. transaction_date (não payout_date)
+    # pra ficar consistente com build_reconciliation, que já filtra
+    # FinancialSettlementItem por essa mesma coluna.
+    #
+    # apply_channel_filter: false ignora o filtro de canal do dashboard —
+    # usado só pelo cálculo da média por pedido Yampi (gateway_fee_avg_per_order),
+    # que precisa do total real de taxa Pagar.me independente do que está
+    # filtrado na tela (ver comentário em build_financial).
+    def gateway_fees_for(period, apply_channel_filter: true)
+      return 0.0 unless payment_reconciliation_source_configured?
+
+      scope = tenant.financial_settlement_items
+        .joins(:financial_settlement)
+        .where(financial_settlements: { financial_source_id: pagarme_financial_source_ids })
+        .where(transaction_date: period[:from].beginning_of_day..period[:to].end_of_day)
+      scope = scope.where(financial_settlements: { channel_id: channel_ids }) if apply_channel_filter && channel_ids.present?
+
+      scope.sum(:fee_amount).to_f
+    end
+
+    def pagarme_financial_source_ids
+      @pagarme_financial_source_ids ||= tenant.financial_sources.where(provider: "pagarme").pluck(:id)
+    end
+
+    def payment_reconciliation_source_configured?
+      data_source_for("payment_reconciliation") == "pagarme"
+    end
+
+    # Sempre pedidos do canal Yampi, independente do filtro de canal ativo
+    # no dashboard — TikTok não passa pela Pagar.me, então misturar os
+    # dois na média não faria sentido nem quando "todos os canais" estiver
+    # selecionado.
+    def yampi_orders_count(period)
+      financial_orders(tenant.orders.where(ordered_at: period[:from].beginning_of_day..period[:to].end_of_day))
+        .joins(:channel)
+        .where(channels: { platform: "yampi" })
+        .count
+    end
+
+    def gateway_fee_avg_per_order(period)
+      return nil unless payment_reconciliation_source_configured?
+
+      orders_count = yampi_orders_count(period)
+      return nil unless orders_count.positive?
+
+      (gateway_fees_for(period, apply_channel_filter: false) / orders_count).round(2)
     end
 
     def freight_tooltip

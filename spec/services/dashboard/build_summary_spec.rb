@@ -179,6 +179,95 @@ RSpec.describe Dashboard::BuildSummary do
     end
   end
 
+  describe "gateway fees (Pagar.me)" do
+    let(:pagarme_source) do
+      tenant.financial_sources.create!(
+        provider: "pagarme", name: "Pagar.me", source_type: "gateway", status: "active"
+      )
+    end
+
+    def enable_payment_reconciliation!
+      tenant.data_source_configs.create!(data_type: "payment_reconciliation", source: "pagarme", enabled: true)
+    end
+
+    def make_settlement_item(channel:, fee_amount:, transaction_date:, external_id: "item-#{SecureRandom.hex(4)}")
+      settlement = pagarme_source.financial_settlements.create!(
+        tenant: tenant, channel: channel, external_id: "settle-#{SecureRandom.hex(4)}",
+        period_start: transaction_date.to_date, period_end: transaction_date.to_date, status: "paid"
+      )
+      settlement.financial_settlement_items.create!(
+        tenant: tenant, external_id: external_id, transaction_type: "sale",
+        gross_amount: 100, fee_amount: fee_amount, net_amount: 90, transaction_date: transaction_date
+      )
+    end
+
+    it "is zero and not_configured when payment_reconciliation isn't set to pagarme" do
+      make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+      make_settlement_item(channel: channel_a, fee_amount: 10, transaction_date: 1.day.ago)
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      expect(result[:financial][:gateway_fees]).to eq(0.0)
+      expect(result[:financial_composition][:gateway_fees]).to include(available: false, status: "not_configured")
+      expect(result[:financial][:gateway_fee_avg_per_order]).to be_nil
+    end
+
+    it "sums FinancialSettlementItem.fee_amount within the period, deducts it from result, and respects the channel filter" do
+      enable_payment_reconciliation!
+      order = make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+      product = tenant.products.create!(sku: "SKU-GW", name: "Produto", cost_price: 1)
+      order.order_items.create!(product: product, sku: product.sku, name: product.name, quantity: 1, unit_price: 100, unit_cost: 1)
+      make_settlement_item(channel: channel_a, fee_amount: 6.5, transaction_date: 1.day.ago)
+      make_settlement_item(channel: channel_a, fee_amount: 3.5, transaction_date: 20.days.ago) # fora do período de 6 dias
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      expect(result[:financial][:gateway_fees]).to eq(6.5)
+      expect(result[:financial_composition][:gateway_fees]).to include(value: 6.5, available: true, status: "available")
+      expect(result[:financial_composition][:result][:value]).to eq(92.5) # 100 - 1 de CMV - 6.5 de taxa
+
+      filtered = described_class.call(
+        tenant: tenant,
+        params: ActionController::Parameters.new(
+          from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601, channel_ids: [ channel_b.id.to_s ]
+        )
+      )
+      expect(filtered[:financial][:gateway_fees]).to eq(0.0)
+    end
+
+    it "does not double count with FinancialReceivable (same payable, two records)" do
+      enable_payment_reconciliation!
+      make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+      item = make_settlement_item(channel: channel_a, fee_amount: 10, transaction_date: 1.day.ago)
+      tenant.financial_receivables.create!(
+        financial_source: pagarme_source, financial_settlement_item: item, payable_id: "pay-1",
+        status: "paid", amount: 100, fee_amount: 10, net_amount: 90
+      )
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      expect(result[:financial][:gateway_fees]).to eq(10.0)
+    end
+
+    it "computes gateway_fee_avg_per_order over Yampi orders regardless of the active channel filter" do
+      enable_payment_reconciliation!
+      make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+      make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+      make_order(channel_b, gross: 500, margin: 0, ordered_at: 1.day.ago) # Shopify — não entra no denominador
+      make_settlement_item(channel: channel_a, fee_amount: 15, transaction_date: 1.day.ago)
+
+      result = described_class.call(
+        tenant: tenant,
+        params: ActionController::Parameters.new(
+          from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601, channel_ids: [ channel_b.id.to_s ]
+        )
+      )
+
+      # 15 de taxa / 2 pedidos Yampi — mesmo com o filtro em Shopify.
+      expect(result[:financial][:gateway_fee_avg_per_order]).to eq(7.5)
+    end
+  end
+
   describe "regional and coupon payload" do
     it "summarizes orders by Brazilian state and coupon usage" do
       sp_order = make_order(channel_a, gross: 120, margin: 0, ordered_at: 1.day.ago)
