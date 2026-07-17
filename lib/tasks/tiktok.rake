@@ -1,4 +1,29 @@
 namespace :tiktok do
+  desc "Fetch TikTok order details for local paid orders missing payment.original_shipping_fee"
+  task backfill_shipping_fee_audit: :environment do
+    limit = ENV["LIMIT"].to_i.positive? ? ENV["LIMIT"].to_i : nil
+    batch_sleep = ENV["BATCH_SLEEP"].to_f.positive? ? ENV["BATCH_SLEEP"].to_f : 0
+    failures = 0
+
+    ChannelCredential.active.where(channel: "tiktok").find_each do |credential|
+      result = Integrations::Tiktok::ShippingFeeAuditBackfillService.call(
+        credential,
+        limit: limit,
+        batch_sleep: batch_sleep
+      )
+      metadata = result.metadata
+      puts "tenant_id=#{credential.tenant_id} credential_id=#{credential.id} " \
+           "outcome=#{result.outcome} eligible=#{metadata[:eligible_count]} " \
+           "filled=#{metadata[:filled_count]} still_missing=#{metadata[:still_missing_count]} " \
+           "detail_missing=#{metadata[:detail_missing_count]} api_batches=#{metadata[:api_batches]}"
+      failures += 1 if result.error?
+    end
+
+    abort "Done with #{failures} failure(s)." if failures.positive?
+
+    puts "Done."
+  end
+
   desc "Backfill freight_margin_dailies for TikTok from local orders.freight and orders.original_shipping_fee"
   task sync_freight_margins: :environment do
     total_days = 0
