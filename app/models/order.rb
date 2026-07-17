@@ -20,11 +20,18 @@ class Order < ApplicationRecord
   # `revenue_countable` para não ser contaminada por eles.
   NON_REVENUE_STATUSES = %w[unpaid status_unknown].freeze
 
+  # orders.status chega dos canais em grafias mistas ("cancelled" e
+  # "CANCELLED" convivem em produção) — todo filtro por status de
+  # cancelamento DEVE comparar via LOWER, nunca igualdade exata.
+  CANCELED_STATUS_ALIASES = %w[cancelado canceled cancelled cancelada].freeze
+
   validates :order_type, inclusion: { in: ORDER_TYPES }
 
   before_save :calculate_margin
 
-  scope :active,       -> { where.not(status: "Cancelado") }
+  scope :canceled,     -> { where("LOWER(COALESCE(orders.status, '')) IN (?)", CANCELED_STATUS_ALIASES) }
+  scope :not_canceled, -> { where.not("LOWER(COALESCE(orders.status, '')) IN (?)", CANCELED_STATUS_ALIASES) }
+  scope :active,       -> { not_canceled }
   scope :revenue_countable, -> { where.not("LOWER(COALESCE(orders.status, '')) IN (?)", NON_REVENUE_STATUSES) }
   scope :sales,        -> { where(order_type: "sale") }
   scope :cancellations, -> { where(order_type: "cancellation") }

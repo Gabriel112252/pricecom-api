@@ -7,7 +7,6 @@ module Dashboard
     FINANCIAL_CONFLICT_TYPES = %w[
       nf_discount_mismatch nf_freight_mismatch settlement_amount_mismatch missing_settlement
     ].freeze
-    CANCELED_STATUS_ALIASES = %w[cancelado canceled cancelled cancelada].freeze
     BRAZIL_STATES = {
       "AC" => "Acre",
       "AL" => "Alagoas",
@@ -78,6 +77,8 @@ module Dashboard
         sales_by_channel:         build_sales_by_channel(orders_scope, current_totals),
         regional_sales:           regional_sales,
         coupons:                  coupons,
+        discount_ticket_summary:  build_discount_ticket_summary(orders_scope),
+        product_discount_exposure: build_product_discount_exposure(orders_scope),
         revenue:                  build_revenue(orders_scope, period_rows, granularity, current_totals, prev_totals),
         financial:                build_financial(current_totals, prev_totals, data_quality),
         margin:                   build_margin(period_rows, granularity, current_totals, prev_totals, data_quality),
@@ -130,7 +131,7 @@ module Dashboard
     def financial_orders(scope)
       scope
         .where(order_type: %w[sale refund])
-        .where.not("LOWER(COALESCE(status, '')) IN (?)", CANCELED_STATUS_ALIASES)
+        .not_canceled
         .revenue_countable
     end
 
@@ -320,6 +321,10 @@ module Dashboard
       current.merge(net_vs_previous_pct: pct_change(current[:net_revenue], previous[:net_revenue]))
     end
 
+    # freight e taxes vão separados: tax_amount está 0.0 em 100% dos pedidos
+    # em produção (sem fonte de imposto), então a UI rotula a linha só como
+    # "Frete" enquanto taxes for zero — e volta a "Frete e imposto" sozinha
+    # quando uma fonte real de imposto passar a popular tax_amount.
     def revenue_breakdown_values(totals, canceled_amount)
       freight_and_taxes = totals[:freight] + totals[:taxes]
 
@@ -327,6 +332,8 @@ module Dashboard
         gross_revenue:             (totals[:gross] + canceled_amount).round(2),
         discounts:                 totals[:discounts].round(2),
         cancellations_and_refunds: (canceled_amount + totals[:refunds]).round(2),
+        freight:                   totals[:freight].round(2),
+        taxes:                     totals[:taxes].round(2),
         freight_and_taxes:         freight_and_taxes.round(2),
         net_revenue:               (totals[:net] - freight_and_taxes).round(2)
       }
@@ -335,7 +342,7 @@ module Dashboard
     def canceled_amount_for(period)
       orders_in_period(period)
         .where(order_type: %w[sale refund])
-        .where("LOWER(COALESCE(status, '')) IN (?)", CANCELED_STATUS_ALIASES)
+        .canceled
         .sum(:gross_value)
         .to_f
     end
@@ -580,16 +587,72 @@ module Dashboard
           Arel.sql("COUNT(DISTINCT order_items.order_id)")
         )
 
-      rows.map do |sku, name, discount_total, gross_total, orders_count|
+      rows.map do |sku, name, discount_total, net_total, orders_count|
         discount_f = discount_total.to_f
-        gross_f = gross_total.to_f
+        # order_items.unit_price é o preço LÍQUIDO (pós-desconto) neste
+        # schema — o preço de tabela é unit_price + desconto, e é sobre ele
+        # que o % é calculado (senão passa de 100%). nf_unit_price não serve
+        # de base: está zerado em produção.
+        list_price_f = net_total.to_f + discount_f
 
         {
           sku: sku,
           name: name.presence || sku,
           discount_total: discount_f.round(2),
-          discount_pct: gross_f > 0 ? (discount_f / gross_f * 100).round(2) : 0.0,
+          discount_pct: list_price_f > 0 ? (discount_f / list_price_f * 100).round(2) : 0.0,
           orders_count: orders_count.to_i
+        }
+      end
+    end
+
+    # Card "Desconto por ticket": incidência de desconto sobre os pedidos
+    # válidos do período. avg_discount_per_order é a média ENTRE os pedidos
+    # com desconto (não dilui pelos sem desconto).
+    def build_discount_ticket_summary(scope)
+      total = scope.count
+      discounted_scope = scope.where("COALESCE(discount, 0) > 0")
+      discounted = discounted_scope.count
+      avg = discounted.positive? ? discounted_scope.average(:discount).to_f : 0.0
+
+      {
+        discounted_orders_count: discounted,
+        total_orders_count: total,
+        discount_rate_pct: total.positive? ? (discounted.to_f / total * 100).round(2) : 0.0,
+        avg_discount_per_order: avg.round(2)
+      }
+    end
+
+    # Exposição a desconto por produto: em quantos PEDIDOS que contêm o
+    # produto o pedido teve desconto (orders.discount > 0), vs o total de
+    # pedidos que contêm o produto. É contagem de pedidos de propósito —
+    # NÃO ratear valor de desconto por item aqui: a API do Yampi só expõe
+    # desconto por pedido, qualquer valor por item seria estimativa.
+    def build_product_discount_exposure(scope, limit: 10)
+      discounted_count_sql = "COUNT(DISTINCT order_items.order_id) FILTER (WHERE COALESCE(orders.discount, 0) > 0)"
+
+      rows = OrderItem
+        .joins(:order)
+        .where(order_id: scope.select(:id), is_gift: false)
+        .group(:sku, :name)
+        .order(Arel.sql("#{discounted_count_sql} DESC"))
+        .limit(limit)
+        .pluck(
+          :sku,
+          :name,
+          Arel.sql(discounted_count_sql),
+          Arel.sql("COUNT(DISTINCT order_items.order_id)")
+        )
+
+      rows.map do |sku, name, discounted, total|
+        discounted_i = discounted.to_i
+        total_i = total.to_i
+
+        {
+          sku: sku,
+          name: name.presence || sku,
+          discounted_orders_count: discounted_i,
+          total_orders_count: total_i,
+          exposure_pct: total_i.positive? ? (discounted_i.to_f / total_i * 100).round(2) : 0.0
         }
       end
     end

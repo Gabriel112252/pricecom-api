@@ -29,7 +29,8 @@ module Api
 
       def apply_filters(scope)
         scope = scope.where(channel_id:   params[:channel_id])   if params[:channel_id].present?
-        scope = scope.where(status:       params[:status])        if params[:status].present?
+        # orders.status tem grafias mistas por canal ("cancelled"/"CANCELLED")
+        scope = scope.where("LOWER(orders.status) = ?", params[:status].to_s.downcase) if params[:status].present?
         scope = scope.where(order_number: params[:order_number])  if params[:order_number].present?
         scope = scope.where(external_id:  params[:external_id])   if params[:external_id].present?
 

@@ -85,7 +85,7 @@ module Api
         scope = current_tenant.orders
           .where(ordered_at: period[:from].beginning_of_day..period[:to].end_of_day)
           .where(order_type: %w[sale refund])
-          .where.not("LOWER(COALESCE(orders.status, '')) IN (?)", Dashboard::BuildSummary::CANCELED_STATUS_ALIASES)
+          .not_canceled
           .revenue_countable
 
         channel_ids = Array(params[:channel_ids]).reject(&:blank?)

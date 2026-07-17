@@ -145,6 +145,8 @@ RSpec.describe Dashboard::BuildSummary do
         gross_revenue: 280.0,
         discounts: 20.0,
         cancellations_and_refunds: 90.0,
+        freight: 15.0,
+        taxes: 0.0,
         freight_and_taxes: 15.0,
         net_revenue: 155.0
       )
@@ -152,6 +154,19 @@ RSpec.describe Dashboard::BuildSummary do
         .to eq(breakdown[:net_revenue])
       # O net histórico (séries, AOV, share) segue sem descontar frete/imposto.
       expect(result[:kpis][:net_revenue]).to eq(170.0)
+    end
+
+    it "counts canceled orders regardless of status casing" do
+      make_order(channel_a, gross: 80, margin: 0, ordered_at: 1.day.ago).update!(status: "CANCELLED")
+      make_order(channel_a, gross: 20, margin: 0, ordered_at: 1.day.ago).update!(status: "cancelled")
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      expect(result[:revenue_breakdown][:cancellations_and_refunds]).to eq(100.0)
+      expect(result[:revenue_breakdown][:gross_revenue]).to eq(100.0)
+      # Nenhum dos dois entra nos agregados de pedidos válidos.
+      expect(result[:kpis][:gross_revenue]).to eq(0.0)
+      expect(result[:kpis][:orders_count]).to eq(0)
     end
 
     it "compares the breakdown net against the previous period" do
@@ -214,7 +229,7 @@ RSpec.describe Dashboard::BuildSummary do
       expect(result[:kpis]).to include(coupon_discount_total: 30.0, shipping_subsidy_total: 10.0)
     end
 
-    it "ranks item-level discounts by product with pct over the item price" do
+    it "ranks item-level discounts by product with pct over the list price (unit_price is net of discount)" do
       order = make_order(channel_a, gross: 200, margin: 0, ordered_at: 1.day.ago)
       order.order_items.create!(sku: "SKU-A", name: "Produto A", quantity: 2, unit_price: 50, discount: 25)
       order.order_items.create!(sku: "SKU-B", name: "Produto B", quantity: 1, unit_price: 100, discount: 10)
@@ -222,8 +237,65 @@ RSpec.describe Dashboard::BuildSummary do
       result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
 
       by_product = result[:coupons][:by_product]
-      expect(by_product.first).to include(sku: "SKU-A", discount_total: 25.0, discount_pct: 25.0, orders_count: 1)
-      expect(by_product.second).to include(sku: "SKU-B", discount_total: 10.0, discount_pct: 10.0)
+      # % sobre o preço de tabela (líquido + desconto): 25/125 e 10/110.
+      expect(by_product.first).to include(sku: "SKU-A", discount_total: 25.0, discount_pct: 20.0, orders_count: 1)
+      expect(by_product.second).to include(sku: "SKU-B", discount_total: 10.0, discount_pct: 9.09)
+    end
+
+    it "keeps discount_pct below 100% when the discount exceeds the net unit price" do
+      # Caso real de produção (SKU 2080_2): unit_price líquido 35.01 com
+      # desconto 37.92 — sobre o líquido daria 108%; sobre o de tabela, 52%.
+      order = make_order(channel_a, gross: 35.01, margin: 0, ordered_at: 1.day.ago)
+      order.order_items.create!(sku: "2080_2", name: "Produto", quantity: 1, unit_price: 35.01, discount: 37.92)
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      row = result[:coupons][:by_product].first
+      expect(row).to include(sku: "2080_2", discount_total: 37.92, discount_pct: 52.0)
+      expect(row[:discount_pct]).to be < 100
+    end
+  end
+
+  describe "discount ticket and product exposure" do
+    it "summarizes discount incidence and average discount among discounted orders" do
+      make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago).update!(discount: 10)
+      make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago).update!(discount: 30)
+      make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      expect(result[:discount_ticket_summary]).to eq(
+        discounted_orders_count: 2,
+        total_orders_count: 3,
+        discount_rate_pct: 66.67,
+        avg_discount_per_order: 20.0
+      )
+    end
+
+    it "ranks products by orders with discount and keeps exposure_pct at most 100%" do
+      # SKU-LOW: 1 pedido com desconto entre 4 (baixa exposição, 25%);
+      # SKU-HIGH: 2 de 2 (100%).
+      4.times do |i|
+        order = make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+        order.update!(discount: 15) if i.zero?
+        order.order_items.create!(sku: "SKU-LOW", name: "Produto Low", quantity: 1, unit_price: 100)
+      end
+      2.times do
+        order = make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+        order.update!(discount: 15)
+        order.order_items.create!(sku: "SKU-HIGH", name: "Produto High", quantity: 1, unit_price: 100)
+      end
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      exposure = result[:product_discount_exposure]
+      expect(exposure.first).to include(
+        sku: "SKU-HIGH", discounted_orders_count: 2, total_orders_count: 2, exposure_pct: 100.0
+      )
+      expect(exposure.second).to include(
+        sku: "SKU-LOW", discounted_orders_count: 1, total_orders_count: 4, exposure_pct: 25.0
+      )
+      expect(exposure).to all(satisfy { |row| row[:exposure_pct] <= 100.0 })
     end
   end
 
