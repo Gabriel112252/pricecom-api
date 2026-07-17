@@ -21,6 +21,12 @@ module Api
       }.freeze
       FREIGHT_ORDERS_PER_PAGE_DEFAULT = 50
 
+      INSTALLMENT_BUCKETS = {
+        "1" => { label: "À vista (1x)", range: 1..1 },
+        "2_6" => { label: "Parcelado 2-6x", range: 2..6 },
+        "7_12" => { label: "Parcelado 7-12x", range: 7..12 }
+      }.freeze
+
       def summary
         render json: Dashboard::BuildSummary.call(tenant: current_tenant, params: params)
       end
@@ -300,11 +306,29 @@ module Api
           gateway_options: build_receivable_gateway_options,
           cash_flow: build_receivable_cash_flow(receivables),
           by_payment_method: build_receivable_by_payment_method(receivables),
+          installment_distribution: build_receivable_installment_distribution(receivables),
           fee_summary: build_receivable_fee_summary(receivables),
           status_options: receivables.reorder(nil).distinct.pluck(Arel.sql("financial_receivables.status")).compact.sort,
           payment_method_options: receivables.reorder(nil).distinct.pluck(Arel.sql("financial_receivables.payment_method")).compact.sort,
           table: build_receivable_table(receivables)
         }
+      end
+
+      # Só cartão de crédito tem parcelamento — pix/boleto ficam de fora
+      # (installment sempre 1, sem faixa que faça sentido mostrar aqui).
+      # Respeita os mesmos filtros já aplicados em `receivables` (status,
+      # forma de pagamento, gateway, payment_date).
+      def build_receivable_installment_distribution(receivables)
+        scope = receivables.where(payment_method: "credit_card")
+
+        INSTALLMENT_BUCKETS.map do |key, bucket|
+          count, net = scope.where(installment: bucket[:range]).pick(
+            Arel.sql("COUNT(*)"),
+            Arel.sql("COALESCE(SUM(net_amount), 0)")
+          ) || [ 0, 0 ]
+
+          { bucket: key, label: bucket[:label], receivables_count: count.to_i, net_amount: net.to_f.round(2) }
+        end
       end
 
       def build_receivable_gateway_options
