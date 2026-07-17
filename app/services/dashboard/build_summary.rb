@@ -167,7 +167,7 @@ module Dashboard
         Arel.sql("COALESCE(SUM(discount), 0)"),
         Arel.sql("COALESCE(SUM(commission), 0)"),
         Arel.sql("COALESCE(SUM(operational_cost), 0)")
-      ) || [0, 0, 0, 0, 0, 0]
+      ) || [ 0, 0, 0, 0, 0, 0 ]
 
       gross_f = gross.to_f
       discounts_f = discount_amount.to_f
@@ -440,7 +440,7 @@ module Dashboard
         }
       end
 
-      ranked = states.select { |state| state[:orders_count].positive? }.sort_by { |state| [-state[:orders_count], -state[:net_revenue]] }
+      ranked = states.select { |state| state[:orders_count].positive? }.sort_by { |state| [ -state[:orders_count], -state[:net_revenue] ] }
 
       {
         states: states,
@@ -486,7 +486,7 @@ module Dashboard
           discount_total: discount.to_f.round(2),
           net_revenue: net_revenue.to_f.round(2)
         }
-      end.sort_by { |row| [-row[:orders_count], -row[:discount_total]] }.first(10)
+      end.sort_by { |row| [ -row[:orders_count], -row[:discount_total] ] }.first(10)
 
       commercial_discount_total = uncoded_discount_total
       commercial_discount_orders_count = uncoded_discount_orders_count
@@ -640,7 +640,7 @@ module Dashboard
         unmatched_skus_count: log_metadata["unmatched_count"].to_i,
         latest_idworks_product_cost_sync_at: latest_idworks_cost_log&.finished_at,
         latest_idworks_order_sync_at: latest_idworks_order_log&.finished_at,
-        latest_idworks_sync_at: [latest_idworks_cost_log&.finished_at, latest_idworks_order_log&.finished_at].compact.max,
+        latest_idworks_sync_at: [ latest_idworks_cost_log&.finished_at, latest_idworks_order_log&.finished_at ].compact.max,
         latest_yampi_order_sync_at: latest_yampi_log&.finished_at,
         latest_idworks_unmatched_skus: Array(log_metadata["unmatched"]).first(10)
       }.merge(integration_health_metadata(latest_yampi_log, latest_idworks_cost_log, latest_idworks_order_log))
@@ -663,7 +663,7 @@ module Dashboard
       end
 
       if tenant.integrations.where(provider: "idworks", status: "connected").exists?
-        latest_idworks_at = [latest_idworks_cost_log&.finished_at, latest_idworks_order_log&.finished_at].compact.max
+        latest_idworks_at = [ latest_idworks_cost_log&.finished_at, latest_idworks_order_log&.finished_at ].compact.max
         delayed << { provider: "idworks", reason: "sincronização atrasada" } if latest_idworks_at.nil? || latest_idworks_at < 12.hours.ago
       end
 
@@ -1012,12 +1012,13 @@ module Dashboard
       counts.values.sort_by { |e| [ -e[:carts_count], -e[:total_qty] ] }.first(limit)
     end
 
-    # Freight margin from LucroFrete's matched real orders, read from the
-    # locally synced freight_margin_dailies (see
-    # Integrations::Lucrofrete::MarginSyncService) — never hits the
-    # LucroFrete API on dashboard load. Honors the summary's period and
-    # channel filters. margin_percent is recomputed as a weighted total
-    # (margin / charged), not an average of daily percents.
+    # Freight margin is read from locally synced freight_margin_dailies —
+    # never from an external API on dashboard load. "Custo real" has a
+    # channel-specific source: carrier cost via LucroFrete/Melhor Envio for
+    # Yampi-compatible shipments, and TikTok Shop's own
+    # payment.original_shipping_fee for TikTok platform logistics. Honors the
+    # summary's period and channel filters. margin_percent is recomputed as a
+    # weighted total (margin / charged), not an average of daily percents.
     def build_freight_margin(period)
       return empty_freight_margin unless freight_margin_available?
 

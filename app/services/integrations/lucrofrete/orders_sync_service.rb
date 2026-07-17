@@ -9,13 +9,14 @@ module Integrations
     # available for quote analysis, but must not write real_freight_cost.
     #
     # Channel-aware: local orders are matched by order_number in the Yampi
-    # channel first (historical behavior), then tenant-wide — so TikTok Shop
-    # (and future channels) shipments dispatched through the same carrier
-    # account also get real_freight_cost and their own per-channel
-    # freight_margin_dailies rows, which is what makes the dashboard's
-    # "Margem de frete" gadget respond to the TikTok channel filter.
+    # channel first (historical behavior), then tenant-wide for channels that
+    # can share the same carrier/LucroFrete account. TikTok Shop is excluded:
+    # its platform logistics never flows through Melhor Envio/LucroFrete, and
+    # its freight_margin_dailies are rebuilt from payment.original_shipping_fee
+    # by Integrations::Tiktok::FreightMarginDailySyncService.
     class OrdersSyncService
       MODES = %w[backfill incremental].freeze
+      EXCLUDED_EXTERNAL_FREIGHT_PLATFORMS = %w[tiktok].freeze
       DEFAULT_PER_PAGE = 50
       INCREMENTAL_DAYS = 2
       BACKFILL_PAGE_SLEEP = 120
@@ -103,6 +104,7 @@ module Integrations
         @freight_margin_orders_count = 0
         @freight_margin_days_upserted = 0
         @freight_margin_skipped_count = 0
+        @external_freight_excluded_count = 0
         @reports_upserted_count = 0
         @reports_skipped_count = 0
         @total_orders_reported = nil
@@ -116,6 +118,7 @@ module Integrations
         @unmatched_examples = []
         @invalid_cost_examples = []
         @freight_margin_skipped_examples = []
+        @external_freight_excluded_examples = []
         @reports_skipped_examples = []
         @backfill_plan_logged = false
       end
@@ -251,6 +254,13 @@ module Integrations
 
         @matched_count += 1
         order = find_local_order(order_number)
+
+        if order.nil? && external_freight_excluded_order_number?(order_number)
+          @external_freight_excluded_count += 1
+          record_external_freight_excluded_example(raw, order_number)
+          return
+        end
+
         aggregate_freight_margin(raw, order)
 
         unless order
@@ -285,17 +295,33 @@ module Integrations
       end
 
       # Yampi primeiro (comportamento histórico), com fallback tenant-wide
-      # para os demais canais (ex: pedidos TikTok Shop despachados pela
-      # mesma conta LucroFrete/transportadora). O fallback só aceita match
-      # inequívoco — order_number repetido entre canais fica de fora.
+      # para canais que usam uma transportadora externa compatível com a
+      # conta LucroFrete. TikTok fica fora porque o custo real vem do próprio
+      # TikTok Shop (Order#original_shipping_fee), não do Melhor Envio.
+      # O fallback só aceita match inequívoco — order_number repetido entre
+      # canais fica de fora.
       def find_local_order(order_number)
         return nil if order_number.blank?
 
         order = tenant.orders.find_by(channel: channel, order_number: order_number)
         return order if order
 
-        candidates = tenant.orders.where(order_number: order_number).limit(2).to_a
+        candidates = tenant.orders
+          .joins(:channel)
+          .where(order_number: order_number)
+          .where.not(channels: { platform: EXCLUDED_EXTERNAL_FREIGHT_PLATFORMS })
+          .limit(2)
+          .to_a
         candidates.size == 1 ? candidates.first : nil
+      end
+
+      def external_freight_excluded_order_number?(order_number)
+        return false if order_number.blank?
+
+        tenant.orders
+          .joins(:channel)
+          .where(order_number: order_number, channels: { platform: EXCLUDED_EXTERNAL_FREIGHT_PLATFORMS })
+          .exists?
       end
 
       def parse_money(value)
@@ -367,10 +393,9 @@ module Integrations
       # A agregação diária é por canal do pedido local casado. Pedidos do
       # canal padrão (yampi) — e os não encontrados localmente, como sempre
       # foi — usam os valores do próprio LucroFrete. Pedidos de outros
-      # canais (ex: TikTok Shop) usam como "cobrado" o frete que o canal
-      # cobrou do cliente (orders.freight ← payment.shipping_fee) e como
-      # custo o valor real da transportadora vindo do LucroFrete; a margem
-      # é recalculada dessa dupla.
+      # canais compatíveis usam como "cobrado" o frete que o canal cobrou do
+      # cliente e como custo o valor real da transportadora vindo do
+      # LucroFrete; a margem é recalculada dessa dupla. TikTok não entra aqui.
       def aggregate_freight_margin(raw, order = nil)
         return unless freight_margin_available?
 
@@ -541,6 +566,17 @@ module Integrations
         }
       end
 
+      def record_external_freight_excluded_example(raw, order_number)
+        return if @external_freight_excluded_examples.size >= MAX_EXAMPLES
+
+        @external_freight_excluded_examples << {
+          lucrofrete_order_id: raw["id"],
+          order_number: order_number.presence,
+          platform: "tiktok",
+          reason: "platform_logistics_cost_from_order_original_shipping_fee"
+        }
+      end
+
       def record_order_report_skip(raw, reason)
         @reports_skipped_count += 1
         return if @reports_skipped_examples.size >= MAX_EXAMPLES
@@ -572,7 +608,7 @@ module Integrations
             trigger: trigger,
             mode: mode,
             channel: "lucrofrete",
-            local_order_channel: "yampi (fallback tenant-wide para outros canais)",
+            local_order_channel: "yampi (fallback tenant-wide exceto tiktok)",
             channel_credential_id: channel_credential.id,
             source_endpoint: "reports/orders",
             window_from: window_from.iso8601,
@@ -615,6 +651,7 @@ module Integrations
           freight_margin_orders_count: @freight_margin_orders_count,
           freight_margin_days_upserted: @freight_margin_days_upserted,
           freight_margin_skipped_count: @freight_margin_skipped_count,
+          external_freight_excluded_count: @external_freight_excluded_count,
           reports_upserted_count: @reports_upserted_count,
           reports_skipped_count: @reports_skipped_count,
           error_count: item_errors.size,
@@ -623,6 +660,7 @@ module Integrations
           unmatched_examples: @unmatched_examples,
           invalid_cost_examples: @invalid_cost_examples,
           freight_margin_skipped_examples: @freight_margin_skipped_examples,
+          external_freight_excluded_examples: @external_freight_excluded_examples,
           reports_skipped_examples: @reports_skipped_examples,
           errors: item_errors.first(MAX_EXAMPLES)
         }

@@ -28,6 +28,7 @@ module Integrations
           mark_cart_converted(order)
           run_conflict_detection(order)
           run_stock_deduction(order)
+          sync_tiktok_freight_margin(order)
           Result.new(ok: true, order: order, error_message: nil)
         end
       rescue ActiveRecord::RecordInvalid => e
@@ -46,6 +47,7 @@ module Integrations
 
       def upsert_order(channel)
         order = @tenant.orders.find_or_initialize_by(channel: channel, external_id: @normalized[:external_id])
+        remember_tiktok_freight_margin_date(order, channel)
         attrs = {
           channel:          channel,
           order_number:     @normalized[:order_number],
@@ -82,6 +84,7 @@ module Integrations
 
         order.assign_attributes(attrs)
         order.save!
+        remember_tiktok_freight_margin_date(order, channel)
         order
       end
 
@@ -239,6 +242,23 @@ module Integrations
         Integrations::OrderStockDeductionService.call(order)
       rescue => e
         Rails.logger.error("[Integrations::Orders::UpsertOrder] OrderStockDeductionService failed for order_id=#{order.id}: #{e.message}")
+      end
+
+      def remember_tiktok_freight_margin_date(order, channel)
+        return unless channel&.platform == "tiktok"
+
+        date = order.ordered_at&.in_time_zone&.to_date
+        return unless date
+
+        (@tiktok_freight_margin_dates ||= []) << date
+      end
+
+      def sync_tiktok_freight_margin(order)
+        return unless order.channel&.platform == "tiktok"
+
+        Integrations::Tiktok::FreightMarginDailySyncService.call(order, dates: @tiktok_freight_margin_dates)
+      rescue => e
+        Rails.logger.error("[Integrations::Orders::UpsertOrder] TikTok freight margin sync failed for order_id=#{order.id}: #{e.message}")
       end
     end
   end

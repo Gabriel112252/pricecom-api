@@ -85,15 +85,15 @@ RSpec.describe Integrations::Lucrofrete::OrdersSyncService do
     expect(report.match_status).to eq("matched")
   end
 
-  it "matches non-yampi orders tenant-wide and aggregates their freight margin under the order's channel" do
-    tiktok_channel = tenant.channels.create!(name: "TikTok Shop", platform: "tiktok")
-    tiktok_order = tenant.orders.create!(
-      channel: tiktok_channel,
+  it "matches non-yampi carrier-compatible orders tenant-wide and aggregates under the order's channel" do
+    shopify_channel = tenant.channels.create!(name: "Shopify", platform: "shopify")
+    shopify_order = tenant.orders.create!(
+      channel: shopify_channel,
       external_id: "580100000000000001",
       order_number: "580100000000000001",
       ordered_at: Time.zone.local(2026, 7, 16, 10, 0, 0),
       gross_value: 126.64,
-      freight: 6.84, # payment.shipping_fee cobrado do cliente
+      freight: 6.84,
       order_type: "sale"
     )
     allow(client).to receive(:fetch_orders_report).and_return(
@@ -106,7 +106,7 @@ RSpec.describe Integrations::Lucrofrete::OrdersSyncService do
             "id" => "aa48f77b-8480-4a1e-825f-daa8330f304c",
             "order_number" => "580100000000000001",
             "order_created_at" => "2026-07-16T13:00:00.000Z",
-            "freight_charged" => 0.0, # LucroFrete não conhece o frete cobrado pelo TikTok
+            "freight_charged" => 0.0,
             "freight_cost" => 14.85,
             "margin_value" => -14.85,
             "is_free_shipping" => false,
@@ -126,14 +126,62 @@ RSpec.describe Integrations::Lucrofrete::OrdersSyncService do
     )
 
     expect(result.success?).to eq(true)
-    expect(tiktok_order.reload.real_freight_cost).to eq(BigDecimal("14.85"))
+    expect(shopify_order.reload.real_freight_cost).to eq(BigDecimal("14.85"))
 
-    daily = tenant.freight_margin_dailies.find_by!(channel: tiktok_channel, date: Date.new(2026, 7, 16))
+    daily = tenant.freight_margin_dailies.find_by!(channel: shopify_channel, date: Date.new(2026, 7, 16))
     expect(daily.order_count).to eq(1)
     expect(daily.freight_charged).to eq(BigDecimal("6.84"))  # orders.freight, não o valor do LucroFrete
     expect(daily.freight_cost).to eq(BigDecimal("14.85"))
     expect(daily.margin_value).to eq(BigDecimal("-8.01"))
     expect(tenant.freight_margin_dailies.where(channel: channel)).to be_empty
+  end
+
+  it "does not match TikTok orders against LucroFrete or aggregate them from external freight cost" do
+    tiktok_channel = tenant.channels.create!(name: "TikTok Shop", platform: "tiktok")
+    tiktok_order = tenant.orders.create!(
+      channel: tiktok_channel,
+      external_id: "584933315891857248",
+      order_number: "584933315891857248",
+      ordered_at: Time.zone.local(2026, 7, 16, 10, 0, 0),
+      gross_value: 126.64,
+      freight: 6.84,
+      original_shipping_fee: 18.64,
+      order_type: "sale"
+    )
+    allow(client).to receive(:fetch_orders_report).and_return(
+      {
+        "total" => 1,
+        "page" => 1,
+        "per_page" => 50,
+        "orders" => [
+          {
+            "id" => "bb48f77b-8480-4a1e-825f-daa8330f304c",
+            "order_number" => "584933315891857248",
+            "order_created_at" => "2026-07-16T13:00:00.000Z",
+            "freight_charged" => 0.0,
+            "freight_cost" => 14.85,
+            "margin_value" => -14.85,
+            "is_free_shipping" => false,
+            "match_status" => "matched",
+            "quote_log_id" => "91516d40-77db-43c4-b3d1-b76b53345bbb"
+          }
+        ]
+      }
+    )
+
+    result = described_class.call(
+      credential,
+      mode: "incremental",
+      start_date: Date.new(2026, 7, 16),
+      end_date: Date.new(2026, 7, 16),
+      trigger: "spec"
+    )
+
+    expect(result.success?).to eq(true)
+    expect(tiktok_order.reload.real_freight_cost).to be_nil
+    expect(tenant.freight_margin_dailies.where(channel: tiktok_channel)).to be_empty
+    expect(tenant.freight_margin_dailies.where(channel: channel)).to be_empty
+    expect(result.metadata[:external_freight_excluded_count]).to eq(1)
   end
 
   it "skips without calling LucroFrete when freight source is not lucrofrete" do
