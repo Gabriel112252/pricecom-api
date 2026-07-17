@@ -67,10 +67,20 @@ RSpec.describe Financials::PagarmeSyncService do
       .to_return(status: 200, body: body, headers: { "Content-Type" => "application/json" })
   end
 
+  # charge_id → external_order_id map (build_charge_to_order_map): vazio
+  # aqui de propósito — este spec já resolve a order via o
+  # FinancialSettlementItem legado (legacy_item), então o teste continua
+  # cobrindo esse fallback exatamente como antes.
+  def stub_orders(body: { data: [], paging: { next: nil } }.to_json)
+    stub_request(:get, %r{\Ahttps://api\.pagar\.me/core/v5/orders})
+      .to_return(status: 200, body: body, headers: { "Content-Type" => "application/json" })
+  end
+
   describe "a successful sync" do
     before do
       travel_to Time.zone.parse("2026-07-15T12:00:00Z")
       stub_payables
+      stub_orders
     end
 
     after { travel_back }
@@ -104,6 +114,7 @@ RSpec.describe Financials::PagarmeSyncService do
     before do
       travel_to Time.zone.parse("2026-07-15T12:00:00Z")
       stub_payables
+      stub_orders
     end
 
     after { travel_back }
@@ -123,6 +134,8 @@ RSpec.describe Financials::PagarmeSyncService do
   describe "authentication failure" do
     it "marks the financial source as errored" do
       stub_request(:get, "https://api.pagar.me/core/v5/payables")
+        .to_return(status: 401, body: { message: "Unauthorized" }.to_json)
+      stub_request(:get, %r{\Ahttps://api\.pagar\.me/core/v5/orders})
         .to_return(status: 401, body: { message: "Unauthorized" }.to_json)
 
       result = described_class.call(financial_source, days: 30)

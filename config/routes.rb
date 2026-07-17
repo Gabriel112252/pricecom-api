@@ -84,6 +84,11 @@ Rails.application.routes.draw do
       # Financial Sources
       resources :financial_sources, only: [ :index, :show ]
 
+      # Payment fee rules — cadastro manual das taxas negociadas com a
+      # adquirente (Pagar.me), usado por PagarmePayableSyncService pra
+      # validar a taxa cobrada contra a negociada.
+      resources :payment_fee_rules, only: [ :index, :create, :update, :destroy ]
+
       # Financial Settlements
       resources :financial_settlements, only: [ :index, :show, :create ] do
         collection do

@@ -17,6 +17,11 @@ class FinancialSettlementItem < ApplicationRecord
   validates :transaction_type, inclusion: { in: TRANSACTION_TYPES }
   validates(*NON_NEGATIVE_FIELDS, numericality: { greater_than_or_equal_to: 0 })
   validates :difference_amount, numericality: true
+  # nil = sem PaymentFeeRule cadastrada pra essa combinação (não "bateu
+  # certinho") — diferente de expected_amount/difference_amount acima, que
+  # são sempre preenchidos pela reconciliação pedido x repasse.
+  validates :expected_fee_amount, numericality: { greater_than_or_equal_to: 0 }, allow_nil: true
+  validates :fee_difference_amount, numericality: true, allow_nil: true
 
   def calculated_net_amount
     gross_amount.to_f - fee_amount.to_f - discount_amount.to_f - refund_amount.to_f - chargeback_amount.to_f

@@ -5,7 +5,7 @@ module Dashboard
   # tenant through different auth paths but need the exact same payload.
   class BuildSummary
     FINANCIAL_CONFLICT_TYPES = %w[
-      nf_discount_mismatch nf_freight_mismatch settlement_amount_mismatch missing_settlement
+      nf_discount_mismatch nf_freight_mismatch settlement_amount_mismatch missing_settlement fee_rate_mismatch
     ].freeze
     BRAZIL_STATES = {
       "AC" => "Acre",

@@ -21,6 +21,7 @@ class Tenant < ApplicationRecord
   has_many :channel_credentials, dependent: :destroy
   has_many :channel_product_listings, dependent: :destroy
   has_many :data_source_configs, dependent: :destroy
+  has_many :payment_fee_rules, dependent: :destroy
 
   validates :name, presence: true
   validates :slug, presence: true, uniqueness: true

@@ -2,7 +2,16 @@ module Financials
   class PagarmePayableSyncService
     DEFAULT_DAYS = 7
     DEFAULT_LOOKAHEAD_DAYS = 30
+    # /orders pagina por created_since/created_until (data de CRIAÇÃO do
+    # pedido), enquanto /payables pagina por payment_date (data de
+    # PAGAMENTO) — o mesmo evento financeiro tem duas datas diferentes.
+    # Esse lookback amplia a janela de created_since pra trás do payment_date
+    # pedido, senão perderíamos o link de pedidos criados antes do período
+    # (comum: parcelamento paga em datas bem depois da criação do pedido).
+    DEFAULT_ORDER_LOOKBACK_DAYS = 30
     LOG_ACTION = "pagarme_payable_sync".freeze
+    FEE_RATE_MISMATCH_CONFLICT_TYPE = "fee_rate_mismatch".freeze
+    DEFAULT_FEE_TOLERANCE = 0.05
 
     Result = Struct.new(:outcome, :created_count, :updated_count, :skipped, :error_message, :from, :to, keyword_init: true) do
       def success? = outcome == :success
@@ -29,6 +38,7 @@ module Financials
     def call
       @log = start_log
       adapter = Integrations::PagarmeAdapter.new(financial_source.credentials)
+      @charge_to_order_id = build_charge_to_order_map(adapter)
       payables = adapter.fetch_payables(
         payment_date_from: from,
         payment_date_to: to,
@@ -67,7 +77,25 @@ module Financials
     private
 
     attr_reader :financial_source, :tenant, :days, :from, :to, :status, :created, :updated, :skipped,
-      :log, :affected_settlement_ids
+      :log, :affected_settlement_ids, :charge_to_order_id
+
+    # charge_id → external_order_id via /orders (Pagar.me v5 Orders API),
+    # o mesmo vínculo que fetch_transactions já constrói (charge.code ||
+    # order.code) mas nunca era usado aqui. Mais confiável que os fallbacks
+    # abaixo, que dependem de outro FinancialSettlementItem já ter sido
+    # linkado antes — sem bootstrap, ficavam sempre vazios num tenant novo.
+    def build_charge_to_order_map(adapter)
+      orders_from = from - order_lookback_days.days
+      transactions = adapter.fetch_transactions(from: orders_from, to: to)
+
+      transactions.each_with_object({}) do |tx, map|
+        map[tx[:external_id]] = tx[:external_order_id] if tx[:external_id].present? && tx[:external_order_id].present?
+      end
+    end
+
+    def order_lookback_days
+      configured_integer("payables_order_lookback_days", DEFAULT_ORDER_LOOKBACK_DAYS)
+    end
 
     def process_payable(payable)
       if payable[:payable_id].blank?
@@ -139,6 +167,9 @@ module Financials
       item = find_existing_settlement_item(payable[:payable_id]) ||
         settlement.financial_settlement_items.build(external_id: payable[:payable_id])
       previous_settlement_id = item.financial_settlement_id
+      fee_amount = total_fee(payable)
+      expected_fee = expected_fee_amount_for(payable)
+      fee_difference = expected_fee.nil? ? nil : (fee_amount - expected_fee).round(2)
 
       item.assign_attributes(
         tenant: tenant,
@@ -147,18 +178,115 @@ module Financials
         external_order_id: external_order_id_for(order, payable),
         transaction_type: "sale",
         gross_amount: payable[:amount],
-        fee_amount: total_fee(payable),
+        fee_amount: fee_amount,
         net_amount: payable[:net_amount],
+        expected_fee_amount: expected_fee,
+        fee_difference_amount: fee_difference,
         transaction_date: payable[:accrual_date] || payable[:date_created],
         payout_date: payable[:payment_date],
         metadata: payable_metadata(item.metadata, payable)
       )
       item.save!
 
+      # Campos independentes de expected_amount/difference_amount (usados
+      # abaixo por MatchSettlementItem para reconciliação pedido x repasse)
+      # — não há colisão, cada mecanismo tem suas próprias colunas.
       Financials::MatchSettlementItem.call(item)
+      sync_fee_rate_conflict(item, order, fee_difference)
       track_settlement(settlement.id)
       track_settlement(previous_settlement_id) if previous_settlement_id.present? && previous_settlement_id != settlement.id
       item
+    end
+
+    # Taxa esperada pela regra negociada (PaymentFeeRule) vigente na data da
+    # transação, casada por payment_method + card_brand (quando cartão) +
+    # faixa de parcelamento. Sem regra cadastrada pra essa combinação,
+    # retorna nil — não assume 0, que seria indistinguível de "bateu
+    # certinho".
+    def expected_fee_amount_for(payable)
+      rule = PaymentFeeRule.find_for(
+        tenant: tenant,
+        payment_method: payable[:payment_method],
+        card_brand: payable[:card_brand],
+        installment: payable[:installment],
+        date: (payable[:accrual_date] || payable[:date_created])&.to_date
+      )
+      return nil unless rule
+
+      amount = payable[:amount].to_f
+      rate_component = rule.rate_type == "percentage" ? amount * rule.rate_value.to_f / 100.0 : rule.rate_value.to_f
+      fixed_component = rule.fixed_fee_gateway.to_f + rule.fixed_fee_antifraud.to_f
+      fixed_component += rule.fixed_fee_boleto.to_f if payable[:payment_method] == "boleto"
+
+      # anticipation_fee_amount do payable já está embutido em fee_amount
+      # (ver total_fee) quando o pagamento foi antecipado (payment_date <
+      # original_payment_date) — inclui o componente esperado só nesse caso,
+      # pra comparar o mesmo total. withdrawal_fee não entra: é taxa de
+      # saque, não de transação.
+      anticipation_component = anticipated?(payable) ? amount * rule.anticipation_rate.to_f / 100.0 : 0.0
+
+      (rate_component + fixed_component + anticipation_component).round(2)
+    end
+
+    def anticipated?(payable)
+      payable[:payment_date].present? && payable[:original_payment_date].present? &&
+        payable[:payment_date] < payable[:original_payment_date]
+    end
+
+    def sync_fee_rate_conflict(item, order, fee_difference)
+      return if fee_difference.nil?
+
+      if fee_difference.abs > fee_tolerance
+        upsert_fee_rate_conflict(item, order, fee_difference)
+      else
+        resolve_fee_rate_conflict(item)
+      end
+    end
+
+    def find_open_fee_rate_conflict(item)
+      AuditConflict
+        .where(tenant: tenant, conflict_type: FEE_RATE_MISMATCH_CONFLICT_TYPE, status: "open")
+        .where("metadata ->> 'financial_settlement_item_id' = ?", item.id.to_s)
+        .first
+    end
+
+    def upsert_fee_rate_conflict(item, order, fee_difference)
+      conflict = find_open_fee_rate_conflict(item) || AuditConflict.new(
+        tenant: tenant,
+        conflict_type: FEE_RATE_MISMATCH_CONFLICT_TYPE,
+        status: "open"
+      )
+
+      conflict.assign_attributes(
+        order: order,
+        severity: "medium",
+        status: "open",
+        source: "auto",
+        expected_value: item.expected_fee_amount,
+        actual_value: item.fee_amount,
+        difference: fee_difference,
+        metadata: {
+          "financial_settlement_item_id" => item.id,
+          "financial_settlement_id" => item.financial_settlement_id,
+          "financial_source_id" => financial_source.id,
+          "pagarme_payment_method" => item.metadata["pagarme_payment_method"],
+          "pagarme_card_brand" => item.metadata["pagarme_card_brand"],
+          "pagarme_installment" => item.metadata["pagarme_installment"]
+        }
+      )
+      conflict.save!
+    end
+
+    def resolve_fee_rate_conflict(item)
+      conflict = find_open_fee_rate_conflict(item)
+      return unless conflict
+
+      conflict.update!(status: "resolved", resolved_at: Time.current)
+    end
+
+    def fee_tolerance
+      value = financial_source.settings["fee_rate_mismatch_tolerance"]
+      value.to_f.positive? ? value.to_f : DEFAULT_FEE_TOLERANCE
     end
 
     def find_existing_settlement_item(external_id)
@@ -177,6 +305,7 @@ module Financials
         "pagarme_transaction_id" => payable[:transaction_id],
         "pagarme_recipient_id" => payable[:recipient_id],
         "pagarme_payment_method" => payable[:payment_method],
+        "pagarme_card_brand" => payable[:card_brand],
         "pagarme_status" => payable[:status],
         "pagarme_installment" => payable[:installment],
         "pagarme_fee_amount" => payable[:fee_amount],
@@ -187,9 +316,19 @@ module Financials
     end
 
     def find_order_for(payable)
-      order_from_payload_reference(payable) ||
+      order_from_charge_map(payable[:charge_id]) ||
+        order_from_payload_reference(payable) ||
         order_from_charge_id(payable[:charge_id]) ||
         order_from_transaction_id(payable[:transaction_id])
+    end
+
+    def order_from_charge_map(charge_id)
+      return nil if charge_id.blank?
+
+      external_order_id = charge_to_order_id[charge_id]
+      return nil if external_order_id.blank?
+
+      tenant.orders.find_by(external_id: external_order_id) || tenant.orders.find_by(order_number: external_order_id)
     end
 
     def order_from_payload_reference(payable)

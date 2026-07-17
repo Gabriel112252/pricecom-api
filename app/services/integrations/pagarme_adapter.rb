@@ -27,8 +27,8 @@ module Integrations
     # → [{ payable_id:, status:, amount:, fee_amount:,
     #      anticipation_fee_amount:, net_amount:, installment:,
     #      transaction_id:, charge_id:, recipient_id:, payment_date:,
-    #      original_payment_date:, payment_method:, accrual_date:,
-    #      date_created:, raw_payload: }]
+    #      original_payment_date:, payment_method:, card_brand:,
+    #      accrual_date:, date_created:, raw_payload: }]
     #
     # Cursor pagination only: Pagar.me is deprecating page pagination for
     # this endpoint, so the request carries forward_cursor when the API
@@ -101,12 +101,26 @@ module Integrations
         charge_id:               payable["charge_id"],
         recipient_id:            payable["recipient_id"],
         payment_method:          payable["payment_method"],
+        card_brand:              extract_card_brand(payable),
         payment_date:            parse_date(payable["payment_date"])&.to_date,
         original_payment_date:   parse_date(payable["original_payment_date"])&.to_date,
         accrual_date:            parse_date(payable["accrual_date"]),
         date_created:            parse_date(payable["date_created"]),
         raw_payload:             payable
       }
+    end
+
+    # Best-effort: a forma exata do objeto card no /payables (vs. o card
+    # embarcado em charges) ainda não foi confirmada contra um payload real
+    # de produção — como o promocode da Yampi, mantém fallback defensivo em
+    # vez de assumir um único caminho. nil (não bloqueado) quando ausente,
+    # ex: pix/boleto não têm bandeira.
+    def extract_card_brand(payable)
+      brand = payable.dig("card", "brand") ||
+        payable.dig("last_transaction", "card", "brand") ||
+        payable.dig("charge", "last_transaction", "card", "brand")
+
+      brand.to_s.downcase.presence
     end
 
     def next_cursor(body)

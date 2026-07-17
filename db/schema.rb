@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_07_16_120000) do
+ActiveRecord::Schema[7.2].define(version: 2026_07_17_010100) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -200,6 +200,8 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_16_120000) do
     t.jsonb "metadata", default: {}
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.decimal "expected_fee_amount", precision: 12, scale: 2
+    t.decimal "fee_difference_amount", precision: 12, scale: 2
     t.index ["external_order_id"], name: "index_financial_settlement_items_on_external_order_id"
     t.index ["financial_settlement_id", "status"], name: "idx_financial_settlement_items_on_settlement_id_and_status"
     t.index ["financial_settlement_id"], name: "index_financial_settlement_items_on_financial_settlement_id"
@@ -548,6 +550,28 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_16_120000) do
     t.index ["tenant_id"], name: "index_orders_on_tenant_id"
   end
 
+  create_table "payment_fee_rules", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.string "payment_method", null: false
+    t.string "card_brand"
+    t.integer "installments_from", default: 1, null: false
+    t.integer "installments_to", default: 1, null: false
+    t.string "rate_type", null: false
+    t.decimal "rate_value", precision: 8, scale: 4, null: false
+    t.decimal "fixed_fee_boleto", precision: 10, scale: 2, default: "0.0"
+    t.decimal "fixed_fee_gateway", precision: 10, scale: 2, default: "0.0"
+    t.decimal "fixed_fee_antifraud", precision: 10, scale: 2, default: "0.0"
+    t.decimal "withdrawal_fee", precision: 10, scale: 2, default: "0.0"
+    t.decimal "anticipation_rate", precision: 8, scale: 4, default: "0.0"
+    t.date "valid_from", null: false
+    t.date "valid_until"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["tenant_id", "payment_method", "card_brand"], name: "idx_payment_fee_rules_on_tenant_method_brand"
+    t.index ["tenant_id", "valid_from"], name: "index_payment_fee_rules_on_tenant_id_and_valid_from"
+    t.index ["tenant_id"], name: "index_payment_fee_rules_on_tenant_id"
+  end
+
   create_table "pricing_rules", force: :cascade do |t|
     t.bigint "product_id", null: false
     t.bigint "channel_id", null: false
@@ -657,6 +681,7 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_16_120000) do
   add_foreign_key "order_refunds", "tenants"
   add_foreign_key "orders", "channels"
   add_foreign_key "orders", "tenants"
+  add_foreign_key "payment_fee_rules", "tenants"
   add_foreign_key "pricing_rules", "channels"
   add_foreign_key "pricing_rules", "products"
   add_foreign_key "products", "tenants"
