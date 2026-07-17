@@ -393,4 +393,73 @@ RSpec.describe Financials::PagarmePayableSyncService do
       expect(AuditConflict.where(tenant: tenant, conflict_type: "fee_rate_mismatch").count).to eq(0)
     end
   end
+
+  describe "refund payables (negative amount)" do
+    # Janela própria (setembro), isolada dos demais describes deste arquivo.
+    before do
+      stub_request(:get, orders_url)
+        .with(query: hash_including("created_since" => "2026-08-02", "created_until" => "2026-09-30"))
+        .to_return(status: 200, body: { data: [], paging: { next: nil } }.to_json, headers: { "Content-Type" => "application/json" })
+    end
+
+    def stub_refund_payable(payable_id:, amount_cents:, fee_cents: 0, payment_method: "credit_card")
+      body = {
+        data: [
+          {
+            id: payable_id,
+            status: "paid",
+            amount: amount_cents,
+            fee: fee_cents,
+            anticipation_fee: 0,
+            installment: 1,
+            transaction_id: "tran_#{payable_id}",
+            recipient_id: "rp_1",
+            payment_date: "2026-09-21",
+            original_payment_date: "2026-09-21",
+            payment_method: payment_method,
+            originator_model: "refund",
+            accrual_at: "2026-09-10T12:00:00Z",
+            created_at: "2026-09-10T12:00:01Z"
+          }
+        ],
+        paging: { forward_cursor: nil }
+      }.to_json
+
+      stub_request(:get, payables_url)
+        .with(query: { "payment_date_since" => "2026-09-01", "payment_date_until" => "2026-09-30", "recipient_id" => "rp_1", "size" => "1000" })
+        .to_return(status: 200, body: body, headers: { "Content-Type" => "application/json" })
+    end
+
+    it "accepts a refund payable with negative amount instead of silently skipping it" do
+      stub_refund_payable(payable_id: "pay_refund_1", amount_cents: -10103)
+
+      result = described_class.call(financial_source, from: "2026-09-01", to: "2026-09-30")
+
+      expect(result.success?).to eq(true)
+      expect(result.skipped).to eq([])
+      item = FinancialSettlementItem.find_by(tenant: tenant, external_id: "pay_refund_1")
+      expect(item).to be_present
+      expect(item.transaction_type).to eq("refund")
+      expect(item.gross_amount).to eq(BigDecimal("-101.03"))
+      expect(item.net_amount).to eq(BigDecimal("-101.03"))
+
+      receivable = FinancialReceivable.find_by(payable_id: "pay_refund_1")
+      expect(receivable.amount).to eq(BigDecimal("-101.03"))
+    end
+
+    it "does not create a false-positive fee_rate_mismatch conflict for a refund even with a matching rule" do
+      tenant.payment_fee_rules.create!(
+        payment_method: "pix", card_brand: nil, installments_from: 1, installments_to: 1,
+        rate_type: "percentage", rate_value: 3.0, valid_from: Date.new(2026, 1, 1)
+      )
+      stub_refund_payable(payable_id: "pay_refund_2", amount_cents: -10103, payment_method: "pix")
+
+      described_class.call(financial_source, from: "2026-09-01", to: "2026-09-30")
+
+      item = FinancialSettlementItem.find_by!(tenant: tenant, external_id: "pay_refund_2")
+      expect(item.expected_fee_amount).to be_nil
+      expect(item.fee_difference_amount).to be_nil
+      expect(AuditConflict.where(tenant: tenant, conflict_type: "fee_rate_mismatch").count).to eq(0)
+    end
+  end
 end

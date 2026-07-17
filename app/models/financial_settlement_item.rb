@@ -9,13 +9,22 @@ class FinancialSettlementItem < ApplicationRecord
   TRANSACTION_TYPES = %w[sale refund fee chargeback adjustment payout].freeze
 
   NON_NEGATIVE_FIELDS = %i[
-    gross_amount fee_amount discount_amount refund_amount
-    chargeback_amount net_amount expected_amount
+    fee_amount discount_amount refund_amount
+    chargeback_amount expected_amount
   ].freeze
+
+  # gross_amount/net_amount podem ser negativos quando transaction_type é
+  # "refund" — dinheiro saindo, não entrando. Payables de estorno reais
+  # (originator_model: "refund", amount negativo) eram rejeitados
+  # silenciosamente pela validação >= 0 antes desse fix, descartando todo
+  # estorno da Pagar.me indefinidamente.
+  SIGNED_FOR_REFUND_FIELDS = %i[gross_amount net_amount].freeze
 
   validates :status, inclusion: { in: STATUSES }
   validates :transaction_type, inclusion: { in: TRANSACTION_TYPES }
   validates(*NON_NEGATIVE_FIELDS, numericality: { greater_than_or_equal_to: 0 })
+  validates(*SIGNED_FOR_REFUND_FIELDS, numericality: { greater_than_or_equal_to: 0 }, unless: :refund?)
+  validates(*SIGNED_FOR_REFUND_FIELDS, numericality: true, if: :refund?)
   validates :difference_amount, numericality: true
   # nil = sem PaymentFeeRule cadastrada pra essa combinação (não "bateu
   # certinho") — diferente de expected_amount/difference_amount acima, que
@@ -29,5 +38,9 @@ class FinancialSettlementItem < ApplicationRecord
 
   def matched?
     order_id.present? && status == "matched"
+  end
+
+  def refund?
+    transaction_type == "refund"
   end
 end

@@ -116,6 +116,37 @@ RSpec.describe Integrations::PagarmeAdapter do
       expect(first[:date_created]).to eq(Time.zone.parse("2026-07-10T12:00:01Z"))
     end
 
+    it "extracts originator_model and preserves the negative amount of a refund payable" do
+      refund_body = {
+        data: [
+          {
+            id: "pay_refund",
+            status: "paid",
+            amount: -10103,
+            fee: 0,
+            anticipation_fee: 0,
+            installment: 1,
+            transaction_id: "tran_refund",
+            payment_method: "credit_card",
+            originator_model: "refund",
+            accrual_at: "2026-07-12T12:00:00Z",
+            created_at: "2026-07-12T12:00:01Z"
+          }
+        ],
+        paging: { forward_cursor: nil }
+      }.to_json
+      stub_request(:get, payables_url)
+        .with(query: { "payment_date_since" => "2026-08-01", "payment_date_until" => "2026-08-31", "size" => "1000" })
+        .to_return(status: 200, body: refund_body, headers: { "Content-Type" => "application/json" })
+
+      payables = adapter.fetch_payables(payment_date_from: Date.new(2026, 8, 1), payment_date_to: Date.new(2026, 8, 31))
+
+      refund = payables.first
+      expect(refund[:originator_model]).to eq("refund")
+      expect(refund[:amount]).to eq(-101.03)
+      expect(refund[:net_amount]).to eq(-101.03)
+    end
+
     it "can include status and recipient_id filters" do
       stub_request(:get, payables_url)
         .with(query: {

@@ -8,10 +8,18 @@ class FinancialSettlement < ApplicationRecord
 
   STATUSES = %w[pending partial paid overdue disputed canceled].freeze
 
-  MONEY_FIELDS = %i[gross_amount fee_amount discount_amount refund_amount chargeback_amount net_amount].freeze
+  MONEY_FIELDS = %i[fee_amount discount_amount refund_amount chargeback_amount].freeze
+
+  # gross_amount/net_amount agregam TODOS os itens do settlement (que pode
+  # misturar venda e estorno no mesmo payment_date) — um dia com mais
+  # estorno que venda tem total líquido negativo legitimamente. Sem
+  # transaction_type próprio aqui (é uma soma de vários), diferente de
+  # FinancialSettlementItem: sinal de qualquer sinal é válido.
+  SIGNED_FIELDS = %i[gross_amount net_amount].freeze
 
   validates :status, inclusion: { in: STATUSES }
   validates(*MONEY_FIELDS, numericality: { greater_than_or_equal_to: 0 })
+  validates(*SIGNED_FIELDS, numericality: true)
 
   scope :pending,  -> { where(status: "pending") }
   scope :paid,     -> { where(status: "paid") }

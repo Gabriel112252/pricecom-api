@@ -176,7 +176,7 @@ module Financials
         financial_settlement: settlement,
         order: order,
         external_order_id: external_order_id_for(order, payable),
-        transaction_type: "sale",
+        transaction_type: transaction_type_for(payable),
         gross_amount: payable[:amount],
         fee_amount: fee_amount,
         net_amount: payable[:net_amount],
@@ -198,12 +198,23 @@ module Financials
       item
     end
 
+    # Só "refund" foi confirmado em produção até agora (originator_model);
+    # qualquer outro valor (incluindo nil, "order" etc.) vira "sale" — sem
+    # inventar mapeamento pra originator_model ainda não visto.
+    def transaction_type_for(payable)
+      payable[:originator_model] == "refund" ? "refund" : "sale"
+    end
+
     # Taxa esperada pela regra negociada (PaymentFeeRule) vigente na data da
     # transação, casada por payment_method + card_brand (quando cartão) +
     # faixa de parcelamento. Sem regra cadastrada pra essa combinação,
     # retorna nil — não assume 0, que seria indistinguível de "bateu
-    # certinho".
+    # certinho". Estornos ficam de fora: a taxa negociada é sobre a venda
+    # original, não existe "taxa esperada" pra um estorno — comparar geraria
+    # fee_rate_mismatch falso-positivo pra todo reembolso.
     def expected_fee_amount_for(payable)
+      return nil unless transaction_type_for(payable) == "sale"
+
       rule = PaymentFeeRule.find_for(
         tenant: tenant,
         payment_method: payable[:payment_method],

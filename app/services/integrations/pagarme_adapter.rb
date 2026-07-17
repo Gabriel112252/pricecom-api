@@ -28,7 +28,7 @@ module Integrations
     #      anticipation_fee_amount:, net_amount:, installment:,
     #      transaction_id:, charge_id:, recipient_id:, payment_date:,
     #      original_payment_date:, payment_method:, card_brand:,
-    #      accrual_date:, date_created:, raw_payload: }]
+    #      originator_model:, accrual_date:, date_created:, raw_payload: }]
     #
     # Cursor pagination only: Pagar.me is deprecating page pagination for
     # this endpoint, so the request carries forward_cursor when the API
@@ -102,6 +102,13 @@ module Integrations
         recipient_id:            payable["recipient_id"],
         payment_method:          payable["payment_method"],
         card_brand:              extract_card_brand(payable),
+        # Confirmado em produção (2026-07-17): payable de estorno vem com
+        # originator_model: "refund" e amount negativo (dinheiro saindo).
+        # Só "refund" foi observado até agora — qualquer outro valor (ou
+        # nil) é tratado como venda normal em
+        # PagarmePayableSyncService#transaction_type_for, sem inventar
+        # mapeamento pra originator_model ainda não visto.
+        originator_model:        payable["originator_model"],
         payment_date:            parse_date(payable["payment_date"])&.to_date,
         original_payment_date:   parse_date(payable["original_payment_date"])&.to_date,
         # Confirmado via payables.first[:raw_payload].keys em produção
