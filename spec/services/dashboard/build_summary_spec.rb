@@ -132,6 +132,38 @@ RSpec.describe Dashboard::BuildSummary do
     end
   end
 
+  describe "revenue breakdown card" do
+    it "closes the accounting equation including canceled orders and freight/taxes" do
+      order = make_order(channel_a, gross: 200, margin: 0, ordered_at: 1.day.ago, refund: 10)
+      order.update!(discount: 20, freight: 15)
+      make_order(channel_a, gross: 80, margin: 0, ordered_at: 1.day.ago).update!(status: "cancelado")
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      breakdown = result[:revenue_breakdown]
+      expect(breakdown).to include(
+        gross_revenue: 280.0,
+        discounts: 20.0,
+        cancellations_and_refunds: 90.0,
+        freight_and_taxes: 15.0,
+        net_revenue: 155.0
+      )
+      expect(breakdown[:gross_revenue] - breakdown[:discounts] - breakdown[:cancellations_and_refunds] - breakdown[:freight_and_taxes])
+        .to eq(breakdown[:net_revenue])
+      # O net histórico (séries, AOV, share) segue sem descontar frete/imposto.
+      expect(result[:kpis][:net_revenue]).to eq(170.0)
+    end
+
+    it "compares the breakdown net against the previous period" do
+      make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+      make_order(channel_a, gross: 50, margin: 0, ordered_at: 10.days.ago)
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      expect(result[:revenue_breakdown][:net_vs_previous_pct]).to eq(100.0)
+    end
+  end
+
   describe "regional and coupon payload" do
     it "summarizes orders by Brazilian state and coupon usage" do
       sp_order = make_order(channel_a, gross: 120, margin: 0, ordered_at: 1.day.ago)
@@ -180,6 +212,18 @@ RSpec.describe Dashboard::BuildSummary do
       )
       expect(result[:coupons][:breakdown].map { |row| row[:key] }).to include("commercial_discount", "shipping_subsidy")
       expect(result[:kpis]).to include(coupon_discount_total: 30.0, shipping_subsidy_total: 10.0)
+    end
+
+    it "ranks item-level discounts by product with pct over the item price" do
+      order = make_order(channel_a, gross: 200, margin: 0, ordered_at: 1.day.ago)
+      order.order_items.create!(sku: "SKU-A", name: "Produto A", quantity: 2, unit_price: 50, discount: 25)
+      order.order_items.create!(sku: "SKU-B", name: "Produto B", quantity: 1, unit_price: 100, discount: 10)
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      by_product = result[:coupons][:by_product]
+      expect(by_product.first).to include(sku: "SKU-A", discount_total: 25.0, discount_pct: 25.0, orders_count: 1)
+      expect(by_product.second).to include(sku: "SKU-B", discount_total: 10.0, discount_pct: 10.0)
     end
   end
 

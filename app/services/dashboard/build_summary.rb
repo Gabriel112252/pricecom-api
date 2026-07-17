@@ -72,6 +72,7 @@ module Dashboard
         period:                   { from: period[:from].iso8601, to: period[:to].iso8601 },
         granularity:              granularity,
         kpis:                     build_kpis(current_totals, prev_totals, data_quality, coupons, regional_sales).merge(exclusions),
+        revenue_breakdown:        build_revenue_breakdown(period, current_totals, prev_totals),
         financial_composition:    build_financial_composition(current_totals, data_quality),
         revenue_timeline:         build_revenue_timeline(period_rows, granularity),
         sales_by_channel:         build_sales_by_channel(orders_scope, current_totals),
@@ -305,6 +306,40 @@ module Dashboard
       }
     end
 
+    # Breakdown contábil do card de receita da Visão Geral. A bruta daqui
+    # INCLUI os pedidos cancelados do período (que ficam fora de todos os
+    # outros agregados via financial_orders) para que a conta feche linha a
+    # linha: bruta - descontos - cancelados/devolvidos - frete/imposto =
+    # líquida. Essa líquida desconta frete e imposto, diferente do :net
+    # histórico (gross - discounts - refunds) que alimenta séries, AOV e
+    # share por canal.
+    def build_revenue_breakdown(period, current_totals, prev_totals)
+      current  = revenue_breakdown_values(current_totals, canceled_amount_for(period))
+      previous = revenue_breakdown_values(prev_totals, canceled_amount_for(previous_period(period)))
+
+      current.merge(net_vs_previous_pct: pct_change(current[:net_revenue], previous[:net_revenue]))
+    end
+
+    def revenue_breakdown_values(totals, canceled_amount)
+      freight_and_taxes = totals[:freight] + totals[:taxes]
+
+      {
+        gross_revenue:             (totals[:gross] + canceled_amount).round(2),
+        discounts:                 totals[:discounts].round(2),
+        cancellations_and_refunds: (canceled_amount + totals[:refunds]).round(2),
+        freight_and_taxes:         freight_and_taxes.round(2),
+        net_revenue:               (totals[:net] - freight_and_taxes).round(2)
+      }
+    end
+
+    def canceled_amount_for(period)
+      orders_in_period(period)
+        .where(order_type: %w[sale refund])
+        .where("LOWER(COALESCE(status, '')) IN (?)", CANCELED_STATUS_ALIASES)
+        .sum(:gross_value)
+        .to_f
+    end
+
     def build_financial_composition(current_totals, data_quality)
       result_available = data_quality[:financial_status] == "complete"
       incomplete_reason = data_quality[:financial_status_reason]
@@ -527,6 +562,9 @@ module Dashboard
     # the channel normalizers), so it only sees discounts the channel
     # attributes to a specific item; order-level discounts with no item
     # split stay out of this cut (they're covered by the type breakdown).
+    # Sem margem por produto de propósito: cost_price está zerado em 100%
+    # de products/orders em produção (ProductCostSyncJob não persiste), então
+    # qualquer margem aqui seria enganosa até isso ser corrigido.
     def build_discount_by_product(scope)
       rows = OrderItem
         .where(order_id: scope.select(:id), is_gift: false)
@@ -538,14 +576,19 @@ module Dashboard
           :sku,
           :name,
           Arel.sql("COALESCE(SUM(order_items.discount), 0)"),
+          Arel.sql("COALESCE(SUM(order_items.quantity * order_items.unit_price), 0)"),
           Arel.sql("COUNT(DISTINCT order_items.order_id)")
         )
 
-      rows.map do |sku, name, discount_total, orders_count|
+      rows.map do |sku, name, discount_total, gross_total, orders_count|
+        discount_f = discount_total.to_f
+        gross_f = gross_total.to_f
+
         {
           sku: sku,
           name: name.presence || sku,
-          discount_total: discount_total.to_f.round(2),
+          discount_total: discount_f.round(2),
+          discount_pct: gross_f > 0 ? (discount_f / gross_f * 100).round(2) : 0.0,
           orders_count: orders_count.to_i
         }
       end
