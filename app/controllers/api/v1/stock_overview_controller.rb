@@ -28,14 +28,35 @@ module Api
 
         render json: {
           products: paged.map { |p| product_json(p, listings_by_product[p.id] || [], rules_by_product[p.id] || []) },
-          active_channels: current_tenant.channel_credentials
-            .where(status: "active", channel: Channel::PLATFORMS)
-            .pluck(:channel),
+          active_channels: active_channels,
           meta: pagination_meta(paged)
         }
       end
 
       private
+
+      # Union of (credential currently active) and (any real
+      # ChannelProductListing exists), not credential status alone.
+      #
+      # Root cause of a real bug (2026-07-21): TikTok's ChannelCredential
+      # spends real time outside "active" — ChannelCredentialsController#
+      # connect sets it to "pending" and returns early for tiktok
+      # specifically (it only reaches "active" via the separate OAuth
+      # callback), and ProductSyncService flips it to "error" on the next
+      # auth/API failure with no token-refresh flow anywhere to recover it
+      # automatically. None of that deletes the ChannelProductListing rows
+      # a past successful sync already created. Filtering on credential
+      # status alone made a channel with real, currently-displayed stock
+      # data (still shown with its own badges on the older Products.vue
+      # screen, which never checks credential status) silently disappear
+      # from this screen's filter dropdown. Credential status alone is
+      # kept too (not dropped) so a freshly connected channel can still be
+      # selected before its first sync has created any listing yet.
+      def active_channels
+        credential_channels = current_tenant.channel_credentials.where(status: "active", channel: Channel::PLATFORMS).pluck(:channel)
+        listing_channels = current_tenant.channel_product_listings.distinct.pluck(:channel)
+        (credential_channels | listing_channels).sort
+      end
 
       # Same filters as ProductsController#apply_filters, for the same
       # search/channel UX on this screen.

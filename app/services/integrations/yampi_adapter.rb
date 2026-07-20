@@ -251,6 +251,36 @@ module Integrations
       )
     end
 
+    # INVESTIGATED 2026-07-21, NOT CHANGED — production shows "1.0" for
+    # almost every product's Yampi stock, which reads as suspicious (many
+    # different real SKUs unlikely to share the same real count). The
+    # specific hypothesis raised (a boolean "has stock" flag being read as
+    # a quantity) is REFUTED by Yampi's own documented schema: on the
+    # standalone Sku resource (docs.yampi.com.br/api-reference/catalogo/
+    # skus/listar-skus), both `availability` ("Quantidade disponível em
+    # estoque") and `total_in_stock` ("Quantidade total em estoque") are
+    # documented as `integer` — real quantity fields, not booleans.
+    #
+    # What's still NOT confirmed: whether the embedded sku objects under
+    # `skus.data[]` (returned by GET /catalog/products?include=skus — the
+    # endpoint #fetch_products actually calls) carry the exact same fields
+    # as that standalone Sku resource. The docs for the products/list
+    # endpoint don't spell out the embedded shape at all (only the
+    # top-level Product/ProductAdditionalResponse schemas), so there's no
+    # official confirmation either way here — same class of "assumed
+    # shape never checked against a real embedded payload" risk that just
+    # turned out wrong for idworks' sku field (see IdworksAdapter). A "1.0
+    # for nearly every SKU" pattern is also just plausible as genuinely
+    # low/default real stock in a small store's Yampi catalog — not
+    # necessarily a bug at all.
+    #
+    # Blocked on confirming further: the only Yampi credential in this
+    # environment is a known non-working placeholder (403 on
+    # #authenticate, confirmed again 2026-07-21) — not a real Hidrabene
+    # store. Needs either a real working credential, or someone checking
+    # one specific SKU's stock count directly in the Yampi seller
+    # dashboard to compare against what this method reads for that same
+    # SKU. Not changing this extraction without one of those.
     def normalize_product(raw)
       {
         external_id:   raw["id"].to_s,

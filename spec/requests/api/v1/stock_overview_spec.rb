@@ -31,7 +31,31 @@ RSpec.describe "Stock Overview", type: :request do
       yampi = row["channels"].find { |c| c["channel"] == "yampi" }
       expect(yampi["stock_qty"]).to eq("8.0")
       expect(yampi["min_threshold"]).to be_nil # no rule for yampi
-      expect(JSON.parse(response.body)["active_channels"]).to eq([])
+      # Channels with real listings show up even with no ChannelCredential
+      # at all — see #active_channels for why credential status alone
+      # isn't a reliable signal that a channel has (or lacks) real data.
+      expect(JSON.parse(response.body)["active_channels"]).to eq([ "shopify", "yampi" ])
+    end
+
+    it "includes a channel with real listings even when its credential isn't active (e.g. pending/error) — the TikTok bug" do
+      product = tenant.products.create!(sku: "SKU-2", name: "Produto 2", cost_price: 10)
+      tenant.channel_product_listings.create!(product: product, channel: "tiktok", external_id: "1", stock_qty: 5)
+      tenant.channel_credentials.create!(channel: "tiktok", status: "error", credentials: { app_key: "k", app_secret: "s" })
+
+      get "/api/v1/stock_overview", headers: auth_headers(operador)
+
+      expect(JSON.parse(response.body)["active_channels"]).to include("tiktok")
+    end
+
+    it "includes a freshly connected channel with an active credential even before it has any listing yet" do
+      tenant.channel_credentials.create!(
+        channel: "shopify", status: "active",
+        credentials: { shop_domain: "loja.myshopify.com", access_token: "tok", webhook_secret: "wh" }
+      )
+
+      get "/api/v1/stock_overview", headers: auth_headers(operador)
+
+      expect(JSON.parse(response.body)["active_channels"]).to eq([ "shopify" ])
     end
 
     it "filters by SKU/name" do

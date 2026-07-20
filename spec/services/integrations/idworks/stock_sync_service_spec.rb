@@ -73,7 +73,7 @@ RSpec.describe Integrations::Idworks::StockSyncService do
       expect(snapshot.qty_safety_stock).to eq(BigDecimal("10.000"))
       expect(snapshot.abc_curve).to eq("A")
       expect(snapshot.lead_time_days).to eq(7)
-      expect(snapshot.raw_payload).to include("Sku" => "CAN-001", "QtyAvailable" => "42.000")
+      expect(snapshot.raw_payload).to include("IDSkuCompany" => "CAN-001", "QtyAvailable" => "42.000")
     end
 
     it "does not touch ChannelProductListing#stock_qty — that's per-channel stock, a different concept" do

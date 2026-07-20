@@ -15,14 +15,24 @@ module Integrations
   #     bare array, common wrappers such as Data/Items/Records/Results, and
   #     nested paginated objects, while logging the real envelope safely in
   #     IntegrationSyncLog metadata for confirmation.
-  #   - the plain SKU-code field name on /sku records: guessed as "Sku"
-  #     (falling back to IDSku). Note Product#idworks_id already exists as
-  #     a column but nothing currently reads/writes it — IDSku might be the
-  #     intended match key instead of the sku string; out of scope to
-  #     change here without being asked, but worth revisiting.
   #   - DateFrom/DateTo's exact format/timezone for GET /orders — assumed
   #     full ISO8601 timestamps (a date-only filter would be useless for
   #     OrderSyncService's 2-hour polling window).
+  #   - every field name in #normalize_order (Order/IDOrder/ValueShipping/
+  #     etc.) — same as the sku field below, these came from the Swagger
+  #     spec, never checked against a real /orders payload. Given the sku
+  #     field guess just turned out wrong against real data (see below),
+  #     treat these as equally suspect until a real /orders response is
+  #     captured — no evidence either way yet, so nothing changed here.
+  #
+  # RESOLVED 2026-07-21: the /sku record's plain SKU-code field is
+  # "IDSkuCompany", confirmed against real Hidrabene production data (it
+  # matches the already-saved Product#sku format, e.g. "0101"). The
+  # previous guess ("Sku", from the Swagger spec) doesn't exist on the real
+  # payload at all — every record was silently falling through to
+  # "missing_sku" in ProductCostSyncService/Idworks::StockSyncService,
+  # which is why idworks_id/cost_price/qty_available stayed unset on every
+  # Product despite the sync jobs running normally. See #normalize_product.
   #
   # QtyAvailable/QtyReserved/QtySafetyStock/AbcCurve/InfiniteInventory/
   # LeadTimeDays/DateLastRecordModification on /sku (added 2026-07-20) are
@@ -163,7 +173,16 @@ module Integrations
     def normalize_product(raw)
       {
         idworks_id:         first_present(raw, "IDSku", "IDSKU", "idSku", "id_sku", "SkuId", "skuId")&.to_s,
-        sku:                first_present(raw, "Sku", "SKU", "sku", "Code", "code", "ProductCode", "Reference", "reference")&.to_s,
+        # IDSkuCompany confirmed against real production payload
+        # (2026-07-21): the /sku response has no Sku/SKU/Code/Reference
+        # field at all — this whole extraction was guessing against the
+        # Swagger spec, and the guess was wrong. Every one of the 441 real
+        # skus for Hidrabene was silently dropped as "missing_sku" because
+        # of this, which is why Product#idworks_id/cost_price/qty_available
+        # never got populated despite the jobs running normally. Other
+        # fallback keys kept, unconfirmed either way — not removing them
+        # in case a different tenant's payload really does use one.
+        sku:                first_present(raw, "IDSkuCompany", "Sku", "SKU", "sku", "Code", "code", "ProductCode", "Reference", "reference")&.to_s,
         cost_last_purchase: to_decimal(first_present(raw, "CostLastPurchase", "costLastPurchase", "lastPurchaseCost", "LastPurchaseCost")),
         cost_average:       to_decimal(first_present(raw, "CostAverage", "costAverage", "AverageCost", "averageCost")),
         # Stock fields (confirmed via a real /sku response on 2026-07-17,

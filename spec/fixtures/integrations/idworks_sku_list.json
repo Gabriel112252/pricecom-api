@@ -2,7 +2,7 @@
   "Data": [
     {
       "IDSku": 12345,
-      "Sku": "CAM-001-P-AZUL",
+      "IDSkuCompany": "CAM-001-P-AZUL",
       "CostLastPurchase": 60.00,
       "CostAverage": 58.50,
       "SkuNCM": "6109.10.00",
@@ -21,7 +21,7 @@
     },
     {
       "IDSku": 12346,
-      "Sku": "CAN-001",
+      "IDSkuCompany": "CAN-001",
       "CostLastPurchase": null,
       "CostAverage": 11.20,
       "SkuNCM": "6912.00.00",

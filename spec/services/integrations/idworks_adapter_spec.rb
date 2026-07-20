@@ -1,12 +1,15 @@
 require "rails_helper"
 
-# Endpoint paths, auth flow (POST user/signin/local -> Bearer + Origin/
-# FilePath headers), and the confirmed field names (Sku/IDSku/
-# CostLastPurchase/CostAverage on /sku; Order/IDOrder/ValueShipping on
-# /orders) are verified against the tenant's real idworks Swagger spec
-# (swagger.idworks.com.br) as of 2026-07-10 — see IdworksAdapter's class
-# comment for what's still unverified (pagination envelope shape, exact
-# DateFrom/DateTo format).
+# Endpoint paths and auth flow (POST user/signin/local -> Bearer +
+# Origin/FilePath headers) are verified against the tenant's real idworks
+# Swagger spec (swagger.idworks.com.br) as of 2026-07-10. The /sku sku-code
+# field name is NOT from that spec — IDSkuCompany was confirmed against
+# real production data on 2026-07-21 after the Swagger-guessed "Sku" field
+# turned out not to exist on the real payload at all (see
+# IdworksAdapter's class comment and #normalize_product). /orders field
+# names (Order/IDOrder/ValueShipping/etc.) are still only Swagger-sourced,
+# unconfirmed against a real payload — same class of risk that just bit
+# the sku field, not yet checked.
 RSpec.describe Integrations::IdworksAdapter do
   let(:credentials) { { base_url: "https://cliente.idworks.com.br/1.0", email: "user@hidrabene.com", password: "secret" } }
   let(:adapter) { described_class.new(credentials) }
@@ -93,6 +96,18 @@ RSpec.describe Integrations::IdworksAdapter do
         lead_time_days: 7,
         infinite_inventory: false
       )
+    end
+
+    it "extracts sku from IDSkuCompany (the confirmed real field) with a real-shaped numeric code" do
+      raw = { "IDSku" => 999, "IDSkuCompany" => "0101", "CostLastPurchase" => 10.0, "CostAverage" => 9.0 }
+
+      expect(adapter.send(:normalize_product, raw)[:sku]).to eq("0101")
+    end
+
+    it "still falls back to Sku when IDSkuCompany is absent (unconfirmed fallback, kept on purpose)" do
+      raw = { "IDSku" => 999, "Sku" => "FALLBACK-1", "CostLastPurchase" => 10.0, "CostAverage" => 9.0 }
+
+      expect(adapter.send(:normalize_product, raw)[:sku]).to eq("FALLBACK-1")
     end
 
     it "stops paginating once a page comes back empty" do
