@@ -10,25 +10,38 @@ module Integrations
   #   (partner.tiktokshop.com/docv2/page/search-products-202309) — each
   #   skus[] entry has `id`, `seller_sku`, `price.{currency,
   #   tax_exclusive_price, sale_price}` and `inventory[].{warehouse_id,
-  #   quantity}`. There is no `sku_id` or `price.amount` field.
+  #   quantity}`. There is no `sku_id` or `price.amount` field. Each
+  #   product (the sku's parent) also has its own `id` — the product_id
+  #   #update_stock's write endpoint needs, see #fetch_products.
   # - Order payload: Get Order List 202309
   #   (partner.tiktokshop.com/docv2/page/get-order-list-202309) —
   #   pagination/sort go in the query string, time/status filters in the
   #   JSON body, shop_cipher required in the query.
+  # - Write path (added 2026-07-21, confirmed from Partner Center, not
+  #   inferred): Update Inventory 202309 (POST /product/202309/products/
+  #   {product_id}/inventory/update) and Get Warehouse List 202309
+  #   (GET /logistics/202309/warehouses) — see #update_stock/
+  #   #resolve_warehouse_id.
   class TiktokAdapter < BaseChannelAdapter
     include TiktokRequestSigning
 
     BASE_URL = "https://open-api.tiktokglobalshop.com".freeze
     PRODUCT_SEARCH_PATH = "/product/202309/products/search".freeze
     INVENTORY_SEARCH_PATH = "/product/202309/inventory/search".freeze
+    WAREHOUSE_LIST_PATH = "/logistics/202309/warehouses".freeze
     ORDER_SEARCH_PATH = "/order/202309/orders/search".freeze
     ORDER_DETAIL_PATH = "/order/202309/orders".freeze
     SHOP_SCOPED_PATHS = [
       PRODUCT_SEARCH_PATH,
       INVENTORY_SEARCH_PATH,
+      WAREHOUSE_LIST_PATH,
       ORDER_SEARCH_PATH,
       ORDER_DETAIL_PATH
     ].freeze
+    # The inventory-update path has a dynamic {product_id} segment, so it
+    # can't live in SHOP_SCOPED_PATHS (an exact-match list) — matched by
+    # pattern instead, see #shop_scoped_query_params.
+    INVENTORY_UPDATE_PATH_PATTERN = %r{\A/product/202309/products/[^/]+/inventory/update\z}.freeze
     ORDER_DETAIL_MAX_IDS = 50
     PAGE_SIZE = 100
     ORDERS_PAGE_SIZE = 50
@@ -58,7 +71,14 @@ module Integrations
 
         (data["products"] || []).each do |product|
           (product["skus"] || []).each do |sku|
-            skus << sku.merge("_product_title" => product["title"] || product["product_name"])
+            skus << sku.merge(
+              "_product_title" => product["title"] || product["product_name"],
+              # Parent product id (distinct from the sku's own "id") — needed
+              # by the inventory-update endpoint's {product_id} path param.
+              # Free on this same call, like Shopify's inventory_item_id —
+              # see #normalize_product/external_product_id.
+              "_parent_product_id" => product["id"]
+            )
           end
         end
 
@@ -77,6 +97,53 @@ module Integrations
       end
     end
 
+    # Get Warehouse List 202309 (confirmed straight from Partner Center,
+    # 2026-07-21 — not inferred): GET /logistics/202309/warehouses, no
+    # extra query params beyond the usual app_key/timestamp/sign/
+    # shop_cipher. Returns every warehouse on the seller's account
+    # (sales, and potentially other kinds — see #resolve_warehouse_id for
+    # why sales_warehouse-only is a documented assumption, not confirmed
+    # from a real multi-warehouse Hidrabene payload).
+    # → [{ id:, name:, effect_status:, type:, is_default: }, ...]
+    def fetch_warehouses
+      body = get(WAREHOUSE_LIST_PATH)
+      (body.dig("data", "warehouses") || []).map { |raw| normalize_warehouse(raw) }
+    end
+
+    # Writes stock via POST /product/202309/products/{product_id}/
+    # inventory/update — confirmed straight from Partner Center,
+    # 2026-07-21, body `{ skus: [{ id:, inventory: [{ warehouse_id:,
+    # quantity: }] }] }`.
+    #
+    # `product_id:` is required here rather than resolved internally —
+    # same reason as ShopifyAdapter#update_stock's `inventory_item_id:`:
+    # this adapter has no ActiveRecord access, so the caller resolves it
+    # from the already-persisted ChannelProductListing#external_product_id
+    # (see TiktokAdapter's class comment / #fetch_products) instead of this
+    # method reaching into the database itself.
+    #
+    # backorder_quantity/handling_time are deliberately NOT sent — see the
+    # 2026-07-21 investigation: every source found (TikTok's own docs on
+    # the opt-in "Backorder" feature, and the laraditz/tiktok community
+    # SDK's own working usage example) treats them as optional extras tied
+    # to a seller-configured feature, not required for a plain stock
+    # write. If that turns out to be wrong, TikTok's own code!=0 response
+    # surfaces as a clean ApiError via #raise_on_body_error — not a silent
+    # wrong write.
+    def update_stock(external_id:, quantity:, product_id:)
+      if product_id.blank?
+        raise ArgumentError, "TiktokAdapter#update_stock: product_id ausente para sku=#{external_id}"
+      end
+
+      path = "/product/202309/products/#{product_id}/inventory/update"
+      body = {
+        skus: [
+          { id: external_id.to_s, inventory: [ { warehouse_id: resolve_warehouse_id, quantity: quantity.to_i } ] }
+        ]
+      }
+      post(path, body)
+    end
+
     # `seller_sku` is optional in TikTok Shop (sellers often leave it
     # blank, and the API then returns an empty string), so fall back to the
     # TikTok-generated SKU `id` — otherwise every SKU without a seller code
@@ -85,12 +152,13 @@ module Integrations
     # `tax_exclusive_price` is the regular selling-price field.
     def normalize_product(raw)
       {
-        external_id:  raw["id"].to_s,
-        external_sku: raw["seller_sku"].presence || raw["id"].to_s,
-        name:         raw["_product_title"],
-        price:        to_decimal(raw.dig("price", "sale_price").presence || raw.dig("price", "tax_exclusive_price")),
-        stock_qty:    to_decimal((raw["inventory"] || []).sum { |inv| inv["quantity"].to_i }),
-        raw:          raw.except("_product_title")
+        external_id:         raw["id"].to_s,
+        external_sku:        raw["seller_sku"].presence || raw["id"].to_s,
+        name:                raw["_product_title"],
+        price:               to_decimal(raw.dig("price", "sale_price").presence || raw.dig("price", "tax_exclusive_price")),
+        stock_qty:           to_decimal((raw["inventory"] || []).sum { |inv| inv["quantity"].to_i }),
+        external_product_id: raw["_parent_product_id"]&.to_s,
+        raw:                 raw.except("_product_title", "_parent_product_id")
       }
     end
 
@@ -170,8 +238,58 @@ module Integrations
       parsed
     end
 
+    def normalize_warehouse(raw)
+      {
+        id: raw["id"],
+        name: raw["name"],
+        effect_status: raw["effect_status"],
+        type: raw["type"],
+        is_default: raw["is_default"]
+      }
+    end
+
+    # Memoized per adapter instance, same reasoning as
+    # ShopifyAdapter#resolve_location_id: a batch of writes in one run
+    # pays for this lookup once, not once per SKU.
+    #
+    # type == "SALES_WAREHOUSE" is filtered in as a documented ASSUMPTION,
+    # not a confirmed rule — the only real payload seen (Hidrabene, one
+    # warehouse) is SALES_WAREHOUSE, and TikTok's own seller docs describe
+    # other warehouse kinds (e.g. reverse-logistics/returns) existing on an
+    # account, which would be wrong to write sellable stock into. If a
+    # real multi-warehouse account turns out to have SALES_WAREHOUSE
+    # entries this filter wrongly excludes, that's the thing to revisit.
+    #
+    # Never picks a warehouse arbitrarily: 0 candidates, or more than one
+    # with no single is_default: true among them, raises ApiError with the
+    # count and ids instead of guessing — same rule as Shopify's ambiguous
+    # location check.
+    def resolve_warehouse_id
+      @warehouse_id ||= begin
+        candidates = fetch_warehouses.select { |w| w[:effect_status] == "ENABLED" && w[:type] == "SALES_WAREHOUSE" }
+
+        chosen = candidates.size == 1 ? candidates.first : single_default_among(candidates)
+
+        unless chosen
+          raise ApiError,
+            "TiktokAdapter#update_stock: expected exactly one enabled sales warehouse (or exactly one marked " \
+            "is_default among several), found #{candidates.size} candidate(s) (ids: #{candidates.map { |w| w[:id] }.join(', ')}) " \
+            "— pick one explicitly instead of guessing"
+        end
+
+        chosen[:id]
+      end
+    end
+
+    def single_default_among(candidates)
+      return nil if candidates.size <= 1
+
+      defaults = candidates.select { |w| w[:is_default] }
+      defaults.size == 1 ? defaults.first : nil
+    end
+
     def shop_scoped_query_params(path)
-      return {} unless SHOP_SCOPED_PATHS.include?(path)
+      return {} unless SHOP_SCOPED_PATHS.include?(path) || path.match?(INVENTORY_UPDATE_PATH_PATTERN)
 
       shop_cipher = credentials[:shop_cipher].presence
       if shop_cipher.blank?

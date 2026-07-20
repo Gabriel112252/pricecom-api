@@ -1,18 +1,23 @@
 class DataSourceConfig < ApplicationRecord
   belongs_to :tenant
 
-  DATA_TYPES = %w[cost freight tax payment_reconciliation].freeze
+  DATA_TYPES = %w[cost freight tax payment_reconciliation stock].freeze
   SOURCES    = %w[idworks pagarme lucrofrete].freeze
   # "lucrofrete" fornece o custo real de frete dos pedidos Yampi ja
   # casados pelo parceiro (Order#real_freight_cost via
   # Integrations::Lucrofrete::OrdersSyncService)
   # — alternativa ao idworks para o tipo "freight". Sem default automático
   # no connect: a troca de fonte é uma decisão explícita do tenant.
+  #
+  # "stock" (QtyAvailable/QtyReserved/etc. via GET /sku — ver
+  # Integrations::Idworks::StockSyncService) só tem a idworks como fonte
+  # por enquanto; nenhum outro provider deste projeto expõe estoque de ERP.
   AVAILABLE_SOURCES_BY_DATA_TYPE = {
     "cost" => %w[idworks],
     "freight" => %w[idworks lucrofrete],
     "tax" => [],
-    "payment_reconciliation" => %w[pagarme]
+    "payment_reconciliation" => %w[pagarme],
+    "stock" => %w[idworks]
   }.freeze
 
   # Which source a data_type defaults to the first time its provider is
@@ -27,7 +32,7 @@ class DataSourceConfig < ApplicationRecord
   # valid default source for "tax" — see
   # Integrations::Idworks::ProductCostSyncService's class comment.
   DEFAULTS_BY_SOURCE = {
-    "idworks" => %w[cost freight],
+    "idworks" => %w[cost freight stock],
     "pagarme" => %w[payment_reconciliation]
   }.freeze
 

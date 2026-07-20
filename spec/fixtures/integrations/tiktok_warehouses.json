@@ -1,0 +1,19 @@
+{
+  "code": 0,
+  "message": "Success",
+  "request_id": "req-warehouses-abc",
+  "data": {
+    "warehouses": [
+      {
+        "id": "7000714532876273410",
+        "entity_id": "7395366865142499073",
+        "name": "Guangzhou",
+        "effect_status": "ENABLED",
+        "type": "SALES_WAREHOUSE",
+        "sub_type": "DOMESTIC_WAREHOUSE",
+        "is_default": true,
+        "address": {}
+      }
+    ]
+  }
+}

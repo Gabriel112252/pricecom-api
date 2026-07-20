@@ -54,6 +54,16 @@ idworks_order_sync_dispatch:
   class: "Integrations::Idworks::ScheduleOrderSyncsJob"
   queue: integrations
 
+# Stock going negative (overselling) is urgent in a way cost drift isn't,
+# so this polls every 20min instead of riding the 6h cost-sync cadence —
+# same /sku endpoint and HTTP call as idworks_product_cost_sync_dispatch,
+# just a separate DataSourceConfig gate ("stock") and a separate service
+# (Integrations::Idworks::StockSyncService).
+idworks_stock_sync_dispatch:
+  cron: "*/20 * * * *"
+  class: "Integrations::Idworks::ScheduleStockSyncsJob"
+  queue: integrations
+
 # LucroFrete: custo real de frete via pedidos ja casados pelo parceiro
 # (/api/reports/orders). O polling antigo de /api/logs fica disponivel
 # apenas para analise de cotacoes brutas, nao para real_freight_cost.

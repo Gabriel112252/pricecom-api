@@ -54,9 +54,35 @@ RSpec.describe Integrations::IdworksAdapter do
     it "signs in first, then returns sku/cost_last_purchase/cost_average per product" do
       raws = adapter.fetch_products
 
-      expect(raws).to contain_exactly(
-        { idworks_id: "12345", sku: "CAM-001-P-AZUL", cost_last_purchase: BigDecimal("60.00"), cost_average: BigDecimal("58.50") },
-        { idworks_id: "12346", sku: "CAN-001", cost_last_purchase: nil, cost_average: BigDecimal("11.20") }
+      expect(raws).to include(
+        hash_including(idworks_id: "12345", sku: "CAM-001-P-AZUL", cost_last_purchase: BigDecimal("60.00"), cost_average: BigDecimal("58.50")),
+        hash_including(idworks_id: "12346", sku: "CAN-001", cost_last_purchase: nil, cost_average: BigDecimal("11.20"))
+      )
+    end
+
+    it "extracts the stock fields per product, preserving a negative QtyAvailable as-is (real overselling signal, not clamped)" do
+      raws = adapter.fetch_products
+      camiseta = raws.find { |r| r[:sku] == "CAM-001-P-AZUL" }
+      caneca   = raws.find { |r| r[:sku] == "CAN-001" }
+
+      expect(camiseta).to include(
+        qty_available: BigDecimal("-133.00"),
+        qty_reserved: BigDecimal("0.000"),
+        qty_safety_stock: nil,
+        abc_curve: "C",
+        lead_time_days: 0,
+        infinite_inventory: false,
+        last_modified_at: "2026-07-17T13:37:41.000Z"
+      )
+      expect(camiseta[:raw]).to include("QtyAvailable" => "-133.00")
+
+      expect(caneca).to include(
+        qty_available: BigDecimal("42.000"),
+        qty_reserved: BigDecimal("5.000"),
+        qty_safety_stock: BigDecimal("10.000"),
+        abc_curve: "A",
+        lead_time_days: 7,
+        infinite_inventory: false
       )
     end
 

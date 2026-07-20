@@ -23,6 +23,16 @@ module Integrations
       new(channel_credential).call
     end
 
+    # Reused by StockAlerts::ReplenishmentExecutorService so a channel's
+    # write path resolves the adapter the exact same way its read/sync path
+    # does, instead of re-implementing the ADAPTERS lookup elsewhere.
+    def self.adapter_for(channel_credential)
+      klass = ADAPTERS.fetch(channel_credential.channel) do
+        raise ArgumentError, "no adapter registered for channel #{channel_credential.channel}"
+      end
+      klass.new(channel_credential.credentials)
+    end
+
     def initialize(channel_credential)
       @channel_credential = channel_credential
       @tenant = channel_credential.tenant
@@ -76,10 +86,7 @@ module Integrations
     attr_reader :channel_credential, :tenant
 
     def build_adapter
-      klass = ADAPTERS.fetch(channel_credential.channel) do
-        raise ArgumentError, "no adapter registered for channel #{channel_credential.channel}"
-      end
-      klass.new(channel_credential.credentials)
+      self.class.adapter_for(channel_credential)
     end
 
     def sync_all(adapter)
@@ -118,13 +125,35 @@ module Integrations
         channel: channel_credential.channel,
         external_id: normalized[:external_id]
       )
-      listing.product      = product
-      listing.external_sku = normalized[:external_sku]
-      listing.stock_qty    = normalized[:stock_qty]
-      listing.price        = normalized[:price]
-      listing.raw_payload  = normalized[:raw]
-      listing.synced_at    = Time.current
+      listing.product                    = product
+      listing.external_sku               = normalized[:external_sku]
+      listing.stock_qty                  = normalized[:stock_qty]
+      listing.price                      = normalized[:price]
+      listing.raw_payload                = normalized[:raw]
+      listing.synced_at                  = Time.current
+      # Optional, channel-specific write-path identifiers (Shopify's
+      # inventory_item_id, TikTok's parent product_id — see each adapter's
+      # #normalize_product). Channels without an equivalent simply don't
+      # include the key, so it stays nil for them without any branching on
+      # `channel` here.
+      listing.external_inventory_item_id = normalized[:external_inventory_item_id]
+      listing.external_product_id        = normalized[:external_product_id]
       listing.save!
+
+      evaluate_stock_alert(listing)
+    end
+
+    # Direct call at the end of the sync flow, same style as
+    # ProductCostSyncService calling apply_cost_to_orders right after
+    # saving — this codebase doesn't use callbacks/pub-sub for this kind of
+    # post-sync side effect. Rescued narrowly and separately from
+    # #sync_all's per-item rescue so a bug in alert evaluation is logged
+    # but never counted as "this SKU failed to sync" — the catalog sync
+    # itself already fully succeeded by this point.
+    def evaluate_stock_alert(listing)
+      StockAlerts::EvaluationService.call(listing)
+    rescue => e
+      Rails.logger.error("[StockAlert] evaluation failed for listing=#{listing.id}: #{e.message}")
     end
 
     def start_log

@@ -71,6 +71,75 @@ module Integrations
       (sku["availability"] || sku["total_in_stock"]).to_i
     end
 
+    # GET /catalog/skus/{skuId}/stocks — the per-SKU-per-warehouse stock
+    # records that #update_stock needs (added 2026-07-21 to investigate the
+    # blocker below). Paginated (`SimplePaginatorWithMeta` per docs), same
+    # page-until-empty shape as #fetch_products/#fetch_orders.
+    # → [{ id:, stock_id:, quantity:, min_quantity: }, ...]
+    def fetch_sku_stocks(external_id)
+      records = []
+      page = 1
+
+      loop do
+        body = get("/catalog/skus/#{external_id}/stocks", page: page, per_page: PER_PAGE)
+        page_records = body["data"] || []
+        records.concat(page_records.map { |raw| normalize_sku_stock(raw) })
+
+        pagination = body.dig("meta", "pagination") || {}
+        total_pages = pagination["total_pages"].to_i
+        break if total_pages <= page || page_records.empty?
+
+        page += 1
+      end
+
+      records
+    end
+
+    # Writes stock via PUT /catalog/skus/{skuId}/stocks/{id} — confirmed
+    # via docs.yampi.com.br on 2026-07-20, body
+    # `{ stock_id:, quantity:, min_quantity: }`.
+    #
+    # Only supports the case where the SKU has exactly one
+    # #fetch_sku_stocks record (2026-07-21 product decision, after
+    # confirming via Yampi's own docs that "Logística > Estoques" is a
+    # real multi-warehouse feature and not just a hypothetical — a live
+    # test against a real store to check typical cardinality wasn't
+    # possible, the only Yampi ChannelCredential in this environment
+    # turned out to be a non-working placeholder, HTTP 403 on
+    # #authenticate). If a SKU ever has 0 or >1 stock records, this raises
+    # ApiError instead of guessing which warehouse to write to — same
+    # "don't pick one silently" rule as ShopifyAdapter#update_stock's
+    # ambiguous-location check.
+    #
+    # Deliberately resolves the stock record live on every call rather
+    # than through a value pre-fetched/persisted during ProductSyncService
+    # (contrast with Shopify's external_inventory_item_id, which is free —
+    # already present on the #fetch_products payload). #fetch_sku_stocks
+    # is a genuinely extra HTTP call per SKU; paying for it on every
+    # routine 15-minute catalog sync for every SKU would be a real,
+    # permanent cost increase for no benefit until a write is actually
+    # about to happen, so it's only paid here, at write time.
+    #
+    # `min_quantity` is never invented — always the value Yampi itself
+    # already has on that stock record, read back and resent unchanged.
+    def update_stock(external_id:, quantity:)
+      records = fetch_sku_stocks(external_id)
+
+      if records.size != 1
+        raise ApiError,
+          "YampiAdapter#update_stock: expected exactly one stock record for sku=#{external_id}, " \
+          "found #{records.size} — pick a warehouse explicitly instead of guessing"
+      end
+
+      record = records.first
+      body = put("/catalog/skus/#{external_id}/stocks/#{record[:id]}", {
+        stock_id: record[:stock_id],
+        quantity: quantity.to_i,
+        min_quantity: record[:min_quantity].to_i
+      })
+      normalize_sku_stock(body["data"] || {})
+    end
+
     # Pulls every order created in [since, now] for the legacy synchronous
     # backfill service. New order ingestion uses
     # Integrations::Yampi::OrdersPollingService, but keeping this method on
@@ -220,10 +289,28 @@ module Integrations
       end
     end
 
+    def normalize_sku_stock(raw)
+      {
+        id: raw["id"],
+        stock_id: raw["stock_id"],
+        quantity: to_decimal(raw["quantity"]),
+        min_quantity: to_decimal(raw["min_quantity"])
+      }
+    end
+
     def get(path, **params)
       response = connection(BASE_URL).get(alias_path(path), params) do |req|
         req.headers["User-Token"]      = credentials[:token]
         req.headers["User-Secret-Key"] = credentials[:secret_key]
+      end
+      handle_response(response)
+    end
+
+    def put(path, body)
+      response = connection(BASE_URL).put(alias_path(path)) do |req|
+        req.headers["User-Token"]      = credentials[:token]
+        req.headers["User-Secret-Key"] = credentials[:secret_key]
+        req.body = body
       end
       handle_response(response)
     end

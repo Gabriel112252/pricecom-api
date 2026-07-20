@@ -100,11 +100,12 @@ RSpec.describe Integrations::TiktokAdapter do
       raw = adapter.fetch_products.find { |r| r["seller_sku"] == "FONE-BT-X-PRETO" }
 
       expect(adapter.normalize_product(raw)).to include(
-        external_id:  "sku-001",
-        external_sku: "FONE-BT-X-PRETO",
-        name:         "Fone Bluetooth X",
-        price:        BigDecimal("89.90"),
-        stock_qty:    BigDecimal("30")
+        external_id:         "sku-001",
+        external_sku:        "FONE-BT-X-PRETO",
+        name:                "Fone Bluetooth X",
+        price:                BigDecimal("89.90"),
+        stock_qty:            BigDecimal("30"),
+        external_product_id: "1729999999"
       )
     end
 
@@ -116,6 +117,12 @@ RSpec.describe Integrations::TiktokAdapter do
         external_sku: "sku-002",
         stock_qty:    BigDecimal("12")
       )
+    end
+
+    it "does not leak the internal _parent_product_id key into the stored raw payload" do
+      raw = adapter.fetch_products.find { |r| r["seller_sku"] == "FONE-BT-X-PRETO" }
+
+      expect(adapter.normalize_product(raw)[:raw]).not_to have_key("_parent_product_id")
     end
 
     it "prefers sale_price over tax_exclusive_price when present" do
@@ -216,6 +223,144 @@ RSpec.describe Integrations::TiktokAdapter do
       ids = Array.new(described_class::ORDER_DETAIL_MAX_IDS + 1) { |i| i.to_s }
 
       expect { adapter.fetch_order_details(ids) }.to raise_error(ArgumentError)
+    end
+  end
+
+  describe "#fetch_warehouses" do
+    let(:warehouses_url) { "https://open-api.tiktokglobalshop.com/logistics/202309/warehouses" }
+    let(:warehouses_fixture) { File.read(Rails.root.join("spec/fixtures/integrations/tiktok_warehouses.json")) }
+
+    it "returns the normalized warehouse list" do
+      stub_request(:get, /\A#{Regexp.escape(warehouses_url)}/)
+        .to_return(status: 200, body: warehouses_fixture, headers: { "Content-Type" => "application/json" })
+
+      warehouses = adapter.fetch_warehouses
+
+      expect(warehouses).to eq([
+        { id: "7000714532876273410", name: "Guangzhou", effect_status: "ENABLED", type: "SALES_WAREHOUSE", is_default: true }
+      ])
+    end
+  end
+
+  describe "#update_stock" do
+    let(:warehouses_url) { "https://open-api.tiktokglobalshop.com/logistics/202309/warehouses" }
+    let(:warehouses_fixture) { File.read(Rails.root.join("spec/fixtures/integrations/tiktok_warehouses.json")) }
+    let(:inventory_update_url) { "https://open-api.tiktokglobalshop.com/product/202309/products/prod-1/inventory/update" }
+
+    def stub_single_warehouse
+      stub_request(:get, /\A#{Regexp.escape(warehouses_url)}/)
+        .to_return(status: 200, body: warehouses_fixture, headers: { "Content-Type" => "application/json" })
+    end
+
+    def stub_warehouses(list)
+      stub_request(:get, /\A#{Regexp.escape(warehouses_url)}/)
+        .to_return(status: 200, body: { code: 0, data: { warehouses: list } }.to_json, headers: { "Content-Type" => "application/json" })
+    end
+
+    it "sends only id/warehouse_id/quantity (no backorder_quantity/handling_time) and returns the response" do
+      stub_single_warehouse
+      stub_request(:post, /\A#{Regexp.escape(inventory_update_url)}/)
+        .with(body: { skus: [ { id: "sku-001", inventory: [ { warehouse_id: "7000714532876273410", quantity: 42 } ] } ] }.to_json)
+        .to_return(status: 200, body: { code: 0, message: "Success", data: {} }.to_json, headers: { "Content-Type" => "application/json" })
+
+      result = adapter.update_stock(external_id: "sku-001", quantity: 42, product_id: "prod-1")
+
+      expect(result["code"]).to eq(0)
+      expect(WebMock).to have_requested(:post, /\A#{Regexp.escape(inventory_update_url)}/)
+        .with(body: { skus: [ { id: "sku-001", inventory: [ { warehouse_id: "7000714532876273410", quantity: 42 } ] } ] }.to_json)
+    end
+
+    it "memoizes the resolved warehouse across multiple writes in the same adapter instance" do
+      stub_single_warehouse
+      stub_request(:post, /\A#{Regexp.escape(inventory_update_url)}/)
+        .to_return(status: 200, body: { code: 0, data: {} }.to_json, headers: { "Content-Type" => "application/json" })
+
+      adapter.update_stock(external_id: "sku-001", quantity: 1, product_id: "prod-1")
+      adapter.update_stock(external_id: "sku-002", quantity: 2, product_id: "prod-1")
+
+      expect(WebMock).to have_requested(:get, /\A#{Regexp.escape(warehouses_url)}/).once
+    end
+
+    it "raises ArgumentError when product_id is missing, without making any HTTP call" do
+      expect { adapter.update_stock(external_id: "sku-001", quantity: 42, product_id: nil) }
+        .to raise_error(ArgumentError, /product_id/)
+
+      expect(WebMock).not_to have_requested(:any, /tiktokglobalshop\.com/)
+    end
+
+    it "raises ApiError instead of guessing when there are zero enabled sales warehouses" do
+      stub_warehouses([])
+
+      expect { adapter.update_stock(external_id: "sku-001", quantity: 42, product_id: "prod-1") }
+        .to raise_error(Integrations::ApiError, /found 0/)
+    end
+
+    it "raises ApiError instead of guessing when multiple warehouses exist with no single is_default" do
+      stub_warehouses([
+        { "id" => "w1", "effect_status" => "ENABLED", "type" => "SALES_WAREHOUSE", "is_default" => false },
+        { "id" => "w2", "effect_status" => "ENABLED", "type" => "SALES_WAREHOUSE", "is_default" => false }
+      ])
+
+      expect { adapter.update_stock(external_id: "sku-001", quantity: 42, product_id: "prod-1") }
+        .to raise_error(Integrations::ApiError, /found 2/)
+    end
+
+    it "resolves the single warehouse marked is_default when more than one enabled sales warehouse exists" do
+      stub_warehouses([
+        { "id" => "w1", "effect_status" => "ENABLED", "type" => "SALES_WAREHOUSE", "is_default" => true },
+        { "id" => "w2", "effect_status" => "ENABLED", "type" => "SALES_WAREHOUSE", "is_default" => false }
+      ])
+      stub_request(:post, /\A#{Regexp.escape(inventory_update_url)}/)
+        .with(body: { skus: [ { id: "sku-001", inventory: [ { warehouse_id: "w1", quantity: 42 } ] } ] }.to_json)
+        .to_return(status: 200, body: { code: 0, data: {} }.to_json, headers: { "Content-Type" => "application/json" })
+
+      adapter.update_stock(external_id: "sku-001", quantity: 42, product_id: "prod-1")
+
+      expect(WebMock).to have_requested(:post, /\A#{Regexp.escape(inventory_update_url)}/)
+        .with(body: { skus: [ { id: "sku-001", inventory: [ { warehouse_id: "w1", quantity: 42 } ] } ] }.to_json)
+    end
+
+    it "excludes disabled and non-sales warehouses before picking one" do
+      stub_warehouses([
+        { "id" => "w1", "effect_status" => "DISABLED", "type" => "SALES_WAREHOUSE", "is_default" => true },
+        { "id" => "w2", "effect_status" => "ENABLED", "type" => "RETURN_WAREHOUSE", "is_default" => false },
+        { "id" => "w3", "effect_status" => "ENABLED", "type" => "SALES_WAREHOUSE", "is_default" => false }
+      ])
+      stub_request(:post, /\A#{Regexp.escape(inventory_update_url)}/)
+        .with(body: { skus: [ { id: "sku-001", inventory: [ { warehouse_id: "w3", quantity: 42 } ] } ] }.to_json)
+        .to_return(status: 200, body: { code: 0, data: {} }.to_json, headers: { "Content-Type" => "application/json" })
+
+      adapter.update_stock(external_id: "sku-001", quantity: 42, product_id: "prod-1")
+
+      expect(WebMock).to have_requested(:post, /\A#{Regexp.escape(inventory_update_url)}/)
+        .with(body: { skus: [ { id: "sku-001", inventory: [ { warehouse_id: "w3", quantity: 42 } ] } ] }.to_json)
+    end
+
+    it "raises AuthenticationError on a 105xxx code from the inventory update call" do
+      stub_single_warehouse
+      stub_request(:post, /\A#{Regexp.escape(inventory_update_url)}/)
+        .to_return(status: 200, body: { code: 105001, message: "Invalid access token" }.to_json, headers: { "Content-Type" => "application/json" })
+
+      expect { adapter.update_stock(external_id: "sku-001", quantity: 42, product_id: "prod-1") }
+        .to raise_error(Integrations::AuthenticationError)
+    end
+
+    it "raises RateLimitError on a rate-limit-shaped message from the inventory update call" do
+      stub_single_warehouse
+      stub_request(:post, /\A#{Regexp.escape(inventory_update_url)}/)
+        .to_return(status: 200, body: { code: 99999, message: "Too many requests, rate limit exceeded" }.to_json, headers: { "Content-Type" => "application/json" })
+
+      expect { adapter.update_stock(external_id: "sku-001", quantity: 42, product_id: "prod-1") }
+        .to raise_error(Integrations::RateLimitError)
+    end
+
+    it "raises ApiError for any other non-zero code" do
+      stub_single_warehouse
+      stub_request(:post, /\A#{Regexp.escape(inventory_update_url)}/)
+        .to_return(status: 200, body: { code: 42, message: "Something else went wrong" }.to_json, headers: { "Content-Type" => "application/json" })
+
+      expect { adapter.update_stock(external_id: "sku-001", quantity: 42, product_id: "prod-1") }
+        .to raise_error(Integrations::ApiError)
     end
   end
 end

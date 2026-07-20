@@ -8,7 +8,16 @@
       "SkuNCM": "6109.10.00",
       "IDTaxDepartment": 1,
       "TaxDepartmentDescription": "Vestuário",
-      "SkuCst": "060"
+      "SkuCst": "060",
+      "QtyAvailable": "-133.00",
+      "QtyReserved": "0.000",
+      "QtySafetyStock": null,
+      "AbcCurve": "C",
+      "InfiniteInventory": 0,
+      "BuyOrderAlert": 0,
+      "BuyOrdemQuantity": "133.000",
+      "LeadTimeDays": 0,
+      "DateLastRecordModification": "2026-07-17T13:37:41.000Z"
     },
     {
       "IDSku": 12346,
@@ -18,7 +27,16 @@
       "SkuNCM": "6912.00.00",
       "IDTaxDepartment": 2,
       "TaxDepartmentDescription": "Utilidades domésticas",
-      "SkuCst": "060"
+      "SkuCst": "060",
+      "QtyAvailable": "42.000",
+      "QtyReserved": "5.000",
+      "QtySafetyStock": "10.000",
+      "AbcCurve": "A",
+      "InfiniteInventory": 0,
+      "BuyOrderAlert": 0,
+      "BuyOrdemQuantity": "0.000",
+      "LeadTimeDays": 7,
+      "DateLastRecordModification": "2026-07-15T09:12:00.000Z"
     }
   ]
 }

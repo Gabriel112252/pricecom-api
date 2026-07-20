@@ -38,6 +38,25 @@ RSpec.describe Integrations::ProductSyncService do
       expect(listing.price).to eq(BigDecimal("199.00"))
       expect(listing.stock_qty).to eq(BigDecimal("10"))
       expect(listing.product.sku).to eq("IPOD2008PINK")
+      expect(listing.external_inventory_item_id).to eq("39072856")
+    end
+
+    it "raises a StockAlert when a synced listing's stock_qty drops to/below its rule's min_threshold" do
+      product = tenant.products.create!(sku: "IPOD2008GREEN", name: "Pré-cadastrado", cost_price: 5, qty_available: 100)
+      tenant.stock_alert_rules.create!(product: product, channel: "shopify", min_threshold: 10, target_level: 20)
+
+      described_class.call(channel_credential) # fixture has IPOD2008GREEN at inventory_quantity: 5
+
+      alert = StockAlert.find_by(product: product, channel: "shopify")
+      expect(alert).to be_present
+      expect(alert.status).to eq("pending")
+      expect(alert.qty_at_trigger).to eq(BigDecimal("5"))
+    end
+
+    it "does not raise a StockAlert for a listing with no matching rule" do
+      described_class.call(channel_credential)
+
+      expect(StockAlert.count).to eq(0)
     end
 
     it "reuses an existing local Product that already has the same SKU instead of duplicating it" do
@@ -150,6 +169,26 @@ RSpec.describe Integrations::ProductSyncService do
 
       expect(result.synced_count).to eq(2)
       expect(result.metadata[:errors]).to include(a_hash_including(message: a_string_matching(/sem SKU/)))
+    end
+  end
+
+  describe "TikTok's external_product_id (parent product id, needed by its write path)" do
+    let(:tiktok_credential) do
+      tenant.channel_credentials.create!(
+        channel: "tiktok", status: "active",
+        credentials: { app_key: "key123", app_secret: "secret456", access_token: "tok789", shop_cipher: "GCP_cipher" }
+      )
+    end
+
+    it "is persisted on the listing, same generic pass-through as Shopify's external_inventory_item_id" do
+      stub_request(:post, %r{\Ahttps://open-api\.tiktokglobalshop\.com/product/202309/products/search})
+        .to_return(status: 200, body: File.read(Rails.root.join("spec/fixtures/integrations/tiktok_products.json")),
+                   headers: { "Content-Type" => "application/json" })
+
+      described_class.call(tiktok_credential)
+
+      listing = ChannelProductListing.find_by(tenant: tenant, channel: "tiktok", external_id: "sku-001")
+      expect(listing.external_product_id).to eq("1729999999")
     end
   end
 end

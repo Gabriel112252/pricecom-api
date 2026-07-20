@@ -23,6 +23,12 @@ module Integrations
   #   - DateFrom/DateTo's exact format/timezone for GET /orders — assumed
   #     full ISO8601 timestamps (a date-only filter would be useless for
   #     OrderSyncService's 2-hour polling window).
+  #
+  # QtyAvailable/QtyReserved/QtySafetyStock/AbcCurve/InfiniteInventory/
+  # LeadTimeDays/DateLastRecordModification on /sku (added 2026-07-20) are
+  # confirmed via an actual /sku response captured on 2026-07-17 — NOT in
+  # the Swagger spec relayed above, so field name variants beyond the
+  # camelCase fallback are unverified.
   class IdworksAdapter < BaseErpAdapter
     COLLECTION_KEYS = %w[
       Data data Items items Records records Results results List list Rows rows
@@ -152,7 +158,26 @@ module Integrations
         sku:                first_present(raw, "Sku", "SKU", "sku", "Code", "code", "ProductCode", "Reference", "reference")&.to_s,
         cost_last_purchase: to_decimal(first_present(raw, "CostLastPurchase", "costLastPurchase", "lastPurchaseCost", "LastPurchaseCost")),
         cost_average:       to_decimal(first_present(raw, "CostAverage", "costAverage", "AverageCost", "averageCost")),
-        raw_keys:           raw.is_a?(Hash) ? raw.keys : []
+        # Stock fields (confirmed via a real /sku response on 2026-07-17,
+        # not the Swagger spec — Swagger didn't document these at all).
+        # QtyAvailable can legitimately be negative (real overselling on
+        # the ERP side) — never .abs/clamp it, that's the actual alert
+        # signal Integrations::Idworks::StockSyncService needs to preserve.
+        qty_available:      to_decimal(first_present(raw, "QtyAvailable", "qtyAvailable")),
+        qty_reserved:       to_decimal(first_present(raw, "QtyReserved", "qtyReserved")),
+        qty_safety_stock:   to_decimal(first_present(raw, "QtySafetyStock", "qtySafetyStock")),
+        abc_curve:          first_present(raw, "AbcCurve", "abcCurve")&.to_s,
+        lead_time_days:     first_present(raw, "LeadTimeDays", "leadTimeDays")&.to_i,
+        infinite_inventory: ActiveModel::Type::Boolean.new.cast(first_present(raw, "InfiniteInventory", "infiniteInventory")),
+        last_modified_at:   first_present(raw, "DateLastRecordModification", "dateLastRecordModification"),
+        raw_keys:           raw.is_a?(Hash) ? raw.keys : [],
+        # Full raw record, kept (unlike raw_keys elsewhere in this class)
+        # so StockSyncService can store it verbatim on StockSnapshot#raw_payload
+        # for audit — these are stock/fiscal-classification fields, not the
+        # kind of sensitive data record_response_debug's anonymization exists
+        # to protect (that's about logging unknown fields into
+        # IntegrationSyncLog, a different concern from this DB-only record).
+        raw:                raw.is_a?(Hash) ? raw : {}
       }
     end
 

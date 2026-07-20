@@ -6,6 +6,10 @@ module Integrations
   #
   # Auth: header `X-Shopify-Access-Token`.
   # Base URL: https://{shop_domain}/admin/api/{version}
+  #
+  # #update_stock (added 2026-07-20) writes via the InventoryLevel resource
+  # — confirmed at shopify.dev/docs/api/admin-rest/latest/resources/
+  # inventorylevel, also not verified against a live store.
   class ShopifyAdapter < BaseChannelAdapter
     API_VERSION = "2024-01".freeze
     LIMIT = 250
@@ -44,14 +48,49 @@ module Integrations
       body.dig("variant", "inventory_quantity")
     end
 
+    # Writes an absolute inventory level via
+    # POST inventory_levels/set.json (not /adjust.json — we always know the
+    # desired final quantity here, not a delta, and `set` is the endpoint
+    # meant for that per shopify.dev/docs/api/admin-rest/latest/resources/
+    # inventorylevel, confirmed 2026-07-20).
+    #
+    # `inventory_item_id` (NOT the variant id) is required by this endpoint
+    # and is a plain field on every variant Shopify already returns from
+    # #fetch_products (confirmed against shopify.dev's Product resource) —
+    # #normalize_product now persists it as external_inventory_item_id, so
+    # the caller resolves it from ChannelProductListing rather than this
+    # method doing an extra live lookup. `external_id` is kept only for
+    # parity with the common #update_stock interface/error messages, not
+    # used in the request itself.
+    #
+    # `location_id` has no per-SKU equivalent — it's a store-wide concept
+    # (GET locations.json) most stores have exactly one of, but Shopify
+    # allows several (including "legacy" fulfillment-service locations we
+    # must not write to). Deliberately resolved live and memoized per
+    # adapter instance instead of persisted: unlike inventory_item_id, it's
+    # identical for every listing in a store, so caching it on every
+    # ChannelProductListing row would just be redundant data to keep in
+    # sync. Raises rather than guessing if more than one candidate location
+    # is active and non-legacy — same "don't invent an id" rule as Yampi's
+    # blocked #update_stock.
+    def update_stock(external_id:, quantity:, inventory_item_id:)
+      body = post("inventory_levels/set.json", {
+        location_id:        resolve_location_id,
+        inventory_item_id:  inventory_item_id.to_i,
+        available:          quantity.to_i
+      })
+      body.dig("inventory_level", "available")
+    end
+
     def normalize_product(raw)
       {
-        external_id:  raw["id"].to_s,
-        external_sku: raw["sku"],
-        name:         raw["_product_title"],
-        price:        to_decimal(raw["price"]),
-        stock_qty:    to_decimal(raw["inventory_quantity"]),
-        raw:          raw.except("_product_title")
+        external_id:                raw["id"].to_s,
+        external_sku:               raw["sku"],
+        name:                       raw["_product_title"],
+        price:                      to_decimal(raw["price"]),
+        stock_qty:                  to_decimal(raw["inventory_quantity"]),
+        external_inventory_item_id: raw["inventory_item_id"]&.to_s,
+        raw:                        raw.except("_product_title")
       }
     end
 
@@ -64,6 +103,32 @@ module Integrations
     def raw_get(path, params)
       connection(base_url).get(path, params) do |req|
         req.headers["X-Shopify-Access-Token"] = credentials[:access_token]
+      end
+    end
+
+    def post(path, body)
+      response = connection(base_url).post(path) do |req|
+        req.headers["X-Shopify-Access-Token"] = credentials[:access_token]
+        req.body = body
+      end
+      handle_response(response)
+    end
+
+    # Memoized per adapter instance (same lifetime as the auth token would
+    # be, if this adapter cached one) — a batch of stock writes in one sync
+    # run pays for this lookup once, not once per SKU.
+    def resolve_location_id
+      @location_id ||= begin
+        locations = get("locations.json")["locations"] || []
+        candidates = locations.select { |loc| loc["active"] && !loc["legacy"] }
+
+        if candidates.size != 1
+          raise ApiError,
+            "ShopifyAdapter#update_stock: expected exactly one active, non-legacy location, " \
+            "found #{candidates.size} — pick one explicitly instead of guessing"
+        end
+
+        candidates.first["id"]
       end
     end
 

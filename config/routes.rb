@@ -89,6 +89,16 @@ Rails.application.routes.draw do
       # validar a taxa cobrada contra a negociada.
       resources :payment_fee_rules, only: [ :index, :create, :update, :destroy ]
 
+      # Stock alert rules + the alerts/events they raise — see
+      # StockAlertRule/StockAlert and StockAlerts::EvaluationService.
+      resources :stock_alert_rules, only: [ :index, :create, :update, :destroy ]
+      resources :stock_alerts, only: [ :index ] do
+        member do
+          post :confirm
+          post :dismiss
+        end
+      end
+
       # Financial Settlements
       resources :financial_settlements, only: [ :index, :show, :create ] do
         collection do
@@ -96,6 +106,9 @@ Rails.application.routes.draw do
           get  :template
         end
       end
+
+      # Estoque — visão agregada produto x canal (ver StockOverviewController)
+      get "stock_overview", to: "stock_overview#index"
 
       # Dashboard
       get "dashboard/summary",   to: "dashboard#summary"

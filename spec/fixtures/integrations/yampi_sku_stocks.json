@@ -1,0 +1,19 @@
+{
+  "data": [
+    {
+      "id": 1,
+      "stock_id": 5,
+      "quantity": 100,
+      "min_quantity": 10
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "total": 1,
+      "count": 1,
+      "per_page": 50,
+      "current_page": 1,
+      "total_pages": 1
+    }
+  }
+}

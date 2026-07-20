@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_07_17_010100) do
+ActiveRecord::Schema[7.2].define(version: 2026_07_21_020000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -113,6 +113,8 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_17_010100) do
     t.datetime "synced_at"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.string "external_inventory_item_id"
+    t.string "external_product_id"
     t.index ["product_id"], name: "index_channel_product_listings_on_product_id"
     t.index ["tenant_id", "channel", "external_id"], name: "idx_on_tenant_id_channel_external_id_a1d176e2c8", unique: true
     t.index ["tenant_id"], name: "index_channel_product_listings_on_tenant_id"
@@ -597,8 +599,70 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_17_010100) do
     t.datetime "updated_at", null: false
     t.boolean "is_kit", default: false, null: false
     t.decimal "tax_rate", precision: 5, scale: 2
+    t.decimal "qty_available", precision: 12, scale: 3, default: "0.0"
+    t.decimal "qty_reserved", precision: 12, scale: 3, default: "0.0"
+    t.decimal "qty_safety_stock", precision: 12, scale: 3
+    t.string "abc_curve"
+    t.integer "lead_time_days", default: 0
+    t.boolean "infinite_inventory", default: false, null: false
+    t.datetime "stock_synced_at"
+    t.index ["qty_available"], name: "index_products_on_qty_available"
+    t.index ["tenant_id", "abc_curve"], name: "index_products_on_tenant_id_and_abc_curve"
     t.index ["tenant_id", "sku"], name: "index_products_on_tenant_id_and_sku", unique: true
     t.index ["tenant_id"], name: "index_products_on_tenant_id"
+  end
+
+  create_table "stock_alert_rules", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "product_id", null: false
+    t.string "channel", null: false
+    t.decimal "min_threshold", precision: 12, scale: 3, default: "0.0", null: false
+    t.decimal "target_level", precision: 12, scale: 3, null: false
+    t.string "automation_level", default: "manual", null: false
+    t.boolean "active", default: true, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["product_id"], name: "index_stock_alert_rules_on_product_id"
+    t.index ["tenant_id", "product_id", "channel"], name: "idx_on_tenant_id_product_id_channel_ed023af094", unique: true
+    t.index ["tenant_id"], name: "index_stock_alert_rules_on_tenant_id"
+  end
+
+  create_table "stock_alerts", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "product_id", null: false
+    t.bigint "stock_alert_rule_id"
+    t.string "channel", null: false
+    t.decimal "qty_at_trigger", precision: 12, scale: 3, null: false
+    t.decimal "target_level", precision: 12, scale: 3, null: false
+    t.decimal "suggested_replenishment_qty", precision: 12, scale: 3, null: false
+    t.string "automation_level_snapshot", null: false
+    t.string "status", default: "pending", null: false
+    t.text "error_message"
+    t.datetime "executed_at"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["product_id"], name: "index_stock_alerts_on_product_id"
+    t.index ["stock_alert_rule_id"], name: "index_stock_alerts_on_stock_alert_rule_id"
+    t.index ["tenant_id", "product_id", "channel", "status"], name: "idx_on_tenant_id_product_id_channel_status_55c369be19"
+    t.index ["tenant_id"], name: "index_stock_alerts_on_tenant_id"
+  end
+
+  create_table "stock_snapshots", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "product_id", null: false
+    t.decimal "qty_available", precision: 12, scale: 3
+    t.decimal "qty_reserved", precision: 12, scale: 3
+    t.decimal "qty_safety_stock", precision: 12, scale: 3
+    t.string "abc_curve"
+    t.integer "lead_time_days"
+    t.boolean "infinite_inventory", default: false, null: false
+    t.datetime "synced_at", null: false
+    t.jsonb "raw_payload", default: {}, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["product_id"], name: "index_stock_snapshots_on_product_id"
+    t.index ["tenant_id", "product_id", "synced_at"], name: "idx_on_tenant_id_product_id_synced_at_bb178532bc"
+    t.index ["tenant_id"], name: "index_stock_snapshots_on_tenant_id"
   end
 
   create_table "tenants", force: :cascade do |t|
@@ -685,5 +749,12 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_17_010100) do
   add_foreign_key "pricing_rules", "channels"
   add_foreign_key "pricing_rules", "products"
   add_foreign_key "products", "tenants"
+  add_foreign_key "stock_alert_rules", "products"
+  add_foreign_key "stock_alert_rules", "tenants"
+  add_foreign_key "stock_alerts", "products"
+  add_foreign_key "stock_alerts", "stock_alert_rules", on_delete: :nullify
+  add_foreign_key "stock_alerts", "tenants"
+  add_foreign_key "stock_snapshots", "products"
+  add_foreign_key "stock_snapshots", "tenants"
   add_foreign_key "users", "tenants"
 end

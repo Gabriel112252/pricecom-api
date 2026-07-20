@@ -101,6 +101,113 @@ RSpec.describe Integrations::YampiAdapter do
     end
   end
 
+  # Payload shape taken from docs.yampi.com.br's documented schema (not a
+  # real store — we have no live Yampi credentials to verify cardinality
+  # against, see YampiAdapter#update_stock's class comment).
+  describe "#fetch_sku_stocks" do
+    let(:stocks_url) { "https://api.dooki.com.br/v2/minha-loja/catalog/skus/987001/stocks" }
+    let(:stocks_fixture) { File.read(Rails.root.join("spec/fixtures/integrations/yampi_sku_stocks.json")) }
+
+    it "returns the normalized stock records for a SKU" do
+      stub_request(:get, stocks_url)
+        .with(query: hash_including("page" => "1"), headers: { "User-Token" => "tok123", "User-Secret-Key" => "sec456" })
+        .to_return(status: 200, body: stocks_fixture, headers: { "Content-Type" => "application/json" })
+
+      records = adapter.fetch_sku_stocks("987001")
+
+      expect(records).to eq([
+        { id: 1, stock_id: 5, quantity: BigDecimal("100"), min_quantity: BigDecimal("10") }
+      ])
+    end
+
+    it "paginates until total_pages is reached, same as fetch_products" do
+      page1 = JSON.parse(stocks_fixture)
+      page1["meta"]["pagination"] = page1["meta"]["pagination"].merge("current_page" => 1, "total_pages" => 2)
+      page2 = { "data" => [ { "id" => 2, "stock_id" => 6, "quantity" => 3, "min_quantity" => 1 } ],
+                "meta" => { "pagination" => { "current_page" => 2, "total_pages" => 2 } } }
+      json_headers = { "Content-Type" => "application/json" }
+
+      stub_request(:get, stocks_url).with(query: hash_including("page" => "1")).to_return(status: 200, body: page1.to_json, headers: json_headers)
+      stub_request(:get, stocks_url).with(query: hash_including("page" => "2")).to_return(status: 200, body: page2.to_json, headers: json_headers)
+
+      records = adapter.fetch_sku_stocks("987001")
+
+      expect(records.map { |r| r[:id] }).to eq([ 1, 2 ])
+    end
+
+    it "raises AuthenticationError on 401, same as every other read method" do
+      stub_request(:get, stocks_url).with(query: hash_including("page" => "1"))
+        .to_return(status: 401, body: { message: "Unauthenticated" }.to_json)
+
+      expect { adapter.fetch_sku_stocks("987001") }.to raise_error(Integrations::AuthenticationError)
+    end
+  end
+
+  describe "#update_stock" do
+    let(:stocks_url) { "https://api.dooki.com.br/v2/minha-loja/catalog/skus/987001/stocks" }
+    let(:stock_put_url) { "https://api.dooki.com.br/v2/minha-loja/catalog/skus/987001/stocks/1" }
+    let(:one_record_fixture) { File.read(Rails.root.join("spec/fixtures/integrations/yampi_sku_stocks.json")) }
+
+    def stub_one_stock_record
+      stub_request(:get, stocks_url).with(query: hash_including("page" => "1"))
+        .to_return(status: 200, body: one_record_fixture, headers: { "Content-Type" => "application/json" })
+    end
+
+    it "writes the new quantity, resending the existing stock_id/min_quantity unchanged" do
+      stub_one_stock_record
+      stub_request(:put, stock_put_url)
+        .with(body: { stock_id: 5, quantity: 42, min_quantity: 10 }.to_json,
+              headers: { "User-Token" => "tok123", "User-Secret-Key" => "sec456" })
+        .to_return(status: 200, body: { data: { id: 1, stock_id: 5, quantity: 42, min_quantity: 10 } }.to_json,
+                   headers: { "Content-Type" => "application/json" })
+
+      result = adapter.update_stock(external_id: "987001", quantity: 42)
+
+      expect(result).to eq(id: 1, stock_id: 5, quantity: BigDecimal("42"), min_quantity: BigDecimal("10"))
+      expect(WebMock).to have_requested(:put, stock_put_url).with(body: { stock_id: 5, quantity: 42, min_quantity: 10 }.to_json)
+    end
+
+    it "raises ApiError instead of guessing when the SKU has zero stock records" do
+      stub_request(:get, stocks_url).with(query: hash_including("page" => "1"))
+        .to_return(status: 200, body: { data: [], meta: { pagination: { total_pages: 1 } } }.to_json,
+                   headers: { "Content-Type" => "application/json" })
+
+      expect { adapter.update_stock(external_id: "987001", quantity: 42) }
+        .to raise_error(Integrations::ApiError, /found 0/)
+      expect(WebMock).not_to have_requested(:put, /stocks/)
+    end
+
+    it "raises ApiError instead of guessing when the SKU has more than one stock record (multi-warehouse)" do
+      stub_request(:get, stocks_url).with(query: hash_including("page" => "1"))
+        .to_return(status: 200, body: { data: [
+          { id: 1, stock_id: 5, quantity: 100, min_quantity: 10 },
+          { id: 2, stock_id: 6, quantity: 3, min_quantity: 1 }
+        ], meta: { pagination: { total_pages: 1 } } }.to_json, headers: { "Content-Type" => "application/json" })
+
+      expect { adapter.update_stock(external_id: "987001", quantity: 42) }
+        .to raise_error(Integrations::ApiError, /found 2/)
+      expect(WebMock).not_to have_requested(:put, /stocks/)
+    end
+
+    it "raises AuthenticationError on 401 from the PUT call, same as every other write" do
+      stub_one_stock_record
+      stub_request(:put, stock_put_url).to_return(status: 401, body: { message: "Unauthenticated" }.to_json)
+
+      expect { adapter.update_stock(external_id: "987001", quantity: 42) }
+        .to raise_error(Integrations::AuthenticationError)
+    end
+
+    it "raises RateLimitError on 429 from the PUT call" do
+      stub_one_stock_record
+      stub_request(:put, stock_put_url)
+        .to_return(status: 429, body: { message: "Too Many Requests" }.to_json, headers: { "Retry-After" => "5" })
+
+      expect { adapter.update_stock(external_id: "987001", quantity: 42) }.to raise_error(Integrations::RateLimitError) do |error|
+        expect(error.retry_after).to eq(5)
+      end
+    end
+  end
+
   describe "#fetch_orders" do
     let(:orders_url) { "https://api.dooki.com.br/v2/minha-loja/orders" }
     let(:orders_fixture) { File.read(Rails.root.join("spec/fixtures/integrations/yampi_orders.json")) }

@@ -10,12 +10,12 @@ RSpec.describe "Data Source Configs", type: :request do
   end
 
   describe "GET /api/v1/data_source_configs" do
-    it "returns all 4 data types even with no config rows yet" do
+    it "returns all 5 data types even with no config rows yet" do
       get "/api/v1/data_source_configs", headers: auth_headers(operador)
 
       expect(response).to have_http_status(:ok)
       body = JSON.parse(response.body)
-      expect(body.map { |c| c["data_type"] }).to contain_exactly("cost", "freight", "tax", "payment_reconciliation")
+      expect(body.map { |c| c["data_type"] }).to contain_exactly("cost", "freight", "tax", "payment_reconciliation", "stock")
       expect(body.all? { |c| c["source"].nil? }).to eq(true)
     end
 
