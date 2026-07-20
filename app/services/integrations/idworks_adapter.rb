@@ -57,7 +57,15 @@ module Integrations
     # → [{ idworks_id:, sku:, cost_last_purchase:, cost_average: }]
     def fetch_products
       products = []
-      page = 1
+      # idworks' Page param is 0-indexed (confirmed against production
+      # 2026-07-21: Page=0 returned 441 real skus, Page=1 came back empty)
+      # — starting at 1 skipped the entire first (and often only) page on
+      # every tenant, silently: HTTP 200, empty array, no error anywhere.
+      # This was the root cause of cost_price staying zero in
+      # ProductCostSyncJob and qty_available staying zero in
+      # Idworks::StockSyncJob — those services were never wrong, they just
+      # never received any data to process.
+      page = 0
       @product_response_debug = []
 
       loop do
@@ -87,7 +95,7 @@ module Integrations
     #      value_order:, value_paid: }]
     def fetch_orders(from:, to:)
       orders = []
-      page = 1
+      page = 0 # 0-indexed, same as #fetch_products — see that method's comment
       @order_response_debug = []
 
       loop do
@@ -197,6 +205,18 @@ module Integrations
       body.slice(*PAGINATION_KEYS)
     end
 
+    # NOT adjusted for the Page param becoming 0-indexed (2026-07-21) —
+    # deliberately. Whether "TotalPages" means a page *count* (last valid
+    # index = total_pages - 1) or the last valid 0-indexed page number
+    # itself is still unverified (same "STILL UNVERIFIED" pagination
+    # envelope this class's header already flags), and guessing wrong in
+    # the count direction would truncate real pages, not just waste one
+    # extra call. #fetch_products/#fetch_orders's `break if items.blank?`
+    # is what actually terminates correctly regardless of that offset —
+    # confirmed by the real production request that exposed this bug
+    # (Page=1 came back an empty array, which is exactly what stops the
+    # loop today). Leaving this comparison as-is is the safer side of an
+    # unconfirmed assumption.
     def last_page?(pagination, page)
       total_pages = first_present(pagination, "TotalPages", "totalPages", "Pages", "pages").to_i
       return true if total_pages.positive? && page >= total_pages

@@ -85,11 +85,12 @@ RSpec.describe "idworks integration", type: :request do
       DataSourceConfig.ensure_defaults_for_source!(tenant, "idworks")
 
       stub_signin
-      stub_request(:get, "#{base_url}/sku").with(query: hash_including("Page" => "1"))
+      # idworks' Page param is 0-indexed — see IdworksAdapter#fetch_products.
+      stub_request(:get, "#{base_url}/sku").with(query: hash_including("Page" => "0"))
         .to_return(status: 200, body: sku_fixture, headers: { "Content-Type" => "application/json" })
-      stub_request(:get, "#{base_url}/sku").with(query: hash_including("Page" => "2"))
+      stub_request(:get, "#{base_url}/sku").with(query: hash_including("Page" => "1"))
         .to_return(status: 200, body: { "Data" => [] }.to_json, headers: { "Content-Type" => "application/json" })
-      stub_request(:get, "#{base_url}/orders").with(query: hash_including("Page" => "1"))
+      stub_request(:get, "#{base_url}/orders").with(query: hash_including("Page" => "0"))
         .to_return(status: 200, body: { "Data" => [] }.to_json, headers: { "Content-Type" => "application/json" })
 
       post "/api/v1/integrations/idworks/sync", headers: auth_headers(admin)

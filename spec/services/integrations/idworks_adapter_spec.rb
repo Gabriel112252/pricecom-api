@@ -44,11 +44,20 @@ RSpec.describe Integrations::IdworksAdapter do
   describe "#fetch_products" do
     before do
       stub_signin
+      # idworks' Page param is 0-indexed — confirmed against production
+      # 2026-07-21 (Page=0 returned real skus, Page=1 came back empty).
+      # Starting the loop at Page=1 used to skip this entire first page
+      # silently (200 OK, empty array) on every tenant.
       stub_request(:get, sku_url)
-        .with(query: hash_including("Page" => "1"), headers: { "Authorization" => "Bearer #{JSON.parse(signin_fixture)['token']}", "Origin" => "https://erp-www.idworks.com.br" })
+        .with(query: hash_including("Page" => "0"), headers: { "Authorization" => "Bearer #{JSON.parse(signin_fixture)['token']}", "Origin" => "https://erp-www.idworks.com.br" })
         .to_return(status: 200, body: sku_fixture, headers: { "Content-Type" => "application/json" })
-      stub_request(:get, sku_url).with(query: hash_including("Page" => "2"))
+      stub_request(:get, sku_url).with(query: hash_including("Page" => "1"))
         .to_return(status: 200, body: { "Data" => [] }.to_json, headers: { "Content-Type" => "application/json" })
+    end
+
+    it "requests the first page as Page=0, not Page=1" do
+      adapter.fetch_products
+      expect(WebMock).to have_requested(:get, sku_url).with(query: hash_including("Page" => "0"))
     end
 
     it "signs in first, then returns sku/cost_last_purchase/cost_average per product" do
@@ -87,23 +96,29 @@ RSpec.describe Integrations::IdworksAdapter do
     end
 
     it "stops paginating once a page comes back empty" do
-      stub_request(:get, sku_url).with(query: hash_including("Page" => "2"))
+      stub_request(:get, sku_url).with(query: hash_including("Page" => "1"))
         .to_return(status: 200, body: { "Data" => [] }.to_json, headers: { "Content-Type" => "application/json" })
 
       adapter.fetch_products
-      expect(WebMock).to have_requested(:get, sku_url).with(query: hash_including("Page" => "2"))
-      expect(WebMock).not_to have_requested(:get, sku_url).with(query: hash_including("Page" => "3"))
+      expect(WebMock).to have_requested(:get, sku_url).with(query: hash_including("Page" => "1"))
+      expect(WebMock).not_to have_requested(:get, sku_url).with(query: hash_including("Page" => "2"))
     end
   end
 
   describe "#fetch_orders" do
     before do
       stub_signin
+      # Same 0-indexed Page param as #fetch_products.
       stub_request(:get, orders_url)
-        .with(query: hash_including("Page" => "1", "DateFrom" => "2026-06-01T00:00:00Z", "DateTo" => "2026-06-01T02:00:00Z"))
+        .with(query: hash_including("Page" => "0", "DateFrom" => "2026-06-01T00:00:00Z", "DateTo" => "2026-06-01T02:00:00Z"))
         .to_return(status: 200, body: orders_fixture, headers: { "Content-Type" => "application/json" })
-      stub_request(:get, orders_url).with(query: hash_including("Page" => "2"))
+      stub_request(:get, orders_url).with(query: hash_including("Page" => "1"))
         .to_return(status: 200, body: { "Data" => [] }.to_json, headers: { "Content-Type" => "application/json" })
+    end
+
+    it "requests the first page as Page=0, not Page=1" do
+      adapter.fetch_orders(from: Time.utc(2026, 6, 1, 0, 0, 0), to: Time.utc(2026, 6, 1, 2, 0, 0))
+      expect(WebMock).to have_requested(:get, orders_url).with(query: hash_including("Page" => "0"))
     end
 
     it "returns order_ref/idworks_order_id/value_shipping and related value fields" do

@@ -16,9 +16,10 @@ RSpec.describe Integrations::Idworks::ProductCostSyncService do
     stub_request(:post, "https://cliente.idworks.com.br/1.0/user/signin/local")
       .to_return(status: signin_status, body: signin_status == 200 ? signin_fixture : { message: "Invalid" }.to_json,
                  headers: { "Content-Type" => "application/json" })
-    stub_request(:get, "https://cliente.idworks.com.br/1.0/sku").with(query: hash_including("Page" => "1"))
+    # idworks' Page param is 0-indexed — see IdworksAdapter#fetch_products.
+    stub_request(:get, "https://cliente.idworks.com.br/1.0/sku").with(query: hash_including("Page" => "0"))
       .to_return(status: 200, body: sku_fixture, headers: { "Content-Type" => "application/json" })
-    stub_request(:get, "https://cliente.idworks.com.br/1.0/sku").with(query: hash_including("Page" => "2"))
+    stub_request(:get, "https://cliente.idworks.com.br/1.0/sku").with(query: hash_including("Page" => "1"))
       .to_return(status: 200, body: { "Data" => [] }.to_json, headers: { "Content-Type" => "application/json" })
   end
 

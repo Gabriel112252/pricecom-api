@@ -21,11 +21,16 @@ module Api
         per   = [ [ params.fetch(:per_page, PER_PAGE_DEFAULT).to_i, 1 ].max, PER_PAGE_MAX ].min
         paged = products.page(params[:page]).per(per)
 
-        listings_by_product = ChannelProductListing.where(product_id: paged.map(&:id)).group_by(&:product_id)
+        listings_by_product = current_tenant.channel_product_listings
+          .where(product_id: paged.map(&:id))
+          .group_by(&:product_id)
         rules_by_product = current_tenant.stock_alert_rules.active.where(product_id: paged.map(&:id)).group_by(&:product_id)
 
         render json: {
           products: paged.map { |p| product_json(p, listings_by_product[p.id] || [], rules_by_product[p.id] || []) },
+          active_channels: current_tenant.channel_credentials
+            .where(status: "active", channel: Channel::PLATFORMS)
+            .pluck(:channel),
           meta: pagination_meta(paged)
         }
       end
@@ -63,6 +68,7 @@ module Api
 
       def channel_json(listing, rule)
         {
+          listing_id: listing.id,
           channel: listing.channel,
           stock_qty: listing.stock_qty,
           min_threshold: rule&.min_threshold

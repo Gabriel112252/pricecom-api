@@ -19,12 +19,21 @@ module StockAlerts
       new(stock_alert).call
     end
 
-    def initialize(stock_alert)
-      @stock_alert = stock_alert
-      @tenant      = stock_alert.tenant
+    # Shared write path for both automatic replenishment and the manual stock
+    # editor. Keeping credential/adapter resolution and channel-specific
+    # kwargs here avoids the manual endpoint drifting from the alert engine.
+    def self.write_stock(listing, quantity)
+      new(listing.tenant).write_stock(listing, quantity)
     end
 
-    def call
+    def initialize(stock_alert_or_tenant)
+      @stock_alert = stock_alert_or_tenant if stock_alert_or_tenant.respond_to?(:suggested_replenishment_qty)
+      @tenant = @stock_alert ? @stock_alert.tenant : stock_alert_or_tenant
+    end
+
+    def call(stock_alert = @stock_alert)
+      @stock_alert = stock_alert
+
       if EvaluationService::AUTOMATION_INCAPABLE_CHANNELS.include?(stock_alert.channel)
         return fail!("canal sem capacidade de escrita automática")
       end
@@ -32,23 +41,33 @@ module StockAlerts
       listing = find_listing
       return fail!("nenhum ChannelProductListing encontrado para este produto/canal") unless listing
 
-      credential = tenant.channel_credentials.find_by(channel: stock_alert.channel)
-      return fail!("nenhuma credencial conectada para o canal #{stock_alert.channel}") unless credential
-
-      extra_args = write_args_for(stock_alert.channel, listing)
-      return fail!(extra_args[:error]) if extra_args[:error]
-
       new_qty = listing.stock_qty.to_d + stock_alert.suggested_replenishment_qty.to_d
-      adapter = Integrations::ProductSyncService.adapter_for(credential)
-      adapter.update_stock(external_id: listing.external_id, quantity: new_qty, **extra_args[:kwargs])
+      write_stock(listing, new_qty)
 
       stock_alert.update!(status: "executed", executed_at: Time.current, error_message: nil)
       listing.update!(stock_qty: new_qty)
 
       Result.new(outcome: :success, error_message: nil)
     rescue Integrations::AuthenticationError, Integrations::RateLimitError,
-           Integrations::ApiError, Integrations::UnsupportedOperationError => e
+           Integrations::ApiError, Integrations::UnsupportedOperationError,
+           NotImplementedError => e
       fail!(e.message)
+    end
+
+    # Resolves the credential/adapter and performs one absolute stock write.
+    # The caller decides whether and when to persist the local quantity.
+    def write_stock(listing, quantity, credential: nil)
+      credential ||= tenant.channel_credentials.find_by(channel: listing.channel)
+      unless credential
+        raise Integrations::AuthenticationError,
+          "nenhuma credencial conectada para o canal #{listing.channel}"
+      end
+
+      extra_args = write_args_for(listing.channel, listing)
+      raise Integrations::ApiError, extra_args[:error] if extra_args[:error]
+
+      adapter = Integrations::ProductSyncService.adapter_for(credential)
+      adapter.update_stock(external_id: listing.external_id, quantity: quantity, **extra_args[:kwargs])
     end
 
     private
@@ -60,10 +79,10 @@ module StockAlerts
     end
 
     # Shopify's #update_stock needs inventory_item_id (not the same value
-    # as external_id — see ShopifyAdapter#update_stock) resolved from the
-    # listing persisted by ProductSyncService. Yampi/others need nothing
-    # extra (Yampi resolves its own write-context live, per-call — see
-    # YampiAdapter#update_stock's comment on why that one isn't persisted).
+    # as external_id — see ShopifyAdapter#update_stock), while TikTok needs
+    # its parent product_id. Both are resolved from the listing persisted by
+    # ProductSyncService. Yampi needs nothing extra because it resolves its
+    # own write-context live per call (see YampiAdapter#update_stock).
     def write_args_for(channel, listing)
       case channel
       when "shopify"
@@ -71,6 +90,11 @@ module StockAlerts
           if listing.external_inventory_item_id.blank?
 
         { kwargs: { inventory_item_id: listing.external_inventory_item_id } }
+      when "tiktok"
+        return { error: "listing sem external_product_id — rode um sync antes de tentar repor" } \
+          if listing.external_product_id.blank?
+
+        { kwargs: { product_id: listing.external_product_id } }
       else
         { kwargs: {} }
       end
