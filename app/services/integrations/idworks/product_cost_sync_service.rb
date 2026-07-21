@@ -51,6 +51,7 @@ module Integrations
         adapter.authenticate
 
         sync_all(adapter)
+        run_deferred_audits
 
         integration.update!(status: "connected", last_synced_at: Time.current)
         finish_log(log, status: item_errors.empty? ? "success" : "error", metadata: count_metadata, errors: item_errors)
@@ -83,6 +84,11 @@ module Integrations
       def product_updated_count = @product_updated_count ||= 0
       def order_items_updated_count = @order_items_updated_count ||= 0
       def orders_recalculated_count = @orders_recalculated_count ||= 0
+      # Deduped across the whole run (not per product): an order with items
+      # from 2+ synced products only needs one audit pass, run after every
+      # product's cost has already landed — see #run_deferred_audits.
+      def recalculated_order_ids = @recalculated_order_ids ||= Set.new
+      def audit_errors = @audit_errors ||= []
       def ignored = @ignored ||= []
       def unmatched = @unmatched ||= []
       def item_errors = @item_errors ||= []
@@ -166,13 +172,29 @@ module Integrations
           .where("order_items.product_id = :product_id OR order_items.sku = :sku", product_id: product.id, sku: product.sku)
       end
 
+      # run_audit: false here — see UpsertOrder#recalculate_costs for the
+      # same convention. Auditing every order inline, once per matching
+      # product, both re-runs 3 checks unrelated to a cost change
+      # (discount/freight/refund mismatches) and re-audits the same order
+      # multiple times when it has items from more than one synced product
+      # in this run. #run_deferred_audits does it once, after sync_all.
       def recalculate_orders(order_ids)
         count = 0
         tenant.orders.where(id: order_ids.uniq).find_each do |order|
-          ::Orders::RecalculateFinancials.call(order)
+          ::Orders::RecalculateFinancials.call(order, run_audit: false)
+          recalculated_order_ids << order.id
           count += 1
         end
         count
+      end
+
+      def run_deferred_audits
+        tenant.orders.where(id: recalculated_order_ids.to_a).find_each do |order|
+          Audits::DetectOrderConflicts.call(order)
+        rescue => e
+          audit_errors << { order_id: order.id, message: e.message }
+          Rails.logger.error("[Integrations::Idworks::ProductCostSyncService] Audits::DetectOrderConflicts failed for order_id=#{order.id}: #{e.message}")
+        end
       end
 
       def record_unmatched(raw)
@@ -234,6 +256,9 @@ module Integrations
           product_updated_count: product_updated_count,
           order_items_updated_count: order_items_updated_count,
           orders_recalculated_count: orders_recalculated_count,
+          audited_orders_count: recalculated_order_ids.size,
+          audit_error_count: audit_errors.size,
+          audit_errors: audit_errors.first(10),
           ignored_count: ignored.size,
           ignored_reason_counts: ignored_reason_counts,
           missing_sku_count: ignored_reason_counts["missing_sku"],

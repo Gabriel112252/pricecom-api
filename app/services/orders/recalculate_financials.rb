@@ -50,10 +50,15 @@ module Orders
       channel = order.channel
       return 0 unless channel
 
+      product_ids = items.filter_map(&:product_id)
+      return 0 if product_ids.empty?
+
+      costs_by_product_id = ChannelOperationalCost.where(product_id: product_ids, channel: channel).index_by(&:product_id)
+
       items.sum do |item|
         next 0 unless item.product_id
 
-        ChannelOperationalCost.find_by(product_id: item.product_id, channel: channel)&.cost.to_f
+        costs_by_product_id[item.product_id]&.cost.to_f
       end
     end
 

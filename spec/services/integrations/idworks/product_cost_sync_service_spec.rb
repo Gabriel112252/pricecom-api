@@ -77,6 +77,36 @@ RSpec.describe Integrations::Idworks::ProductCostSyncService do
 
       expect(product.reload.tax_rate).to eq(BigDecimal("9.99")) # untouched
     end
+
+    it "recalculates orders with run_audit: false, deferring the audit to after the whole sync" do
+      product = tenant.products.find_by(sku: "CAM-001-P-AZUL")
+      order = tenant.orders.create!(
+        channel: channel, external_id: "ORDER-1", order_number: "ORDER-1",
+        gross_value: 150, freight: 10, ordered_at: Time.current, order_type: "sale"
+      )
+      order.order_items.create!(product: product, sku: product.sku, name: product.name, quantity: 2, unit_price: 75, unit_cost: nil)
+
+      expect(::Orders::RecalculateFinancials).to receive(:call).with(order, run_audit: false).and_call_original
+
+      described_class.call(integration)
+    end
+
+    it "audits each touched order exactly once, even when it has items from 2 synced products" do
+      camisa = tenant.products.find_by(sku: "CAM-001-P-AZUL")
+      caneca = tenant.products.find_by(sku: "CAN-001")
+      order = tenant.orders.create!(
+        channel: channel, external_id: "ORDER-1", order_number: "ORDER-1",
+        gross_value: 150, freight: 10, ordered_at: Time.current, order_type: "sale"
+      )
+      order.order_items.create!(product: camisa, sku: camisa.sku, name: camisa.name, quantity: 1, unit_price: 75, unit_cost: nil)
+      order.order_items.create!(product: caneca, sku: caneca.sku, name: caneca.name, quantity: 1, unit_price: 20, unit_cost: nil)
+
+      expect(Audits::DetectOrderConflicts).to receive(:call).with(order).once
+
+      result = described_class.call(integration)
+
+      expect(result.metadata[:audited_orders_count]).to eq(1)
+    end
   end
 
   context "when cost is configured to a different source" do
