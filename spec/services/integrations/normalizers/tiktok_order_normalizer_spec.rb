@@ -1,15 +1,25 @@
 require "rails_helper"
 
-# Regression coverage for a real production bug: gross_value used to be
-# payment.total_amount, which per the Get Order List 202309 doc is the
-# POST-discount amount the buyer paid (total_amount = sub_total +
-# shipping_fee + taxes, with sub_total already net of seller/platform
-# discounts). Order#calculate_margin subtracts `discount` from gross_value,
-# so the discount was double-counted and production showed impossible
-# orders where discount > gross_value (e.g. gross=62.30 / discount=64.34).
-# gross_value must be the PRE-discount total: original_total_product_price
-# + buyer-paid shipping_fee, keeping the identity
-# gross_value - discount == total_amount - taxes.
+# Regression coverage for two real production bugs, both confirmed against
+# the official TikTok Shop settlement statement for tenant Hidrabene, order
+# external_id 584933315891857248:
+#
+# 1. gross_value used to be payment.total_amount, which per the Get Order
+#    List 202309 doc is the POST-discount amount the buyer paid
+#    (total_amount = sub_total + shipping_fee + taxes, with sub_total
+#    already net of seller/platform discounts). Order#calculate_margin
+#    subtracts `discount` from gross_value, so the discount was
+#    double-counted and production showed impossible orders where
+#    discount > gross_value. gross_value must be the PRE-discount total:
+#    original_total_product_price + buyer-paid shipping_fee.
+#
+# 2. discount used to be payment.seller_discount + payment.platform_discount
+#    combined. platform_discount is funded by TikTok, not the seller — the
+#    settlement statement's "Vendas líquidas dos produtos" nets out only
+#    seller_discount (118.90 - 42.04 = 76.86), so folding platform_discount
+#    into `discount` overstated the amount subtracted from the seller's
+#    margin by exactly the platform_discount (here, R$ 6.78: stored
+#    discount was 48.82 instead of the correct 42.04).
 RSpec.describe Integrations::Normalizers::TiktokOrderNormalizer do
   let(:orders_fixture) { JSON.parse(File.read(Rails.root.join("spec/fixtures/integrations/tiktok_orders.json"))) }
   let(:raw_order) { orders_fixture.dig("data", "orders").first }
@@ -17,13 +27,17 @@ RSpec.describe Integrations::Normalizers::TiktokOrderNormalizer do
 
   describe "order totals (Get Order List 202309 payment{} semantics)" do
     it "sets gross_value to the PRE-discount total (original products + paid shipping), not total_amount" do
-      # original_total_product_price 119.80 + shipping_fee 6.84
-      expect(normalized[:gross_value]).to be_within(0.001).of(126.64)
-      expect(normalized[:gross_value]).not_to be_within(0.001).of(62.30)
+      # original_total_product_price 118.90 + shipping_fee 6.84
+      expect(normalized[:gross_value]).to be_within(0.001).of(125.74)
+      expect(normalized[:gross_value]).not_to be_within(0.001).of(76.92)
     end
 
-    it "sums seller_discount and platform_discount into discount" do
-      expect(normalized[:discount]).to be_within(0.001).of(64.34)
+    it "extracts only seller_discount into discount, excluding platform_discount" do
+      expect(normalized[:discount]).to be_within(0.001).of(42.04)
+    end
+
+    it "extracts platform_discount separately, for audit only" do
+      expect(normalized[:platform_discount]).to be_within(0.001).of(6.78)
     end
 
     it "uses the buyer-paid shipping_fee as freight" do
@@ -42,13 +56,7 @@ RSpec.describe Integrations::Normalizers::TiktokOrderNormalizer do
       expect(bare[:original_shipping_fee]).to be_nil
       expect(bare[:shipping_fee_seller_discount]).to be_nil
       expect(bare[:shipping_fee_platform_discount]).to be_nil
-    end
-
-    it "keeps gross_value - discount == payment.total_amount (taxes are zero)" do
-      total_amount = raw_order.dig("payment", "total_amount").to_f
-
-      expect(normalized[:gross_value] - normalized[:discount]).to be_within(0.001).of(total_amount)
-      expect(normalized[:discount]).to be <= normalized[:gross_value]
+      expect(bare[:platform_discount]).to eq(0.0)
     end
   end
 
@@ -97,9 +105,11 @@ RSpec.describe Integrations::Normalizers::TiktokOrderNormalizer do
         external_product_id: "999888777",
         is_gift:             false
       )
-      expect(normalized[:items].first[:unit_price]).to be_within(0.001).of(29.95)
-      # 2 × (seller_discount 10.00 + platform_discount 22.17)
-      expect(normalized[:items].first[:discount]).to be_within(0.001).of(64.34)
+      expect(normalized[:items].first[:unit_price]).to be_within(0.001).of(35.04)
+      # 2 × (seller_discount 21.02 + platform_discount 3.39) — per-item
+      # discount is untouched by this fix (out of scope: it isn't read by
+      # Order#calculate_margin, only the order-level `discount` is)
+      expect(normalized[:items].first[:discount]).to be_within(0.001).of(48.82)
     end
   end
 

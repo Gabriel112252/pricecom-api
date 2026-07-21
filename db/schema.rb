@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_07_21_020000) do
+ActiveRecord::Schema[7.2].define(version: 2026_07_21_030000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -542,6 +542,8 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_21_020000) do
     t.decimal "original_shipping_fee", precision: 10, scale: 2
     t.decimal "shipping_fee_platform_discount", precision: 10, scale: 2
     t.decimal "shipping_fee_seller_discount", precision: 10, scale: 2
+    t.decimal "seller_discount", precision: 10, scale: 2, default: "0.0", null: false
+    t.decimal "platform_discount", precision: 10, scale: 2, default: "0.0", null: false
     t.index "tenant_id, lower((status)::text)", name: "index_orders_on_tenant_id_and_lower_status"
     t.index ["channel_id"], name: "index_orders_on_channel_id"
     t.index ["tenant_id", "cart_token"], name: "index_orders_on_tenant_id_and_cart_token"

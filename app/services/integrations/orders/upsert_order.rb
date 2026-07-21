@@ -81,6 +81,10 @@ module Integrations
           attrs[:shipping_fee_platform_discount] = @normalized[:shipping_fee_platform_discount]
           attrs[:shipping_fee_seller_discount]   = @normalized[:shipping_fee_seller_discount]
         end
+        if order_has_platform_discount_audit?
+          attrs[:seller_discount]   = @normalized[:discount].to_f
+          attrs[:platform_discount] = @normalized[:platform_discount].to_f
+        end
 
         order.assign_attributes(attrs)
         order.save!
@@ -185,6 +189,10 @@ module Integrations
 
       def order_has_shipping_fee_audit?
         @order_has_shipping_fee_audit ||= Order.column_names.include?("original_shipping_fee")
+      end
+
+      def order_has_platform_discount_audit?
+        @order_has_platform_discount_audit ||= Order.column_names.include?("platform_discount")
       end
 
       def upsert_order_mapping(order)

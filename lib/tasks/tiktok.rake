@@ -82,4 +82,68 @@ namespace :tiktok do
 
     puts "Done."
   end
+
+  desc "Backfill seller_discount/platform_discount para pedidos TikTok já sincronizados (re-busca cada " \
+       "pedido na API do TikTok — ver Integrations::Tiktok::DiscountBackfillService). " \
+       "Uso: rake tiktok:backfill_discounts[Hidrabene]"
+  task :backfill_discounts, [ :tenant_name ] => :environment do |_t, args|
+    tenant_name = args[:tenant_name]
+    abort "Uso: rake tiktok:backfill_discounts[NomeDoTenant]" if tenant_name.blank?
+
+    tenant = Tenant.find_by(name: tenant_name)
+    abort "Tenant '#{tenant_name}' não encontrado" unless tenant
+
+    credential = tenant.channel_credentials.find_by(channel: "tiktok")
+    abort "Tenant '#{tenant_name}' não tem ChannelCredential tiktok" unless credential
+
+    total = tenant.channels.find_by(platform: "tiktok")&.orders&.count.to_i
+    puts "Tenant: #{tenant.name} (id=#{tenant.id})"
+    puts "Pedidos TikTok encontrados: #{total}"
+    puts "Isso re-busca CADA pedido na API do TikTok (Get Order Detail, lotes de " \
+         "#{Integrations::Tiktok::DiscountBackfillService::BATCH_SIZE}) e reprocessa o pedido inteiro " \
+         "(status, endereço, itens, frete, desconto) — não só as colunas de desconto."
+    print "Confirma o início do backfill? (digite 'sim' para continuar): "
+    confirmation = $stdin.gets&.strip
+
+    if confirmation != "sim"
+      puts "Cancelado."
+      next
+    end
+
+    job = Integrations::Tiktok::DiscountBackfillJob.perform_later(tenant_id: tenant.id)
+    puts "Job enfileirado (job_id: #{job.job_id}). Acompanhe o progresso com:"
+    puts "  rake tiktok:backfill_status[#{tenant_name}]"
+  end
+
+  desc "Mostra o progresso do backfill de desconto TikTok (IntegrationSyncLog action=" \
+       "tiktok_discount_backfill). Uso: rake tiktok:backfill_status[Hidrabene]"
+  task :backfill_status, [ :tenant_name ] => :environment do |_t, args|
+    tenant_name = args[:tenant_name]
+    abort "Uso: rake tiktok:backfill_status[NomeDoTenant]" if tenant_name.blank?
+
+    tenant = Tenant.find_by(name: tenant_name)
+    abort "Tenant '#{tenant_name}' não encontrado" unless tenant
+
+    log = IntegrationSyncLog
+      .where(tenant: tenant, action: Integrations::Tiktok::DiscountBackfillService::ACTION)
+      .order(created_at: :desc)
+      .first
+
+    unless log
+      puts "Nenhum backfill encontrado para #{tenant_name}."
+      next
+    end
+
+    meta = log.metadata
+    puts "Status: #{log.status}"
+    puts "Iniciado em: #{log.started_at}"
+    puts "Processados: #{meta['processed_count']} / #{meta['total_orders']}"
+    puts "Erros: #{meta['error_count']}"
+    puts "Último lote em: #{meta['last_batch_at']}"
+    puts "Finalizado em: #{log.finished_at || 'ainda em andamento'}"
+    if meta["error_samples"].present?
+      puts "Amostra de erros:"
+      meta["error_samples"].each { |e| puts "  - #{e}" }
+    end
+  end
 end

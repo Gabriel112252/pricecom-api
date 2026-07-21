@@ -45,13 +45,16 @@ module Integrations
           refund_reason:  @p["refund_reason"] || @p["reason"] || @p.dig("refund", "reason"),
           # gross_value must be the PRE-discount order total: the rest of
           # the system (Order#calculate_margin, dashboard) subtracts
-          # `discount` from it. payment.total_amount is the POST-discount
-          # amount the buyer paid (doc: total_amount = sub_total +
-          # shipping_fee + taxes, where sub_total is already net of
-          # seller/platform discounts) — storing it here double-counted the
+          # `discount` from it. payment.total_amount is the POST-*both*-
+          # discounts amount the buyer paid (doc: total_amount = sub_total +
+          # shipping_fee + taxes, where sub_total already nets out seller
+          # AND platform discounts) — storing it here double-counted the
           # discount and produced discount > gross_value in production.
-          # Identity kept (taxes are zero outside US/cross-border):
-          #   gross_value - discount == payment.total_amount - taxes
+          # No clean gross_value/discount/total_amount identity holds
+          # anymore now that `discount` below is seller_discount only:
+          # gross_value - discount lands on TikTok's own "Vendas líquidas
+          # dos produtos" (confirmed against a real settlement statement),
+          # not on payment.total_amount, which still nets both discounts.
           gross_value:    extract_gross_value,
           freight:        extract_freight,
           # Decomposição do frete do payment object (Get Order Detail),
@@ -61,7 +64,12 @@ module Integrations
           original_shipping_fee:          payment_audit_value("original_shipping_fee"),
           shipping_fee_platform_discount: payment_audit_value("shipping_fee_platform_discount"),
           shipping_fee_seller_discount:   payment_audit_value("shipping_fee_seller_discount"),
-          discount:       extract_discount,
+          # discount (used by Order#calculate_margin) is seller_discount
+          # only — same split as the shipping_fee_* audit trio above.
+          # platform_discount is TikTok-funded, not the seller's: it never
+          # reduces the seller's margin, so it's kept audit-only.
+          discount:          extract_discount,
+          platform_discount: extract_platform_discount,
           coupon_code:    extract_coupon_code,
           coupon_discount: extract_coupon_discount,
           ordered_at:     parse_date(@p["create_time"] || @p["created_at"]),
@@ -179,12 +187,15 @@ module Integrations
         )
       end
 
-      # payment.seller_discount / payment.platform_discount are the
-      # product-level discounts (shipping discounts are already reflected
-      # in payment.shipping_fee).
+      # Seller-funded product discount only. payment.platform_discount is
+      # TikTok-funded (confirmed against a real Hidrabene settlement
+      # statement: "Vendas líquidas dos produtos" = original_total_product_price
+      # - seller_discount, with platform_discount excluded) — summing it in
+      # here used to overstate the discount subtracted from margin by
+      # exactly the platform_discount amount.
       def extract_discount
         payment = payment_hash
-        return to_f(payment["seller_discount"]) + to_f(payment["platform_discount"]) if payment
+        return to_f(payment["seller_discount"]) if payment
 
         to_f(
           @p["discount"] ||
@@ -192,6 +203,15 @@ module Integrations
           @p["platform_discount"] ||
           @p["total_discount"]
         )
+      end
+
+      # Audit-only: never subtracted in Order#calculate_margin (see
+      # shipping_fee_platform_discount for the freight equivalent).
+      def extract_platform_discount
+        payment = payment_hash
+        return to_f(payment["platform_discount"]) if payment
+
+        to_f(@p["platform_discount"])
       end
 
       def payment_hash
