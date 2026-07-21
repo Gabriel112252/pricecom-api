@@ -5,6 +5,8 @@ module Integrations
     # identity, items, gross value, discounts and seller/platform discount
     # fields belong to the order/detail pipeline and are left untouched here.
     class OrderFinancialSyncService
+      class PendingStatementError < Integrations::ApiError; end
+
       def self.call(order:, channel_credential:, adapter: nil)
         new(order: order, channel_credential: channel_credential, adapter: adapter).call
       end
@@ -69,7 +71,13 @@ module Integrations
             "TiktokOrderFinancialSync: Finance API retornou code=#{code.inspect} message=#{message.inspect}"
         end
 
-        return if response["data"].is_a?(Hash)
+        data = response["data"]
+        if data.nil? || data == {}
+          raise PendingStatementError,
+            "TiktokOrderFinancialSync: Finance API ainda não disponibilizou o demonstrativo"
+        end
+
+        return if data.is_a?(Hash)
 
         raise Integrations::ApiError, "TiktokOrderFinancialSync: Finance API retornou data inválido"
       end

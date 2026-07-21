@@ -95,6 +95,16 @@ RSpec.describe Integrations::Tiktok::OrderFinancialSyncService do
     expect(order.financial_synced_at).to be_nil
   end
 
+  it "classifies a successful response without statement data as pending" do
+    allow(adapter).to receive(:fetch_order_statement_transactions)
+      .with("584933315891857248")
+      .and_return("code" => 0, "data" => {})
+
+    expect { sync_order }
+      .to raise_error(Integrations::Tiktok::OrderFinancialSyncService::PendingStatementError)
+    expect(order.reload.financial_synced_at).to be_nil
+  end
+
   it "rejects an order belonging to another channel before the external call" do
     order.update!(channel: tenant.channels.create!(name: "Yampi", platform: "yampi"))
 
