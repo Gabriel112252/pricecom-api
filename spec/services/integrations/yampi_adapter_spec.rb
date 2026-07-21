@@ -1,9 +1,9 @@
 require "rails_helper"
 
-# All assertions here run against the mocked payload in
-# spec/fixtures/integrations/yampi_products.json (shape verified against
-# docs.yampi.com.br/api-reference on 2026-07-09 — see YampiAdapter's class
-# comment). No real Yampi API call is made or verified anywhere in this spec.
+# Most assertions here run against the mocked payload in
+# spec/fixtures/integrations/yampi_products.json. The stock-priority
+# regression below mirrors the real Hidrabene embedded SKU payload confirmed
+# on 2026-07-21; no real Yampi API call is made by this spec.
 RSpec.describe Integrations::YampiAdapter do
   let(:credentials) { { alias: "minha-loja", token: "tok123", secret_key: "sec456" } }
   let(:adapter) { described_class.new(credentials) }
@@ -80,6 +80,30 @@ RSpec.describe Integrations::YampiAdapter do
         price:        BigDecimal("29.9"),
         stock_qty:    BigDecimal("10")
       )
+    end
+
+    it "uses total_in_stock instead of embedded availability flag" do
+      raw = {
+        "id" => 101,
+        "sku" => "0101",
+        "price_sale" => 19.9,
+        "availability" => 1,
+        "total_in_stock" => 733,
+        "_product_name" => "Produto Hidrabene"
+      }
+
+      expect(adapter.normalize_product(raw)).to include(stock_qty: BigDecimal("733"))
+    end
+
+    it "falls back to availability when total_in_stock is absent" do
+      raw = {
+        "id" => 109,
+        "sku" => "0109",
+        "availability" => 7,
+        "_product_name" => "Produto legado"
+      }
+
+      expect(adapter.normalize_product(raw)).to include(stock_qty: BigDecimal("7"))
     end
 
     it "paginates until total_pages is reached" do

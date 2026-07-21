@@ -226,6 +226,59 @@ RSpec.describe Integrations::TiktokAdapter do
     end
   end
 
+  describe "#fetch_order_statement_transactions" do
+    let(:statement_url) { "https://open-api.tiktokglobalshop.com/finance/202501/orders/584933315891857248/statement_transactions" }
+    let(:statement_fixture) { File.read(Rails.root.join("spec/fixtures/integrations/tiktok_order_statement_transactions.json")) }
+
+    it "GETs the order statement with the explicit shop_cipher and returns the complete envelope" do
+      captured_request = nil
+
+      stub_request(:get, /\A#{Regexp.escape(statement_url)}/)
+        .with { |request| captured_request = request }
+        .to_return(status: 200, body: statement_fixture, headers: { "Content-Type" => "application/json" })
+
+      result = adapter.fetch_order_statement_transactions("584933315891857248")
+
+      query = Rack::Utils.parse_query(captured_request.uri.query)
+      expect(query).to include("shop_cipher" => "GCP_cipher")
+      expect(query).to include("timestamp", "sign")
+      expect(captured_request.headers["X-Tts-Access-Token"]).to eq("tok789")
+      expect(result).to eq(JSON.parse(statement_fixture))
+    end
+
+    it "strips whitespace from a numeric order_id before building the path" do
+      captured_request = nil
+
+      stub_request(:get, /\A#{Regexp.escape(statement_url)}/)
+        .with { |request| captured_request = request }
+        .to_return(status: 200, body: statement_fixture, headers: { "Content-Type" => "application/json" })
+
+      adapter.fetch_order_statement_transactions(" 584933315891857248 ")
+
+      expect(captured_request.uri.path).to eq("/finance/202501/orders/584933315891857248/statement_transactions")
+    end
+
+    it "rejects a blank order_id before making an HTTP request" do
+      expect { adapter.fetch_order_statement_transactions(" ") }
+        .to raise_error(ArgumentError, /order_id inválido/)
+    end
+
+    it "rejects a non-numeric order_id before making an HTTP request" do
+      expect { adapter.fetch_order_statement_transactions("584933315891857248x") }
+        .to raise_error(ArgumentError, /order_id inválido/)
+    end
+
+    it "raises an authentication error when shop_cipher is absent without exposing credentials" do
+      adapter_without_shop_cipher = described_class.new(credentials.merge(shop_cipher: " "))
+
+      expect { adapter_without_shop_cipher.fetch_order_statement_transactions("584933315891857248") }
+        .to raise_error(Integrations::AuthenticationError) { |error|
+          expect(error.message).to include("reautorize a integração TikTok Shop")
+          expect(error.message).not_to include("tok789", "secret456", "GCP_cipher")
+        }
+    end
+  end
+
   describe "#fetch_warehouses" do
     let(:warehouses_url) { "https://open-api.tiktokglobalshop.com/logistics/202309/warehouses" }
     let(:warehouses_fixture) { File.read(Rails.root.join("spec/fixtures/integrations/tiktok_warehouses.json")) }

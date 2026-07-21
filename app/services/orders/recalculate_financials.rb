@@ -41,6 +41,10 @@ module Orders
     def commission_for
       channel = order.channel
       return 0 unless channel
+      if channel.platform.to_s.casecmp?("tiktok") &&
+          order.respond_to?(:financial_synced_at) && order.financial_synced_at.present?
+        return order.fee_and_tax_amount.to_f
+      end
 
       commission_pct = channel.commission_pct.to_f / 100.0
       ((order.gross_value.to_f * commission_pct) + channel.commission_fixed.to_f).round(2)

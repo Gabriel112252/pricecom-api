@@ -1,0 +1,24 @@
+{
+  "code": 0,
+  "message": "Success",
+  "data": {
+    "order_id": "584933315891857248",
+    "revenue_amount": "76.86",
+    "fee_and_tax_amount": "-28.59",
+    "settlement_amount": "48.27",
+    "shipping_cost_amount": "0",
+    "sku_transactions": [
+      {
+        "sku_id": "584933315891857248-1",
+        "fee_tax_breakdown": {
+          "fee": {
+            "affiliate_commission_amount": "-15.37",
+            "platform_commission_amount": "-4.61",
+            "fee_per_item_sold_amount": "-4.00",
+            "sfp_service_fee_amount": "-4.61"
+          }
+        }
+      }
+    ]
+  }
+}

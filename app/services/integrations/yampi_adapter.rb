@@ -1,8 +1,8 @@
 module Integrations
   # Yampi Catalog API (Admin v2). Shape verified against the public docs at
   # docs.yampi.com.br/api-reference (catalogo/produtos and catalogo/skus)
-  # on 2026-07-09 — NOT verified against a live store, since we have no
-  # real Yampi credentials yet.
+  # on 2026-07-09, with the embedded SKU stock fields confirmed against a
+  # real Hidrabene payload on 2026-07-21 (see #normalize_product).
   #
   # Auth: headers `User-Token` / `User-Secret-Key`.
   # Base URL: https://api.dooki.com.br/v2/{alias} — `alias` (the store's
@@ -251,43 +251,21 @@ module Integrations
       )
     end
 
-    # INVESTIGATED 2026-07-21, NOT CHANGED — production shows "1.0" for
-    # almost every product's Yampi stock, which reads as suspicious (many
-    # different real SKUs unlikely to share the same real count). The
-    # specific hypothesis raised (a boolean "has stock" flag being read as
-    # a quantity) is REFUTED by Yampi's own documented schema: on the
-    # standalone Sku resource (docs.yampi.com.br/api-reference/catalogo/
-    # skus/listar-skus), both `availability` ("Quantidade disponível em
-    # estoque") and `total_in_stock` ("Quantidade total em estoque") are
-    # documented as `integer` — real quantity fields, not booleans.
-    #
-    # What's still NOT confirmed: whether the embedded sku objects under
-    # `skus.data[]` (returned by GET /catalog/products?include=skus — the
-    # endpoint #fetch_products actually calls) carry the exact same fields
-    # as that standalone Sku resource. The docs for the products/list
-    # endpoint don't spell out the embedded shape at all (only the
-    # top-level Product/ProductAdditionalResponse schemas), so there's no
-    # official confirmation either way here — same class of "assumed
-    # shape never checked against a real embedded payload" risk that just
-    # turned out wrong for idworks' sku field (see IdworksAdapter). A "1.0
-    # for nearly every SKU" pattern is also just plausible as genuinely
-    # low/default real stock in a small store's Yampi catalog — not
-    # necessarily a bug at all.
-    #
-    # Blocked on confirming further: the only Yampi credential in this
-    # environment is a known non-working placeholder (403 on
-    # #authenticate, confirmed again 2026-07-21) — not a real Hidrabene
-    # store. Needs either a real working credential, or someone checking
-    # one specific SKU's stock count directly in the Yampi seller
-    # dashboard to compare against what this method reads for that same
-    # SKU. Not changing this extraction without one of those.
+    # INVESTIGATED 2026-07-21, CONFIRMED AGAINST REAL HIDRABENE PAYLOAD — on
+    # GET /catalog/products?include=skus, the embedded SKU payload returns
+    # `availability` as a binary availability flag (1 for practically every
+    # SKU), despite the standalone Sku documentation describing that field
+    # as a quantity. The actual per-SKU quantity on this endpoint is
+    # `total_in_stock`, confirmed against real payloads (for example, SKU
+    # 0101: 733 and SKU 0109: 9905). Keep `availability` only as a fallback
+    # for payloads that do not include `total_in_stock`.
     def normalize_product(raw)
       {
         external_id:   raw["id"].to_s,
         external_sku:  raw["sku"],
         name:          raw["_product_name"],
         price:         to_decimal(raw["price_sale"] || raw["price"]),
-        stock_qty:     to_decimal(raw["availability"] || raw["total_in_stock"]),
+        stock_qty:     to_decimal(raw["total_in_stock"] || raw["availability"]),
         raw:           raw.except("_product_name")
       }
     end

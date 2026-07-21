@@ -31,6 +31,7 @@ module Integrations
     WAREHOUSE_LIST_PATH = "/logistics/202309/warehouses".freeze
     ORDER_SEARCH_PATH = "/order/202309/orders/search".freeze
     ORDER_DETAIL_PATH = "/order/202309/orders".freeze
+    ORDER_STATEMENT_TRANSACTIONS_PATH = "/finance/202501/orders".freeze
     SHOP_SCOPED_PATHS = [
       PRODUCT_SEARCH_PATH,
       INVENTORY_SEARCH_PATH,
@@ -193,6 +194,25 @@ module Integrations
 
       body = get(ORDER_DETAIL_PATH, query_params: { ids: ids.join(",") })
       body.dig("data", "orders") || []
+    end
+
+    # Finance API 202501. Returns the complete statement-transactions
+    # envelope; the financial sync service validates `code` and persists the
+    # complete `data` payload for auditability.
+    def fetch_order_statement_transactions(order_id)
+      normalized_order_id = order_id.to_s.strip
+      unless /\A\d+\z/.match?(normalized_order_id)
+        raise ArgumentError, "TiktokAdapter#fetch_order_statement_transactions: order_id inválido"
+      end
+
+      shop_cipher = credentials[:shop_cipher].presence
+      if shop_cipher.blank?
+        raise AuthenticationError,
+          "TiktokAdapter: shop_cipher ausente; reautorize a integração TikTok Shop"
+      end
+
+      path = "#{ORDER_STATEMENT_TRANSACTIONS_PATH}/#{normalized_order_id}/statement_transactions"
+      get(path, query_params: { shop_cipher: shop_cipher })
     end
 
     private
