@@ -60,7 +60,7 @@ RSpec.describe Integrations::Tiktok::OrderFinancialSyncService do
     expect(order.service_fee_amount).to eq(BigDecimal("4.61"))
     expect(order.commission).to eq(BigDecimal("28.59"))
     expect(order.margin).to eq(BigDecimal("31.04"))
-    expect(order.margin_pct).to eq(BigDecimal("26.11"))
+    expect(order.margin_pct).to eq(BigDecimal("40.39"))
     expect(order.financial_breakdown).to eq(statement_response["data"])
     expect(order.financial_synced_at).to be_present
   end
@@ -79,6 +79,7 @@ RSpec.describe Integrations::Tiktok::OrderFinancialSyncService do
     expect(order.commission).to eq(BigDecimal("28.59"))
     expect(order.fee_and_tax_amount).to eq(BigDecimal("28.59"))
     expect(order.margin).to eq(BigDecimal("31.04"))
+    expect(order.margin_pct).to eq(BigDecimal("40.39"))
     expect(adapter).to have_received(:fetch_order_statement_transactions).twice
   end
 
@@ -250,6 +251,6 @@ RSpec.describe Integrations::Tiktok::OrderFinancialSyncService do
     order.reload
     expect(order.commission).to eq(BigDecimal("28.59"))
     expect(order.margin).to eq(BigDecimal("31.04"))
-    expect(order.margin_pct).to eq(BigDecimal("26.11"))
+    expect(order.margin_pct).to eq(BigDecimal("40.39"))
   end
 end

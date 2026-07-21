@@ -41,8 +41,25 @@ class Order < ApplicationRecord
   MARGIN_PCT_RANGE = (-999.99..999.99)
 
   def calculate_margin
-    self.margin = gross_value.to_f - cost_price.to_f - effective_freight_cost - discount.to_f - commission.to_f - operational_cost.to_f - effective_tax_amount
-    self.margin_pct = gross_value.to_f > 0 ? (margin / gross_value.to_f * 100).round(2).clamp(MARGIN_PCT_RANGE.min, MARGIN_PCT_RANGE.max) : 0
+    if tiktok_financially_synced?
+      self.margin = if settlement_amount.nil?
+        revenue_amount.to_f - fee_and_tax_amount.to_f - cost_price.to_f
+      else
+        settlement_amount.to_f - cost_price.to_f
+      end
+      margin_denominator = revenue_amount.to_f
+    else
+      self.margin = gross_value.to_f - cost_price.to_f - effective_freight_cost - discount.to_f - commission.to_f - operational_cost.to_f - effective_tax_amount
+      margin_denominator = gross_value.to_f
+    end
+
+    self.margin_pct = margin_denominator > 0 ? (margin / margin_denominator * 100).round(2).clamp(MARGIN_PCT_RANGE.min, MARGIN_PCT_RANGE.max) : 0
+  end
+
+  def tiktok_financially_synced?
+    channel&.platform.to_s.casecmp?("tiktok") &&
+      respond_to?(:financial_synced_at) && financial_synced_at.present? &&
+      respond_to?(:settlement_amount) && respond_to?(:revenue_amount) && respond_to?(:fee_and_tax_amount)
   end
 
   def net_gross_value
