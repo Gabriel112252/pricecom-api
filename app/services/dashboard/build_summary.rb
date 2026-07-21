@@ -80,7 +80,7 @@ module Dashboard
         discount_ticket_summary:  build_discount_ticket_summary(orders_scope),
         product_discount_exposure: build_product_discount_exposure(orders_scope),
         revenue:                  build_revenue(orders_scope, period_rows, granularity, current_totals, prev_totals),
-        financial:                build_financial(current_totals, prev_totals, data_quality, period),
+        financial:                build_financial(orders_scope, current_totals, prev_totals, data_quality, period),
         margin:                   build_margin(period_rows, granularity, current_totals, prev_totals, data_quality),
         orders:                   build_orders(orders_scope, granularity, current_totals, prev_totals),
         data_sources:             build_data_sources,
@@ -236,7 +236,7 @@ module Dashboard
       }
     end
 
-    def build_financial(current_totals, prev_totals, data_quality, period)
+    def build_financial(scope, current_totals, prev_totals, data_quality, period)
       product_cost = current_totals[:product_cost].round(2)
       financial_available = data_quality[:financial_status] == "complete"
 
@@ -265,7 +265,8 @@ module Dashboard
         # nenhum campo salvo em Order). Não usar em listas/tabelas de
         # pedidos, só como card/stat agregado.
         gateway_fee_avg_per_order: gateway_fee_avg_per_order(period),
-        gateway_fee_avg_per_order_available: payment_reconciliation_source_configured?
+        gateway_fee_avg_per_order_available: payment_reconciliation_source_configured?,
+        tiktok_financial_breakdown: build_tiktok_financial_breakdown(scope)
       }
     end
 
@@ -520,10 +521,15 @@ module Dashboard
       coupon_predicate = "coupon_code IS NOT NULL AND TRIM(coupon_code) <> ''"
       uncoded_discount_predicate = "(coupon_code IS NULL OR TRIM(coupon_code) = '') AND COALESCE(discount, 0) > 0"
       shipping_subsidy_predicate = "real_freight_cost IS NOT NULL AND COALESCE(real_freight_cost, 0) > COALESCE(freight, 0)"
-      coupon_scope = scope.where(coupon_predicate)
-      uncoded_discount_scope = scope.where(uncoded_discount_predicate)
-      shipping_subsidy_scope = scope.where(shipping_subsidy_predicate)
-      incentive_scope = scope.where("(#{coupon_predicate}) OR (#{uncoded_discount_predicate}) OR (#{shipping_subsidy_predicate})")
+      channel_scope = scope.joins(:channel)
+      coupon_scope = channel_scope.where(coupon_predicate)
+      uncoded_discount_scope = channel_scope
+        .where(uncoded_discount_predicate)
+        .where.not(channels: { platform: "tiktok" })
+      shipping_subsidy_scope = channel_scope.where(shipping_subsidy_predicate)
+      incentive_scope = channel_scope.where(
+        "(#{coupon_predicate}) OR ((#{uncoded_discount_predicate}) AND channels.platform <> 'tiktok') OR (#{shipping_subsidy_predicate})"
+      )
       total_orders = scope.count
       orders_count = coupon_scope.count
       total_discount = coupon_scope.sum(Arel.sql(coupon_value_sql)).to_f
@@ -550,8 +556,8 @@ module Dashboard
       end.sort_by { |row| [ -row[:discount_total], -row[:orders_count] ] }.first(10)
 
       # Blocos por plataforma: Yampi tem cupom identificado (coupon_code);
-      # TikTok só expõe o desconto agregado do pedido (seller + platform,
-      # ver TiktokOrderNormalizer#extract_discount), sem decompor por tipo.
+      # TikTok expõe desconto de vendedor, subsídio da plataforma e os totais
+      # financeiros somente quando o demonstrativo foi sincronizado.
       # `available` segue o filtro de canal do dashboard (channel_ids), não
       # a presença de dados — com filtro só-TikTok o card Yampi some em vez
       # de aparecer vazio.
@@ -576,8 +582,19 @@ module Dashboard
       }
       discount_breakdown_tiktok = {
         available: filtered_platforms.include?("tiktok"),
-        orders_count: tiktok_scope.where("COALESCE(discount, 0) > 0").count,
-        discount_total: tiktok_scope.sum(:discount).to_f.round(2)
+        orders_count: tiktok_scope.count,
+        financial_synced_orders_count: tiktok_financial_synced_scope(tiktok_scope).count,
+        financial_coverage_percentage: tiktok_coverage_percentage(tiktok_scope),
+        reference_price_total: tiktok_scope.sum(:gross_value).to_f.round(2),
+        effective_revenue_total: tiktok_effective_revenue_total(tiktok_scope),
+        buyer_paid_product_total: tiktok_buyer_paid_product_total(tiktok_scope),
+        seller_discount_total: tiktok_scope.sum(Arel.sql(tiktok_seller_discount_sql)).to_f.round(2),
+        seller_discount_orders_count: tiktok_scope.where(Arel.sql("(#{tiktok_seller_discount_sql}) > 0")).count,
+        platform_subsidy_total: tiktok_scope.sum(Arel.sql(tiktok_platform_subsidy_sql)).to_f.round(2),
+        platform_subsidy_orders_count: tiktok_scope.where(Arel.sql("(#{tiktok_platform_subsidy_sql}) > 0")).count,
+        seller_shipping_subsidy_total: tiktok_scope.sum(Arel.sql("GREATEST(COALESCE(orders.shipping_fee_seller_discount, 0), 0)")).to_f.round(2),
+        platform_shipping_subsidy_total: tiktok_scope.sum(Arel.sql("GREATEST(COALESCE(orders.shipping_fee_platform_discount, 0), 0)")).to_f.round(2),
+        discount_total: tiktok_scope.sum(Arel.sql(tiktok_seller_discount_sql)).to_f.round(2)
       }
 
       commercial_discount_total = uncoded_discount_total
@@ -613,6 +630,110 @@ module Dashboard
         discount_breakdown_yampi: discount_breakdown_yampi,
         discount_breakdown_tiktok: discount_breakdown_tiktok,
         by_product: build_discount_by_product(scope)
+      }
+    end
+
+    def build_tiktok_financial_breakdown(scope)
+      return empty_tiktok_financial_breakdown unless tiktok_financial_fields_available?
+
+      tiktok_scope = scope.joins(:channel).where(channels: { platform: "tiktok" })
+      synced_scope = tiktok_financial_synced_scope(tiktok_scope)
+      orders_count = tiktok_scope.count
+      synced_orders_count = synced_scope.count
+
+      {
+        available: filtered_platforms.include?("tiktok"),
+        orders_count: orders_count,
+        synced_orders_count: synced_orders_count,
+        coverage_percentage: orders_count.positive? ? (synced_orders_count.to_f / orders_count * 100).round(2) : 0,
+        revenue_amount_total: synced_scope.sum(:revenue_amount).to_f.round(2),
+        settlement_amount_total: synced_scope.sum(:settlement_amount).to_f.round(2),
+        fee_and_tax_amount_total: synced_scope.sum(:fee_and_tax_amount).to_f.round(2),
+        platform_commission_total: synced_scope.sum(:platform_commission_amount).to_f.round(2),
+        affiliate_commission_total: synced_scope.sum(:affiliate_commission_amount).to_f.round(2),
+        item_fee_total: synced_scope.sum(:item_fee_amount).to_f.round(2),
+        service_fee_total: synced_scope.sum(:service_fee_amount).to_f.round(2),
+        shipping_cost_total: synced_scope.sum(:shipping_cost_amount).to_f.round(2),
+        other_fees_total: synced_scope.sum(Arel.sql(tiktok_other_fees_sql)).to_f.round(2)
+      }
+    end
+
+    def tiktok_financial_synced_scope(scope)
+      return scope.none unless tiktok_financial_fields_available?
+
+      scope.where.not(financial_synced_at: nil)
+    end
+
+    def tiktok_coverage_percentage(scope)
+      orders_count = scope.count
+      synced_count = tiktok_financial_synced_scope(scope).count
+      orders_count.positive? ? (synced_count.to_f / orders_count * 100).round(2) : 0
+    end
+
+    def tiktok_buyer_paid_product_total(scope)
+      synced_scope = tiktok_financial_synced_scope(scope)
+      effective_revenue = synced_scope.sum(:revenue_amount).to_f
+      platform_subsidy = synced_scope.sum(Arel.sql(tiktok_platform_subsidy_sql)).to_f
+      (effective_revenue - platform_subsidy).round(2)
+    end
+
+    def tiktok_effective_revenue_total(scope)
+      return 0.0 unless tiktok_financial_fields_available?
+
+      tiktok_financial_synced_scope(scope).sum(:revenue_amount).to_f.round(2)
+    end
+
+    def tiktok_seller_discount_sql
+      return "GREATEST(COALESCE(orders.seller_discount, 0), 0)" unless tiktok_financial_fields_available?
+
+      "CASE WHEN COALESCE(orders.seller_discount, 0) > 0 " \
+        "THEN COALESCE(orders.seller_discount, 0) " \
+        "WHEN orders.financial_synced_at IS NOT NULL " \
+        "THEN GREATEST(COALESCE(orders.gross_value, 0) - COALESCE(orders.revenue_amount, 0), 0) " \
+        "ELSE 0 END"
+    end
+
+    def tiktok_platform_subsidy_sql
+      return "GREATEST(COALESCE(orders.platform_discount, 0), 0)" unless tiktok_financial_fields_available?
+
+      "CASE WHEN COALESCE(orders.platform_discount, 0) > 0 " \
+        "THEN COALESCE(orders.platform_discount, 0) " \
+        "WHEN orders.financial_synced_at IS NOT NULL " \
+        "THEN GREATEST(COALESCE(orders.discount, 0) - (#{tiktok_seller_discount_sql}), 0) " \
+        "ELSE 0 END"
+    end
+
+    def tiktok_other_fees_sql
+      "GREATEST(COALESCE(orders.fee_and_tax_amount, 0) " \
+        "- COALESCE(orders.platform_commission_amount, 0) " \
+        "- COALESCE(orders.affiliate_commission_amount, 0) " \
+        "- COALESCE(orders.item_fee_amount, 0) " \
+        "- COALESCE(orders.service_fee_amount, 0), 0)"
+    end
+
+    def tiktok_financial_fields_available?
+      @tiktok_financial_fields_available ||= %w[
+        financial_synced_at revenue_amount settlement_amount fee_and_tax_amount
+        shipping_cost_amount platform_commission_amount affiliate_commission_amount
+        item_fee_amount service_fee_amount
+      ].all? { |column| Order.column_names.include?(column) }
+    end
+
+    def empty_tiktok_financial_breakdown
+      {
+        available: false,
+        orders_count: 0,
+        synced_orders_count: 0,
+        coverage_percentage: 0.0,
+        revenue_amount_total: 0.0,
+        settlement_amount_total: 0.0,
+        fee_and_tax_amount_total: 0.0,
+        platform_commission_total: 0.0,
+        affiliate_commission_total: 0.0,
+        item_fee_total: 0.0,
+        service_fee_total: 0.0,
+        shipping_cost_total: 0.0,
+        other_fees_total: 0.0
       }
     end
 
@@ -1321,8 +1442,27 @@ module Dashboard
         breakdown: [],
         top_coupons: [],
         discount_breakdown_yampi: { available: false, orders_count: 0, discount_total: 0.0, top_coupons: [] },
-        discount_breakdown_tiktok: { available: false, orders_count: 0, discount_total: 0.0 },
+        discount_breakdown_tiktok: empty_tiktok_discount_breakdown,
         by_product: []
+      }
+    end
+
+    def empty_tiktok_discount_breakdown
+      {
+        available: false,
+        orders_count: 0,
+        financial_synced_orders_count: 0,
+        financial_coverage_percentage: 0.0,
+        reference_price_total: 0.0,
+        effective_revenue_total: 0.0,
+        buyer_paid_product_total: 0.0,
+        seller_discount_total: 0.0,
+        seller_discount_orders_count: 0,
+        platform_subsidy_total: 0.0,
+        platform_subsidy_orders_count: 0,
+        seller_shipping_subsidy_total: 0.0,
+        platform_shipping_subsidy_total: 0.0,
+        discount_total: 0.0
       }
     end
 

@@ -310,7 +310,8 @@ RSpec.describe Dashboard::BuildSummary do
         expect(yampi).to include(available: true, orders_count: 2, discount_total: 25.0)
         expect(yampi[:top_coupons].map { |row| row[:code] }).to eq(%w[BEMVINDO VIP])
         expect(result[:coupons][:discount_breakdown_tiktok]).to include(
-          available: true, orders_count: 1, discount_total: 30.0
+          available: true, orders_count: 2, discount_total: 0.0,
+          seller_discount_total: 0.0, platform_subsidy_total: 0.0
         )
       end
 
@@ -318,7 +319,9 @@ RSpec.describe Dashboard::BuildSummary do
         result = summary_for(channel_ids: [ channel_a.id.to_s ])
 
         expect(result[:coupons][:discount_breakdown_yampi]).to include(available: true, orders_count: 2, discount_total: 25.0)
-        expect(result[:coupons][:discount_breakdown_tiktok]).to include(available: false, orders_count: 0, discount_total: 0.0)
+        expect(result[:coupons][:discount_breakdown_tiktok]).to include(
+          available: false, orders_count: 0, discount_total: 0.0
+        )
       end
 
       it "marks the Yampi block unavailable under a TikTok-only filter" do
@@ -327,7 +330,154 @@ RSpec.describe Dashboard::BuildSummary do
         yampi = result[:coupons][:discount_breakdown_yampi]
         expect(yampi).to include(available: false, orders_count: 0, discount_total: 0.0)
         expect(yampi[:top_coupons]).to eq([])
-        expect(result[:coupons][:discount_breakdown_tiktok]).to include(available: true, orders_count: 1, discount_total: 30.0)
+        expect(result[:coupons][:discount_breakdown_tiktok]).to include(
+          available: true, orders_count: 2, discount_total: 0.0
+        )
+      end
+    end
+
+    describe "TikTok financial discount and fee breakdown" do
+      let(:channel_tiktok) { tenant.channels.create!(name: "TikTok Shop", platform: "tiktok") }
+
+      def tiktok_summary
+        described_class.call(
+          tenant: tenant,
+          params: ActionController::Parameters.new(
+            from: 6.days.ago.to_date.iso8601,
+            to: Date.current.iso8601,
+            channel_ids: [ channel_tiktok.id.to_s ]
+          )
+        )
+      end
+
+      it "separates seller discount, platform subsidy and financial fees for the real order" do
+        make_order(channel_tiktok, gross: 36.46, margin: 0, ordered_at: 1.day.ago).update!(
+          discount: 18.52,
+          seller_discount: 0,
+          platform_discount: 0,
+          revenue_amount: 29.90,
+          settlement_amount: 17.83,
+          fee_and_tax_amount: 12.07,
+          platform_commission_amount: 1.79,
+          affiliate_commission_amount: 4.49,
+          item_fee_amount: 4.00,
+          service_fee_amount: 1.79,
+          shipping_cost_amount: 0,
+          financial_synced_at: Time.current
+        )
+
+        result = tiktok_summary
+        discount = result[:coupons][:discount_breakdown_tiktok]
+        financial = result[:financial][:tiktok_financial_breakdown]
+
+        expect(result[:coupons]).to include(
+          commercial_discount_total: 0.0,
+          uncoded_discount_total: 0.0
+        )
+        expect(discount).to include(
+          available: true,
+          orders_count: 1,
+          financial_synced_orders_count: 1,
+          financial_coverage_percentage: 100.0,
+          reference_price_total: 36.46,
+          effective_revenue_total: 29.90,
+          buyer_paid_product_total: 17.94,
+          seller_discount_total: 6.56,
+          seller_discount_orders_count: 1,
+          platform_subsidy_total: 11.96,
+          platform_subsidy_orders_count: 1,
+          discount_total: 6.56
+        )
+        expect(financial).to include(
+          available: true,
+          orders_count: 1,
+          synced_orders_count: 1,
+          coverage_percentage: 100.0,
+          revenue_amount_total: 29.90,
+          settlement_amount_total: 17.83,
+          fee_and_tax_amount_total: 12.07,
+          platform_commission_total: 1.79,
+          affiliate_commission_total: 4.49,
+          item_fee_total: 4.00,
+          service_fee_total: 1.79,
+          shipping_cost_total: 0.0,
+          other_fees_total: 0.0
+        )
+      end
+
+      it "prioritizes populated seller and platform discount columns" do
+        make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago).update!(
+          discount: 7,
+          seller_discount: 3,
+          platform_discount: 4,
+          revenue_amount: 47,
+          settlement_amount: 47,
+          fee_and_tax_amount: 0,
+          financial_synced_at: Time.current
+        )
+
+        discount = tiktok_summary[:coupons][:discount_breakdown_tiktok]
+
+        expect(discount).to include(seller_discount_total: 3.0, platform_subsidy_total: 4.0)
+      end
+
+      it "does not let an unsynchronized order reduce buyer paid product total" do
+        make_order(channel_tiktok, gross: 36.46, margin: 0, ordered_at: 1.day.ago).update!(
+          discount: 18.52,
+          seller_discount: 0,
+          platform_discount: 0,
+          revenue_amount: 29.90,
+          settlement_amount: 17.83,
+          fee_and_tax_amount: 12.07,
+          financial_synced_at: Time.current
+        )
+        make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago).update!(
+          discount: 20,
+          platform_discount: 20,
+          revenue_amount: 80,
+          financial_synced_at: nil
+        )
+
+        discount = tiktok_summary[:coupons][:discount_breakdown_tiktok]
+
+        expect(discount[:buyer_paid_product_total]).to eq(17.94)
+        expect(discount[:platform_subsidy_total]).to eq(31.96)
+      end
+
+      it "keeps coverage at zero without dividing by zero" do
+        financial = tiktok_summary[:financial][:tiktok_financial_breakdown]
+
+        expect(financial).to include(
+          available: true,
+          orders_count: 0,
+          synced_orders_count: 0,
+          coverage_percentage: 0
+        )
+      end
+
+      it "respects the channel filter for TikTok financial values" do
+        make_order(channel_tiktok, gross: 36.46, margin: 0, ordered_at: 1.day.ago).update!(
+          revenue_amount: 29.90,
+          settlement_amount: 17.83,
+          fee_and_tax_amount: 12.07,
+          financial_synced_at: Time.current
+        )
+
+        filtered = described_class.call(
+          tenant: tenant,
+          params: ActionController::Parameters.new(
+            from: 6.days.ago.to_date.iso8601,
+            to: Date.current.iso8601,
+            channel_ids: [ channel_a.id.to_s ]
+          )
+        )
+
+        expect(filtered[:financial][:tiktok_financial_breakdown]).to include(
+          available: false,
+          orders_count: 0,
+          synced_orders_count: 0,
+          coverage_percentage: 0
+        )
       end
     end
 
