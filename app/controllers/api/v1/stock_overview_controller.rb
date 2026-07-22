@@ -16,7 +16,7 @@ module Api
       PER_PAGE_MAX     = 100
 
       def index
-        products = apply_filters(current_tenant.products).order(name: :asc)
+        products = apply_sort(apply_filters(current_tenant.products))
 
         per   = [ [ params.fetch(:per_page, PER_PAGE_DEFAULT).to_i, 1 ].max, PER_PAGE_MAX ].min
         paged = products.page(params[:page]).per(per)
@@ -67,12 +67,52 @@ module Api
         end
 
         if params[:channel].present?
-          scope = scope.joins(:channel_product_listings)
-                       .where(channel_product_listings: { channel: params[:channel] })
-                       .distinct
+          # EXISTS instead of joins(...).distinct: apply_sort below orders by
+          # a subquery column that isn't in the SELECT list, which Postgres
+          # rejects when combined with "SELECT DISTINCT" (needed here to
+          # collapse the one-row-per-listing fanout a plain join produces).
+          # EXISTS never fans out in the first place, so no DISTINCT is
+          # needed and the two can compose freely.
+          scope = scope.where(
+            "EXISTS (SELECT 1 FROM channel_product_listings cpl " \
+            "WHERE cpl.product_id = products.id AND cpl.tenant_id = products.tenant_id AND cpl.channel = ?)",
+            params[:channel]
+          )
         end
 
         scope
+      end
+
+      # sort_by is one channel's per-row stock (only sortable columns the
+      # frontend exposes today) — anything else falls back to the default
+      # name order. stock_qty lives on ChannelProductListing, one join away
+      # and not unique per product (a product can have zero or one listing
+      # per channel), so this uses a correlated subquery instead of a JOIN:
+      # a JOIN would need DISTINCT to avoid duplicating product rows across
+      # a page, and Postgres rejects "SELECT DISTINCT" combined with an
+      # ORDER BY column that isn't in the SELECT list.
+      #
+      # sort_by is checked against Channel::PLATFORMS (a fixed whitelist)
+      # before being interpolated into the subquery, so it's never
+      # attacker-controlled SQL by the time it reaches the string.
+      # NULLS LAST in both directions matches the previous frontend-only
+      # sort's tie-break: products without a listing for the sorted channel
+      # always sink to the bottom, not just for ASC (Postgres' own default
+      # would put nulls first on DESC).
+      def apply_sort(scope)
+        sort_by = params[:sort_by].to_s
+        return scope.order(name: :asc) unless Channel::PLATFORMS.include?(sort_by)
+
+        sort_dir = params[:sort_dir].to_s.downcase == "desc" ? "DESC" : "ASC"
+        quoted_channel = ActiveRecord::Base.connection.quote(sort_by)
+
+        scope
+          .order(Arel.sql(<<~SQL.squish))
+            (SELECT stock_qty FROM channel_product_listings cpl
+             WHERE cpl.product_id = products.id AND cpl.tenant_id = products.tenant_id AND cpl.channel = #{quoted_channel}
+             LIMIT 1) #{sort_dir} NULLS LAST
+          SQL
+          .order(name: :asc)
       end
 
       def product_json(product, listings, rules)
