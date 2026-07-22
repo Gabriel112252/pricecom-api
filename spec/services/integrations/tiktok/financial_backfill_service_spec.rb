@@ -38,13 +38,14 @@ RSpec.describe Integrations::Tiktok::FinancialBackfillService do
     )
   end
 
-  def run_backfill(force: false, batch_size: 50, max_orders: nil)
+  def run_backfill(force: false, batch_size: 50, max_orders: nil, run_id: nil)
     described_class.call(
       channel_credential,
       batch_size: batch_size,
       batch_sleep: 0,
       force: force,
-      max_orders: max_orders
+      max_orders: max_orders,
+      run_id: run_id
     )
   end
 
@@ -190,6 +191,143 @@ RSpec.describe Integrations::Tiktok::FinancialBackfillService do
     expect(result.pending?).to eq(true)
   end
 
+  it "limits max_orders 1000 across the complete operation" do
+    1_100.times { make_order }
+
+    result = run_backfill(batch_size: 100, max_orders: 1_000, run_id: "run-1000")
+    metadata = latest_log.metadata
+
+    expect(Integrations::Tiktok::OrderFinancialSyncService).to have_received(:call).exactly(1_000).times
+    expect(result.pending?).to eq(true)
+    expect(metadata).to include(
+      "run_id" => "run-1000",
+      "run_started_processed_count" => 0,
+      "run_processed_count" => 1_000,
+      "run_target_count" => 1_000,
+      "max_orders" => 1_000
+    )
+  end
+
+  it "counts processed orders before a rate limit and only processes the remaining capacity on retry" do
+    orders = 1_200.times.map { make_order }
+    rate_limited = true
+    allow(Integrations::Tiktok::OrderFinancialSyncService).to receive(:call) do |order:, **|
+      if order == orders[182] && rate_limited
+        rate_limited = false
+        raise Integrations::RateLimitError.new("too many requests", retry_after: 1)
+      end
+
+      order.update!(financial_synced_at: Time.current)
+      order
+    end
+
+    expect { run_backfill(batch_size: 1_000, max_orders: 1_000, run_id: "run-rate-limit") }
+      .to raise_error(Integrations::RateLimitError)
+
+    first_metadata = latest_log.metadata
+    expect(first_metadata).to include(
+      "run_id" => "run-rate-limit",
+      "run_started_processed_count" => 0,
+      "run_processed_count" => 182,
+      "run_target_count" => 1_000
+    )
+    expect(first_metadata["last_order_id"]).to eq(orders[181].id)
+
+    result = run_backfill(batch_size: 1_000, max_orders: 1_000, run_id: "run-rate-limit")
+    metadata = latest_log.metadata
+
+    expect(result.pending?).to eq(true)
+    expect(metadata["run_processed_count"]).to eq(1_000)
+    expect(metadata["processed_count"]).to eq(1_000)
+    expect(Integrations::Tiktok::OrderFinancialSyncService).not_to have_received(:call).with(
+      hash_including(order: orders[1_000])
+    )
+  end
+
+  it "does not call TikTok after a run reaches its max_orders capacity" do
+    orders = 1_100.times.map { make_order }
+    run_id = "run-capacity"
+
+    run_backfill(batch_size: 100, max_orders: 1_000, run_id: run_id)
+    result = run_backfill(batch_size: 100, max_orders: 1_000, run_id: run_id)
+
+    expect(result.pending?).to eq(true)
+    expect(Integrations::Tiktok::OrderFinancialSyncService).to have_received(:call).exactly(1_000).times
+    expect(Integrations::Tiktok::OrderFinancialSyncService).not_to have_received(:call).with(
+      hash_including(order: orders[1_000])
+    )
+    expect(orders[1_000].reload.financial_synced_at).to be_nil
+  end
+
+  it "starts a new batch with a new run_id while keeping the global processed count" do
+    orders = 2_000.times.map { make_order }
+
+    first_result = run_backfill(batch_size: 100, max_orders: 1_000, run_id: "run-first")
+    second_result = run_backfill(batch_size: 100, max_orders: 1_000, run_id: "run-second")
+    metadata = latest_log.metadata
+
+    expect(first_result.pending?).to eq(true)
+    expect(second_result.success?).to eq(true)
+    expect(metadata).to include(
+      "run_id" => "run-second",
+      "run_started_processed_count" => 1_000,
+      "run_processed_count" => 1_000,
+      "run_target_count" => 1_000,
+      "processed_count" => 2_000
+    )
+    expect(Integrations::Tiktok::OrderFinancialSyncService).to have_received(:call).exactly(2_000).times
+    expect(orders.map { |order| order.reload.financial_synced_at }.compact.size).to eq(2_000)
+  end
+
+  it "resets run_processed_count only when run_id changes" do
+    3.times { make_order }
+
+    run_backfill(batch_size: 1, max_orders: 2, run_id: "run-one")
+    same_run_result = run_backfill(batch_size: 1, max_orders: 2, run_id: "run-one")
+    same_run_metadata = latest_log.metadata
+
+    expect(same_run_result.pending?).to eq(true)
+    expect(same_run_metadata["run_processed_count"]).to eq(2)
+
+    run_backfill(batch_size: 1, max_orders: 1, run_id: "run-two")
+    new_run_metadata = latest_log.metadata
+
+    expect(new_run_metadata["run_started_processed_count"]).to eq(2)
+    expect(new_run_metadata["run_processed_count"]).to eq(1)
+    expect(new_run_metadata["processed_count"]).to eq(3)
+  end
+
+  it "does not inherit a max_orders limit from a legacy log without run_id" do
+    first = make_order(synced: true)
+    second = make_order
+    third = make_order
+    create_pending_log(
+      "channel_credential_id" => channel_credential.id,
+      "force" => false,
+      "processed_count" => 1,
+      "last_order_id" => first.id,
+      "max_orders" => 1
+    )
+
+    result = run_backfill(batch_size: 1, max_orders: 2, run_id: "run-new")
+    metadata = latest_log.metadata
+
+    expect(result.success?).to eq(true)
+    expect(metadata).to include(
+      "run_id" => "run-new",
+      "run_started_processed_count" => 1,
+      "run_processed_count" => 2,
+      "run_target_count" => 2,
+      "processed_count" => 3
+    )
+    expect(Integrations::Tiktok::OrderFinancialSyncService).to have_received(:call).with(
+      hash_including(order: second)
+    ).once
+    expect(Integrations::Tiktok::OrderFinancialSyncService).to have_received(:call).with(
+      hash_including(order: third)
+    ).once
+  end
+
   it "reprocesses old synchronized orders with force and excludes successes during the same run" do
     old_order = make_order(synced: true)
     old_order.update!(financial_synced_at: 1.hour.ago)
@@ -307,16 +445,17 @@ RSpec.describe Integrations::Tiktok::FinancialBackfillService do
 
   it "resets pending samples for the next pass and clears them when resolved" do
     order = make_order
+    run_id = "run-pending-pass"
     allow(Integrations::Tiktok::OrderFinancialSyncService).to receive(:call)
       .and_raise(Integrations::Tiktok::OrderFinancialSyncService::PendingStatementError, "statement unavailable")
 
-    run_backfill
+    run_backfill(run_id: run_id)
 
     allow(Integrations::Tiktok::OrderFinancialSyncService).to receive(:call) do |order:, **|
       order.update!(financial_synced_at: Time.current)
       order
     end
-    result = run_backfill
+    result = run_backfill(run_id: run_id)
 
     expect(result.success?).to eq(true)
     expect(result.metadata["pending_statement_count"]).to eq(0)

@@ -18,7 +18,8 @@ module Integrations
           batch_size: batch_size,
           batch_sleep: batch_sleep,
           force: force,
-          max_orders: max_orders
+          max_orders: max_orders,
+          run_id: job_id
         )
       end
     end

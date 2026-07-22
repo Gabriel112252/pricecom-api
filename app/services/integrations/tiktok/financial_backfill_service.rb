@@ -35,24 +35,27 @@ module Integrations
         batch_size: DEFAULT_BATCH_SIZE,
         batch_sleep: DEFAULT_BATCH_SLEEP,
         force: false,
-        max_orders: nil
+        max_orders: nil,
+        run_id: nil
       )
         new(
           channel_credential,
           batch_size: batch_size,
           batch_sleep: batch_sleep,
           force: force,
-          max_orders: max_orders
+          max_orders: max_orders,
+          run_id: run_id
         ).call
       end
 
-      def initialize(channel_credential, batch_size:, batch_sleep:, force:, max_orders: nil)
+      def initialize(channel_credential, batch_size:, batch_sleep:, force:, max_orders: nil, run_id: nil)
         @channel_credential = channel_credential
         @tenant = channel_credential.tenant
         @batch_size = batch_size.to_i.positive? ? batch_size.to_i : DEFAULT_BATCH_SIZE
         @batch_sleep = batch_sleep.to_f.positive? ? batch_sleep.to_f : 0
         @force = force == true
         @max_orders = max_orders.nil? ? nil : [ max_orders.to_i, 0 ].max
+        @run_id = run_id.to_s.presence
         @adapter = Integrations::TiktokAdapter.new(channel_credential.credentials)
         @lock = FinancialSyncLock.new(channel_credential)
         initialize_counters
@@ -89,12 +92,15 @@ module Integrations
       private
 
       attr_reader :channel_credential, :tenant, :adapter, :lock, :channel, :log,
-        :batch_size, :batch_sleep, :max_orders, :error_samples, :pending_samples
+        :batch_size, :batch_sleep, :max_orders, :error_samples, :pending_samples, :run_id
 
       def initialize_counters
         @total_orders = 0
         @eligible_orders = 0
         @processed_count = 0
+        @run_started_processed_count = 0
+        @run_processed_count = 0
+        @run_target_count = max_orders
         @synced_count = 0
         @skipped_count = 0
         @pending_statement_count = 0
@@ -111,7 +117,7 @@ module Integrations
       end
 
       def resume_or_start_log
-        @log = resumable_pending_log
+        @log = resumable_log
 
         if log
           restore_checkpoint
@@ -119,12 +125,24 @@ module Integrations
           return
         end
 
-        start_new_log
+        start_new_log(latest_checkpoint_log)
       end
 
-      def resumable_pending_log
+      def resumable_log
         IntegrationSyncLog
-          .where(tenant: tenant, action: ACTION, status: "pending")
+          .where(tenant: tenant, action: ACTION, status: %w[pending error])
+          .order(created_at: :desc)
+          .find do |candidate|
+            metadata = candidate.metadata || {}
+            metadata["channel_credential_id"].to_s == channel_credential.id.to_s &&
+              boolean_metadata(metadata["force"]) == force &&
+              same_run?(metadata["run_id"])
+          end
+      end
+
+      def latest_checkpoint_log
+        IntegrationSyncLog
+          .where(tenant: tenant, action: ACTION)
           .order(created_at: :desc)
           .find do |candidate|
             metadata = candidate.metadata || {}
@@ -133,8 +151,12 @@ module Integrations
           end
       end
 
-      def start_new_log
+      def start_new_log(checkpoint_log = nil)
+        restore_global_checkpoint(checkpoint_log)
         @run_started_at = Time.current if force
+        @run_started_processed_count = processed_count
+        @run_processed_count = 0
+        @run_target_count = max_orders
         refresh_scope_counts
         @log = IntegrationSyncLog.create!(
           tenant: tenant,
@@ -151,6 +173,11 @@ module Integrations
         @total_orders = metadata["total_orders"].to_i
         @eligible_orders = metadata["eligible_orders"].to_i
         @processed_count = metadata["processed_count"].to_i
+        @run_started_processed_count = metadata.fetch("run_started_processed_count", @processed_count).to_i
+        @run_processed_count = metadata.fetch("run_processed_count", 0).to_i
+        @run_target_count = metadata.key?("run_target_count") && !metadata["run_target_count"].nil? ?
+          metadata["run_target_count"].to_i : max_orders
+        @max_orders = @run_target_count
         @synced_count = metadata["synced_count"].to_i
         @skipped_count = metadata["skipped_count"].to_i
         @pending_statement_count = metadata["pending_statement_count"].to_i
@@ -164,6 +191,18 @@ module Integrations
         @pass_completed = boolean_metadata(metadata["pass_completed"])
         @error_samples = Array(metadata["error_samples"]).first(MAX_ERROR_SAMPLES)
         @pending_samples = Array(metadata["pending_samples"]).first(MAX_ERROR_SAMPLES)
+      end
+
+      def restore_global_checkpoint(checkpoint_log)
+        return unless checkpoint_log
+
+        metadata = checkpoint_log.metadata || {}
+        @processed_count = metadata["processed_count"].to_i
+        @last_order_id = metadata["last_order_id"].presence if checkpoint_log.status == "pending"
+      end
+
+      def same_run?(stored_run_id)
+        run_id.present? && stored_run_id.present? && stored_run_id.to_s == run_id
       end
 
       def start_next_pass
@@ -185,11 +224,14 @@ module Integrations
       end
 
       def process_batches
+        capacity = remaining_capacity
+        return if capacity && capacity <= 0
+
         scope = eligible_orders
-        scope = scope.limit(max_orders) unless max_orders.nil?
+        scope = scope.limit(capacity) if capacity
 
         # batch_size controls only the number fetched per batch. max_orders
-        # limits the complete relation after the checkpoint has been applied.
+        # limits the complete operation, including retries after a checkpoint.
         scope.find_in_batches(batch_size: batch_size) do |orders|
           renew_lock!
           orders.each_with_index do |order, index|
@@ -217,16 +259,19 @@ module Integrations
           adapter: adapter
         )
         @processed_count += 1
+        @run_processed_count += 1
         @synced_count += 1
         handled = true
       rescue Integrations::AuthenticationError, Integrations::RateLimitError, Faraday::Error, ActiveRecord::Deadlocked
         raise
       rescue Integrations::Tiktok::OrderFinancialSyncService::PendingStatementError => e
         @processed_count += 1
+        @run_processed_count += 1
         record_pending(order, e.message)
         handled = true
       rescue Integrations::ApiError => e
         @processed_count += 1
+        @run_processed_count += 1
         if pending_statement_error?(e)
           record_pending(order, e.message)
         else
@@ -235,6 +280,7 @@ module Integrations
         handled = true
       rescue => e
         @processed_count += 1
+        @run_processed_count += 1
         record_error(order, e.message)
         handled = true
       ensure
@@ -362,6 +408,10 @@ module Integrations
         {
           "channel_credential_id" => channel_credential.id,
           "force" => force,
+          "run_id" => run_id,
+          "run_started_processed_count" => run_started_processed_count,
+          "run_processed_count" => run_processed_count,
+          "run_target_count" => run_target_count,
           "max_orders" => max_orders,
           "run_started_at" => run_started_at,
           "pass_count" => pass_count,
@@ -418,6 +468,14 @@ module Integrations
       def eligible_order_count = @eligible_orders
       def remaining_orders = @remaining_orders
       def processed_count = @processed_count
+      def run_started_processed_count = @run_started_processed_count
+      def run_processed_count = @run_processed_count
+      def run_target_count = @run_target_count
+      def remaining_capacity
+        return if run_target_count.nil?
+
+        run_target_count - run_processed_count
+      end
       def synced_count = @synced_count
       def skipped_count = @skipped_count
       def last_order_id = @last_order_id

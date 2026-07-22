@@ -141,4 +141,22 @@ RSpec.describe "Channel Credentials", type: :request do
       expect(tenant.channels.find_by(platform: "yampi")).to be_present
     end
   end
+
+  describe "POST /api/v1/integrations/:channel/sync" do
+    it "rejects product synchronization for lucrofrete" do
+      tenant.channel_credentials.create!(
+        channel: "lucrofrete",
+        status: "active",
+        credentials: { email: "frete@example.com", password: "password" }
+      )
+      expect(Integrations::ProductSyncService).not_to receive(:call)
+
+      post "/api/v1/integrations/lucrofrete/sync", headers: auth_headers(admin)
+
+      expect(response).to have_http_status(:unprocessable_entity)
+      expect(JSON.parse(response.body)["error"]).to eq(
+        "Sincronização de produtos não suportada para o canal lucrofrete"
+      )
+    end
+  end
 end

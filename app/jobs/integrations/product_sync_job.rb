@@ -8,6 +8,14 @@ module Integrations
       channel_credential = ChannelCredential.find_by(id: channel_credential_id)
       return unless channel_credential
 
+      unless Integrations::ProductSyncService::ADAPTERS.key?(channel_credential.channel)
+        Rails.logger.info(
+          "[ProductSyncJob] ignorando credencial sem adapter credential_id=#{channel_credential.id} " \
+          "channel=#{channel_credential.channel}"
+        )
+        return
+      end
+
       Integrations::ProductSyncService.call(channel_credential)
     end
   end

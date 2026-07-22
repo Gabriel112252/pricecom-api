@@ -11,15 +11,17 @@ RSpec.describe Integrations::Tiktok::FinancialBackfillJob do
   end
 
   it "delegates to FinancialBackfillService with the credential and options" do
+    job = described_class.new(credential.id)
     expect(Integrations::Tiktok::FinancialBackfillService).to receive(:call).with(
       credential,
       batch_size: 10,
       batch_sleep: 0,
       force: true,
-      max_orders: 10
+      max_orders: 10,
+      run_id: job.job_id
     )
 
-    described_class.new.perform(credential.id, batch_size: 10, batch_sleep: 0, force: true, max_orders: 10)
+    job.perform(credential.id, batch_size: 10, batch_sleep: 0, force: true, max_orders: 10)
   end
 
   it "retries LockLostError after one minute" do

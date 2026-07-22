@@ -96,6 +96,12 @@ module Api
           return render json: { error: "Canal ainda não conectado" }, status: :unprocessable_entity
         end
 
+        unless Integrations::ProductSyncService::ADAPTERS.key?(credential.channel)
+          return render json: {
+            error: "Sincronização de produtos não suportada para o canal #{credential.channel}"
+          }, status: :unprocessable_entity
+        end
+
         result = Integrations::ProductSyncService.call(credential)
         credential.reload
 

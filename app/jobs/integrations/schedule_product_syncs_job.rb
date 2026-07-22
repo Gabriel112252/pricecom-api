@@ -9,9 +9,14 @@ module Integrations
     queue_as :integrations
 
     def perform
-      ChannelCredential.active.find_each do |channel_credential|
-        ProductSyncJob.perform_later(channel_credential.id)
-      end
+      supported_channels = Integrations::ProductSyncService::ADAPTERS.keys
+
+      ChannelCredential
+        .active
+        .where(channel: supported_channels)
+        .find_each do |channel_credential|
+          ProductSyncJob.perform_later(channel_credential.id)
+        end
     end
   end
 end
