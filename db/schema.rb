@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_07_21_100000) do
+ActiveRecord::Schema[7.2].define(version: 2026_07_22_060000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -115,8 +115,19 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_21_100000) do
     t.datetime "updated_at", null: false
     t.string "external_inventory_item_id"
     t.string "external_product_id"
+    t.integer "channel_priority"
+    t.string "remote_status"
+    t.string "remote_status_reason"
+    t.jsonb "remote_status_metadata", default: {}, null: false
+    t.datetime "remote_status_synced_at"
+    t.string "selling_status", default: "unknown", null: false
+    t.boolean "selling_enabled", default: false, null: false
+    t.boolean "replenishment_eligible", default: false, null: false
     t.index ["product_id"], name: "index_channel_product_listings_on_product_id"
+    t.index ["selling_status"], name: "index_channel_product_listings_on_selling_status"
     t.index ["tenant_id", "channel", "external_id"], name: "idx_on_tenant_id_channel_external_id_a1d176e2c8", unique: true
+    t.index ["tenant_id", "product_id", "channel_priority"], name: "idx_on_tenant_id_product_id_channel_priority_c4e796e3a1"
+    t.index ["tenant_id", "replenishment_eligible"], name: "idx_on_tenant_id_replenishment_eligible_b3d38ff9b1"
     t.index ["tenant_id"], name: "index_channel_product_listings_on_tenant_id"
   end
 
@@ -628,7 +639,7 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_21_100000) do
   create_table "stock_alert_rules", force: :cascade do |t|
     t.bigint "tenant_id", null: false
     t.bigint "product_id", null: false
-    t.string "channel", null: false
+    t.string "channel"
     t.decimal "min_threshold", precision: 12, scale: 3, default: "0.0", null: false
     t.decimal "target_level", precision: 12, scale: 3, null: false
     t.string "automation_level", default: "manual", null: false
@@ -636,7 +647,7 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_21_100000) do
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
     t.index ["product_id"], name: "index_stock_alert_rules_on_product_id"
-    t.index ["tenant_id", "product_id", "channel"], name: "idx_on_tenant_id_product_id_channel_ed023af094", unique: true
+    t.index ["tenant_id", "product_id"], name: "index_stock_alert_rules_on_tenant_id_and_product_id", unique: true
     t.index ["tenant_id"], name: "index_stock_alert_rules_on_tenant_id"
   end
 
@@ -644,7 +655,7 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_21_100000) do
     t.bigint "tenant_id", null: false
     t.bigint "product_id", null: false
     t.bigint "stock_alert_rule_id"
-    t.string "channel", null: false
+    t.string "channel"
     t.decimal "qty_at_trigger", precision: 12, scale: 3, null: false
     t.decimal "target_level", precision: 12, scale: 3, null: false
     t.decimal "suggested_replenishment_qty", precision: 12, scale: 3, null: false
@@ -656,8 +667,60 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_21_100000) do
     t.datetime "updated_at", null: false
     t.index ["product_id"], name: "index_stock_alerts_on_product_id"
     t.index ["stock_alert_rule_id"], name: "index_stock_alerts_on_stock_alert_rule_id"
-    t.index ["tenant_id", "product_id", "channel", "status"], name: "idx_on_tenant_id_product_id_channel_status_55c369be19"
+    t.index ["tenant_id", "product_id", "status"], name: "index_stock_alerts_on_tenant_id_and_product_id_and_status"
     t.index ["tenant_id"], name: "index_stock_alerts_on_tenant_id"
+  end
+
+  create_table "stock_movements", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "product_id", null: false
+    t.string "channel"
+    t.string "kind", null: false
+    t.decimal "quantity", precision: 12, scale: 3, null: false
+    t.decimal "previous_qty", precision: 12, scale: 3, null: false
+    t.decimal "new_qty", precision: 12, scale: 3, null: false
+    t.string "source", null: false
+    t.bigint "user_id"
+    t.jsonb "metadata", default: {}, null: false
+    t.datetime "created_at", null: false
+    t.index ["product_id"], name: "index_stock_movements_on_product_id"
+    t.index ["tenant_id", "channel", "created_at"], name: "index_stock_movements_on_tenant_id_and_channel_and_created_at"
+    t.index ["tenant_id", "product_id", "created_at"], name: "idx_on_tenant_id_product_id_created_at_21445f0600"
+    t.index ["tenant_id"], name: "index_stock_movements_on_tenant_id"
+    t.index ["user_id"], name: "index_stock_movements_on_user_id"
+  end
+
+  create_table "stock_replenishment_executions", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "product_id", null: false
+    t.bigint "channel_product_listing_id", null: false
+    t.bigint "stock_alert_rule_id", null: false
+    t.bigint "stock_alert_id"
+    t.string "trigger_type", default: "minimum_threshold_reached", null: false
+    t.string "status", default: "pending", null: false
+    t.decimal "threshold_qty", precision: 12, scale: 3, null: false
+    t.decimal "target_qty", precision: 12, scale: 3, null: false
+    t.decimal "previous_qty", precision: 12, scale: 3, null: false
+    t.decimal "requested_qty", precision: 12, scale: 3, null: false
+    t.decimal "confirmed_qty", precision: 12, scale: 3
+    t.jsonb "remote_status_snapshot", default: {}, null: false
+    t.jsonb "rule_snapshot", default: {}, null: false
+    t.jsonb "remote_response", default: {}, null: false
+    t.string "idempotency_key", null: false
+    t.integer "attempt_count", default: 0, null: false
+    t.text "error_message"
+    t.datetime "started_at"
+    t.datetime "finished_at"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["channel_product_listing_id", "stock_alert_rule_id"], name: "idx_one_inflight_execution_per_listing_rule", unique: true, where: "((status)::text = ANY ((ARRAY['pending'::character varying, 'executing'::character varying])::text[]))"
+    t.index ["channel_product_listing_id"], name: "idx_on_channel_product_listing_id_11f29f72e1"
+    t.index ["idempotency_key"], name: "index_stock_replenishment_executions_on_idempotency_key", unique: true
+    t.index ["product_id"], name: "index_stock_replenishment_executions_on_product_id"
+    t.index ["stock_alert_id"], name: "index_stock_replenishment_executions_on_stock_alert_id"
+    t.index ["stock_alert_rule_id"], name: "index_stock_replenishment_executions_on_stock_alert_rule_id"
+    t.index ["tenant_id", "product_id", "created_at"], name: "idx_on_tenant_id_product_id_created_at_b2c69d3fb8"
+    t.index ["tenant_id"], name: "index_stock_replenishment_executions_on_tenant_id"
   end
 
   create_table "stock_snapshots", force: :cascade do |t|
@@ -767,6 +830,14 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_21_100000) do
   add_foreign_key "stock_alerts", "products"
   add_foreign_key "stock_alerts", "stock_alert_rules", on_delete: :nullify
   add_foreign_key "stock_alerts", "tenants"
+  add_foreign_key "stock_movements", "products"
+  add_foreign_key "stock_movements", "tenants"
+  add_foreign_key "stock_movements", "users"
+  add_foreign_key "stock_replenishment_executions", "channel_product_listings"
+  add_foreign_key "stock_replenishment_executions", "products"
+  add_foreign_key "stock_replenishment_executions", "stock_alert_rules"
+  add_foreign_key "stock_replenishment_executions", "stock_alerts"
+  add_foreign_key "stock_replenishment_executions", "tenants"
   add_foreign_key "stock_snapshots", "products"
   add_foreign_key "stock_snapshots", "tenants"
   add_foreign_key "users", "tenants"

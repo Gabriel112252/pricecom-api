@@ -261,13 +261,66 @@ module Integrations
     # for payloads that do not include `total_in_stock`.
     def normalize_product(raw)
       {
-        external_id:   raw["id"].to_s,
-        external_sku:  raw["sku"],
-        name:          raw["_product_name"],
-        price:         to_decimal(raw["price_sale"] || raw["price"]),
-        stock_qty:     to_decimal(raw["total_in_stock"] || raw["availability"]),
-        raw:           raw.except("_product_name")
+        external_id:         raw["id"].to_s,
+        external_sku:        raw["sku"],
+        name:                raw["_product_name"],
+        price:               to_decimal(raw["price_sale"] || raw["price"]),
+        stock_qty:           to_decimal(raw["total_in_stock"] || raw["availability"]),
+        external_product_id: raw["_product_id"]&.to_s,
+        raw:                 raw.except("_product_name", "_product_active", "_product_id")
+      }.merge(normalize_selling_status(raw))
+    end
+
+    # product-level `active` confirmed present in the same real Hidrabene
+    # payload #normalize_product's stock-field comment references.
+    # SKU-level `blocked_sale` is NOT independently confirmed against a
+    # live payload (no excerpt with a blocked SKU was available) — this is
+    # the field name Yampi's catalog SKU resource documents for "blocked
+    # from sale," same confidence level as this adapter's other
+    # docs-only-not-live-verified fields (see the adapter's own top
+    # comment). Missing/nil defaults to "not blocked" — the safer
+    # direction, since defaulting to blocked would silently disable a
+    # legitimate SKU's replenishment eligibility.
+    #
+    # searchable (visibility in Yampi's on-site search) is deliberately
+    # NOT part of this — a product can be for sale but excluded from
+    # search, which has no bearing on whether it should receive stock.
+    def normalize_selling_status(raw)
+      product_active = raw["_product_active"]
+      blocked = raw["blocked_sale"] == true
+
+      selling_status =
+        if product_active == false
+          "inactive"
+        elsif blocked
+          "platform_blocked"
+        elsif product_active == true
+          "selling"
+        else
+          "unknown"
+        end
+
+      {
+        remote_status: selling_status,
+        remote_status_reason: blocked ? "sku bloqueado para venda" : nil,
+        remote_status_metadata: { product_active: product_active, blocked_sale: raw["blocked_sale"] },
+        selling_status: selling_status,
+        selling_enabled: product_active == true,
+        replenishment_eligible: product_active == true && !blocked
       }
+    end
+
+    # Fase 4 modal actions — two independent knobs, same confidence level
+    # as #normalize_selling_status's own "not verified against a live
+    # payload" note for blocked_sale: product-level activate/deactivate
+    # (PUT /catalog/products/{id}, body {active:}) and SKU-level
+    # block/unblock sale (PUT /catalog/skus/{id}, body {blocked_sale:}).
+    def update_product_active(product_id:, active:)
+      put("/catalog/products/#{product_id}", { active: active })
+    end
+
+    def update_sku_blocked_sale(sku_id:, blocked:)
+      put("/catalog/skus/#{sku_id}", { blocked_sale: blocked })
     end
 
     private
@@ -284,14 +337,16 @@ module Integrations
       skus = product.dig("skus", "data")
 
       if skus.present?
-        skus.map { |sku| sku.merge("_product_name" => product["name"]) }
+        skus.map { |sku| sku.merge("_product_name" => product["name"], "_product_active" => product["active"], "_product_id" => product["id"]) }
       else
         [
           {
             "id"              => product["id"],
             "sku"             => product["sku"],
             "total_in_stock"  => product["total_in_stock"],
-            "_product_name"   => product["name"]
+            "_product_name"   => product["name"],
+            "_product_active" => product["active"],
+            "_product_id"     => product["id"]
           }
         ]
       end

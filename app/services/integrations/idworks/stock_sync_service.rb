@@ -127,23 +127,42 @@ module Integrations
         )
         if product.changed?
           qty_available_changed = product.will_save_change_to_qty_available?
+          previous_qty_available = product.qty_available_was if qty_available_changed
           product.save!
           @product_updated_count = product_updated_count + 1
-          reevaluate_stock_alerts(product) if qty_available_changed
+          if qty_available_changed
+            record_pool_movement(product, previous_qty_available)
+            reevaluate_stock_alerts(product)
+          end
         end
 
         create_snapshot(product, raw, synced_at)
         record_matched_example(raw, product)
       end
 
-      # qty_available moving changes every channel's free reserve (see
-      # Product#free_reserve) — an old "insufficient_reserve" StockAlert
-      # for this product might now have enough to actually replenish.
-      # Rescued narrowly, same reasoning as ProductSyncService's own
-      # evaluate_stock_alert: a bug here must never be counted as an
-      # idworks stock-sync failure for this SKU.
+      def record_pool_movement(product, previous_qty_available)
+        StockMovement.record!(
+          tenant: tenant,
+          product: product,
+          kind: "sync",
+          previous_qty: previous_qty_available,
+          new_qty: product.qty_available,
+          source: "idworks_sync"
+        )
+      rescue => e
+        Rails.logger.error("[StockMovement] idworks sync log failed for product=#{product.id}: #{e.message}")
+      end
+
+      # qty_available moving changes Product#free_reserve, the pool every
+      # channel's replenishment draws from (see StockAlertRule/
+      # StockAlerts::EvaluationService — Fase 2 of the stock/alerts
+      # migration made the rule/alert product-level instead of per-channel)
+      # — an old alert for this product might now be resolvable, or a drop
+      # in qty_available might newly cross min_threshold. Rescued narrowly,
+      # same reasoning as ProductSyncService's own evaluate_stock_alert: a
+      # bug here must never be counted as an idworks stock-sync failure.
       def reevaluate_stock_alerts(product)
-        StockAlerts::EvaluationService.reevaluate_insufficient_reserves(product)
+        StockAlerts::EvaluationService.call(product)
       rescue => e
         Rails.logger.error("[StockAlert] reevaluation failed for product=#{product.id}: #{e.message}")
       end

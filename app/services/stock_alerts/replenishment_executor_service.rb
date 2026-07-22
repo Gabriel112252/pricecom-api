@@ -1,57 +1,24 @@
 module StockAlerts
-  # Executes one StockAlert's suggested replenishment for real: resolves
-  # the tenant's ChannelCredential/adapter for that channel (same
-  # resolution Integrations::ProductSyncService already uses — reused via
-  # .adapter_for, not duplicated) and calls #update_stock with the new
-  # absolute quantity.
+  # The low-level "write an absolute stock quantity to a channel" primitive
+  # — resolves the tenant's ChannelCredential/adapter for that channel
+  # (same resolution Integrations::ProductSyncService already uses, reused
+  # via .adapter_for) and calls #update_stock.
   #
-  # Never lets an adapter exception escape: whoever calls this (the
-  # automatic path in EvaluationService, or the confirm endpoint) needs to
-  # keep going afterwards — an unhandled raise here would abort a job mid
-  # loop over unrelated products/alerts.
+  # Two callers, both doing their own bookkeeping around this call:
+  # StockAlerts::ExecuteReplenishmentJob (the async replenishment pipeline
+  # — see StockReplenishmentExecution) and
+  # Api::V1::ChannelProductListingsController#update (the manual stock
+  # editor, unrelated to the alert engine — "ajuste manual" stays a
+  # correction of that one channel's own sync, not a pool movement).
+  # Keeping credential/adapter resolution here avoids either of those two
+  # call sites drifting from the other.
   class ReplenishmentExecutorService
-    Result = Struct.new(:outcome, :error_message, keyword_init: true) do
-      def success? = outcome == :success
-      def error?   = outcome == :error
-    end
-
-    def self.call(stock_alert)
-      new(stock_alert).call
-    end
-
-    # Shared write path for both automatic replenishment and the manual stock
-    # editor. Keeping credential/adapter resolution and channel-specific
-    # kwargs here avoids the manual endpoint drifting from the alert engine.
     def self.write_stock(listing, quantity)
       new(listing.tenant).write_stock(listing, quantity)
     end
 
-    def initialize(stock_alert_or_tenant)
-      @stock_alert = stock_alert_or_tenant if stock_alert_or_tenant.respond_to?(:suggested_replenishment_qty)
-      @tenant = @stock_alert ? @stock_alert.tenant : stock_alert_or_tenant
-    end
-
-    def call(stock_alert = @stock_alert)
-      @stock_alert = stock_alert
-
-      if EvaluationService::AUTOMATION_INCAPABLE_CHANNELS.include?(stock_alert.channel)
-        return fail!("canal sem capacidade de escrita automática")
-      end
-
-      listing = find_listing
-      return fail!("nenhum ChannelProductListing encontrado para este produto/canal") unless listing
-
-      new_qty = listing.stock_qty.to_d + stock_alert.suggested_replenishment_qty.to_d
-      write_stock(listing, new_qty)
-
-      stock_alert.update!(status: "executed", executed_at: Time.current, error_message: nil)
-      listing.update!(stock_qty: new_qty)
-
-      Result.new(outcome: :success, error_message: nil)
-    rescue Integrations::AuthenticationError, Integrations::RateLimitError,
-           Integrations::ApiError, Integrations::UnsupportedOperationError,
-           NotImplementedError => e
-      fail!(e.message)
+    def initialize(tenant)
+      @tenant = tenant
     end
 
     # Resolves the credential/adapter and performs one absolute stock write.
@@ -72,11 +39,7 @@ module StockAlerts
 
     private
 
-    attr_reader :stock_alert, :tenant
-
-    def find_listing
-      ChannelProductListing.find_by(tenant: tenant, product: stock_alert.product, channel: stock_alert.channel)
-    end
+    attr_reader :tenant
 
     # Shopify's #update_stock needs inventory_item_id (not the same value
     # as external_id — see ShopifyAdapter#update_stock), while TikTok needs
@@ -98,11 +61,6 @@ module StockAlerts
       else
         { kwargs: {} }
       end
-    end
-
-    def fail!(message)
-      stock_alert.update!(status: "failed", error_message: message)
-      Result.new(outcome: :error, error_message: message)
     end
   end
 end

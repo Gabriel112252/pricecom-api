@@ -26,7 +26,11 @@ Rails.application.routes.draw do
 
       # Channel stock writes (admin only — the controller performs the
       # remote update before changing the local listing quantity).
-      resources :channel_product_listings, only: [ :update ]
+      resources :channel_product_listings, only: [ :update ] do
+        member do
+          post :channel_action
+        end
+      end
 
       # Orders
       resources :orders, only: [ :index, :show, :create ] do

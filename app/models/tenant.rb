@@ -25,6 +25,8 @@ class Tenant < ApplicationRecord
   has_many :stock_snapshots, dependent: :destroy
   has_many :stock_alert_rules, dependent: :destroy
   has_many :stock_alerts, dependent: :destroy
+  has_many :stock_movements, dependent: :destroy
+  has_many :stock_replenishment_executions, dependent: :destroy
 
   validates :name, presence: true
   validates :slug, presence: true, uniqueness: true

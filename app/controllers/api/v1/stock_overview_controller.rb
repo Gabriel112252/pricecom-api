@@ -53,16 +53,21 @@ module Api
       end
 
       # Single product, every channel it's listed on — origin, channel
-      # stock, difference, and the listing_id the frontend needs for the
-      # existing manual-adjust PATCH (ChannelProductListingsController#update).
+      # stock, difference, remote/selling status + eligibility (Fase 2),
+      # the product's single StockAlertRule if one exists (Fase 3 — one
+      # rule per product, not per channel), and a replenishment history
+      # summary derived from StockReplenishmentExecution. Everything the
+      # Fase 4 modal needs in one call.
       def show
         product  = current_tenant.products.find(params[:id])
         listings = current_tenant.channel_product_listings.where(product: product)
-        rules    = current_tenant.stock_alert_rules.active.where(product: product).index_by(&:channel)
+        rule     = current_tenant.stock_alert_rules.find_by(product: product)
 
         render json: {
-          product: { id: product.id, sku: product.sku, name: product.name }.merge(origin_fields(product)),
-          channels: listings.map { |listing| detail_channel_json(listing, rules[listing.channel], product) }
+          product: { id: product.id, sku: product.sku, name: product.name }.merge(origin_fields(product)).merge(free_reserve: product.free_reserve),
+          rule: rule && rule_json(rule),
+          channels: listings.map { |listing| detail_channel_json(listing, product) },
+          replenishment_history: replenishment_history_json(product)
         }
       end
 
@@ -193,7 +198,7 @@ module Api
         )
       end
 
-      def detail_channel_json(listing, rule, product)
+      def detail_channel_json(listing, product)
         difference = has_origin?(product) ? listing.stock_qty - product.qty_available : nil
 
         {
@@ -202,7 +207,65 @@ module Api
           stock_qty: listing.stock_qty,
           difference: difference,
           divergent: divergent_for?(product, listing.stock_qty),
-          min_threshold: rule&.min_threshold
+          channel_priority: listing.channel_priority,
+          remote_status: listing.remote_status,
+          remote_status_reason: listing.remote_status_reason,
+          remote_status_synced_at: listing.remote_status_synced_at,
+          status_stale: listing.status_stale?,
+          selling_status: listing.selling_status,
+          selling_enabled: listing.selling_enabled,
+          replenishment_eligible: listing.replenishment_eligible
+        }
+      end
+
+      def rule_json(rule)
+        {
+          id: rule.id,
+          min_threshold: rule.min_threshold,
+          target_level: rule.target_level,
+          automation_level: rule.automation_level,
+          active: rule.active
+        }
+      end
+
+      # Aggregated straight from StockReplenishmentExecution — the audit
+      # trail Fase 3 built, not re-derived from StockAlert/StockMovement.
+      # "Ignorados por inelegibilidade" is exactly the "skipped" status
+      # (see StockAlerts::CreateReplenishmentExecution) — a real, visible
+      # outcome, not an absence of one.
+      def replenishment_history_json(product)
+        executions = current_tenant.stock_replenishment_executions
+          .where(product: product)
+          .order(created_at: :desc)
+
+        succeeded = executions.select { |e| e.status == "succeeded" }
+
+        {
+          total_replenished: succeeded.sum { |e| e.confirmed_qty || 0 },
+          last_replenishment_at: succeeded.first&.finished_at,
+          succeeded_count: succeeded.size,
+          failed_count: executions.count { |e| e.status == "failed" },
+          skipped_count: executions.count { |e| e.status == "skipped" },
+          executions: executions.first(20).map { |e| execution_json(e) }
+        }
+      end
+
+      def execution_json(execution)
+        {
+          id: execution.id,
+          channel: execution.channel_product_listing.channel,
+          status: execution.status,
+          trigger_type: execution.trigger_type,
+          threshold_qty: execution.threshold_qty,
+          target_qty: execution.target_qty,
+          previous_qty: execution.previous_qty,
+          requested_qty: execution.requested_qty,
+          confirmed_qty: execution.confirmed_qty,
+          error_message: execution.error_message,
+          attempt_count: execution.attempt_count,
+          started_at: execution.started_at,
+          finished_at: execution.finished_at,
+          created_at: execution.created_at
         }
       end
 

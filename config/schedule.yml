@@ -76,3 +76,13 @@ pagarme_payable_sync:
   cron: "*/30 * * * *"
   class: "Financials::PagarmePayableSyncJob"
   queue: integrations
+
+# Safety net, not the primary trigger — see StockAlerts::ReconcileAlertsJob's
+# own comment. Stock alerts fire event-driven (order deduction, channel
+# sync, idworks sync); this just catches whatever slips past those. Slow
+# cadence on purpose — a tight one would make this the de facto primary
+# path, which is exactly what it's not meant to be.
+stock_alerts_reconciliation:
+  cron: "0 */3 * * *"
+  class: "StockAlerts::ReconcileAlertsJob"
+  queue: integrations

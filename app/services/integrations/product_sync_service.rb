@@ -138,9 +138,37 @@ module Integrations
       # `channel` here.
       listing.external_inventory_item_id = normalized[:external_inventory_item_id]
       listing.external_product_id        = normalized[:external_product_id]
+      # Fase 2 — normalized selling status/eligibility, same call that
+      # already fetches stock_qty (see each adapter's
+      # #normalize_selling_status). No separate poller needed.
+      listing.remote_status              = normalized[:remote_status]
+      listing.remote_status_reason       = normalized[:remote_status_reason]
+      listing.remote_status_metadata     = normalized[:remote_status_metadata] || {}
+      listing.remote_status_synced_at    = Time.current
+      listing.selling_status             = normalized[:selling_status] || "unknown"
+      listing.selling_enabled            = normalized[:selling_enabled] || false
+      listing.replenishment_eligible     = normalized[:replenishment_eligible] || false
+
+      stock_qty_changed = listing.will_save_change_to_stock_qty?
+      previous_stock_qty = listing.stock_qty_was if stock_qty_changed
       listing.save!
+      record_channel_movement(listing, previous_stock_qty) if stock_qty_changed
 
       evaluate_stock_alert(listing)
+    end
+
+    def record_channel_movement(listing, previous_stock_qty)
+      StockMovement.record!(
+        tenant: tenant,
+        product: listing.product,
+        channel: listing.channel,
+        kind: "sync",
+        previous_qty: previous_stock_qty || 0,
+        new_qty: listing.stock_qty,
+        source: "channel_sync"
+      )
+    rescue => e
+      Rails.logger.error("[StockMovement] channel sync log failed for listing=#{listing.id}: #{e.message}")
     end
 
     # Direct call at the end of the sync flow, same style as
@@ -151,7 +179,7 @@ module Integrations
     # but never counted as "this SKU failed to sync" — the catalog sync
     # itself already fully succeeded by this point.
     def evaluate_stock_alert(listing)
-      StockAlerts::EvaluationService.call(listing)
+      StockAlerts::EvaluationService.call(listing.product)
     rescue => e
       Rails.logger.error("[StockAlert] evaluation failed for listing=#{listing.id}: #{e.message}")
     end

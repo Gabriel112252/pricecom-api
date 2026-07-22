@@ -78,13 +78,75 @@ module Integrations
     # is a real, honest signal that this SKU oversold on the source
     # channel and needs attention, not something to silently hide.
     def apply_deductions(source, quantities)
-      quantities.filter_map do |product, qty|
-        listing = ChannelProductListing.find_by(tenant: tenant, channel: source.channel, product: product)
-        next nil unless listing
+      quantities.filter_map { |product, qty| apply_deduction_for(product, source, qty) }
+    end
 
-        listing.update!(stock_qty: listing.stock_qty.to_f - qty.to_f)
-        { product_id: product.id, sku: product.sku, deducted_qty: qty.to_f, listing_id: listing.id, remaining_stock: listing.stock_qty.to_f }
+    # Locks the Product row (not the listing) per product, in its own short
+    # transaction — deliberately NOT one transaction wrapping the whole
+    # order's multiple products: two concurrent orders sharing products A
+    # and B, each locking them in a different order, would deadlock. Locking
+    # one product at a time, released before moving to the next, can't
+    # produce that cycle.
+    #
+    # The lock's job is to serialize "decrement this product's channel
+    # stock, then decide whether an alert/replenishment fires" against any
+    # other order hitting the same product at the same time — without it,
+    # two near-simultaneous orders could both read Product#free_reserve
+    # before either write lands, and both independently decide to replenish
+    # (or neither would, each thinking the other still has headroom).
+    #
+    # StockAlerts::EvaluationService never makes an HTTP call itself — on a
+    # threshold crossing it only creates a "pending" StockReplenishmentExecution
+    # (see StockAlerts::CreateReplenishmentExecution) and enqueues
+    # StockAlerts::ExecuteReplenishmentJob, which does the actual remote
+    # write asynchronously, outside this lock entirely. That separation is
+    # what makes it safe to call EvaluationService from inside the lock at
+    # all — a Postgres row lock held for the duration of a live network
+    # round-trip to a channel API would serialize unrelated orders behind
+    # a slow/unresponsive channel, and this lock never needs to.
+    def apply_deduction_for(product, source, qty)
+      result = nil
+
+      product.with_lock do
+        listing = ChannelProductListing.find_by(tenant: tenant, channel: source.channel, product: product)
+        break unless listing
+
+        previous_stock_qty = listing.stock_qty
+        listing.update!(stock_qty: previous_stock_qty.to_f - qty.to_f)
+        result = { product_id: product.id, sku: product.sku, deducted_qty: qty.to_f, listing_id: listing.id, remaining_stock: listing.stock_qty.to_f }
+
+        # Deliberately rescued narrowly and kept inside the lock, same
+        # reasoning as ProductSyncService#evaluate_stock_alert: a bug in
+        # logging or alert evaluation must never roll back the deduction
+        # above (`with_lock` wraps this whole block in one transaction — an
+        # unrescued raise here would silently undo a real, correct stock
+        # write because of an unrelated alerting bug).
+        record_channel_movement(listing, previous_stock_qty)
+        evaluate_stock_alert(product)
       end
+
+      result
+    end
+
+    def record_channel_movement(listing, previous_stock_qty)
+      StockMovement.record!(
+        tenant: tenant,
+        product: listing.product,
+        channel: listing.channel,
+        kind: "saida",
+        previous_qty: previous_stock_qty || 0,
+        new_qty: listing.stock_qty,
+        source: "order"
+      )
+    rescue => e
+      Rails.logger.error("[StockMovement] order deduction log failed for listing=#{listing.id}: #{e.message}")
+    end
+
+    def evaluate_stock_alert(product)
+      StockAlerts::EvaluationService.call(product)
+    rescue => e
+      Rails.logger.error("[StockAlert] event-driven evaluation failed for product=#{product.id}: #{e.message}")
+      nil
     end
 
     def skip(reason)

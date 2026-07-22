@@ -21,10 +21,19 @@ module Api
         }
       end
 
-      # POST /api/v1/stock_alerts/:id/confirm — runs the suggested
-      # replenishment right now. Only valid from awaiting_confirmation
+      # POST /api/v1/stock_alerts/:id/confirm — queues the suggested
+      # replenishment for execution. Only valid from awaiting_confirmation
       # (the semi_automatic path) — anything else already has a final-ish
       # outcome, so confirming it again would be confusing/wrong.
+      #
+      # Does NOT call the channel's API synchronously here — creates a
+      # StockReplenishmentExecution (StockAlerts::CreateReplenishmentExecution,
+      # the same path an "automatic" rule's crossing uses) and returns
+      # right away; StockAlerts::ExecuteReplenishmentJob does the real
+      # write asynchronously. The alert's status reflects "now being
+      # handled by the system" (pending) rather than an instant result —
+      # the frontend polls/reloads to see executed/failed once the job
+      # finishes, same as it already does for the automatic path.
       def confirm
         alert = current_tenant.stock_alerts.find(params[:id])
 
@@ -33,13 +42,15 @@ module Api
             status: :unprocessable_entity
         end
 
-        result = StockAlerts::ReplenishmentExecutorService.call(alert)
+        execution = StockAlerts::CreateReplenishmentExecution.call(alert)
 
-        if result.success?
-          render json: alert_json(alert.reload)
-        else
-          render json: { error: result.error_message }, status: :unprocessable_entity
+        unless execution
+          return render json: { error: "não foi possível confirmar: canal alvo não está mais configurado ou não há estoque livre suficiente para repor" },
+            status: :unprocessable_entity
         end
+
+        alert.update!(status: "pending")
+        render json: alert_json(alert.reload)
       end
 
       # POST /api/v1/stock_alerts/:id/dismiss — a human decided not to act

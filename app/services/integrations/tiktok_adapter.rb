@@ -27,6 +27,8 @@ module Integrations
 
     BASE_URL = "https://open-api.tiktokglobalshop.com".freeze
     PRODUCT_SEARCH_PATH = "/product/202309/products/search".freeze
+    PRODUCT_ACTIVATE_PATH = "/product/202309/products/activate".freeze
+    PRODUCT_DEACTIVATE_PATH = "/product/202309/products/deactivate".freeze
     INVENTORY_SEARCH_PATH = "/product/202309/inventory/search".freeze
     WAREHOUSE_LIST_PATH = "/logistics/202309/warehouses".freeze
     ORDER_SEARCH_PATH = "/order/202309/orders/search".freeze
@@ -34,6 +36,8 @@ module Integrations
     ORDER_STATEMENT_TRANSACTIONS_PATH = "/finance/202501/orders".freeze
     SHOP_SCOPED_PATHS = [
       PRODUCT_SEARCH_PATH,
+      PRODUCT_ACTIVATE_PATH,
+      PRODUCT_DEACTIVATE_PATH,
       INVENTORY_SEARCH_PATH,
       WAREHOUSE_LIST_PATH,
       ORDER_SEARCH_PATH,
@@ -78,7 +82,11 @@ module Integrations
               # by the inventory-update endpoint's {product_id} path param.
               # Free on this same call, like Shopify's inventory_item_id —
               # see #normalize_product/external_product_id.
-              "_parent_product_id" => product["id"]
+              "_parent_product_id" => product["id"],
+              # Product-level selling status (DRAFT/PENDING/FAILED/ACTIVATE/
+              # SELLER_DEACTIVATED/PLATFORM_DEACTIVATED/FREEZE/DELETED) —
+              # also free on this call, see #normalize_selling_status.
+              "_product_status" => product["status"]
             )
           end
         end
@@ -159,8 +167,53 @@ module Integrations
         price:               to_decimal(raw.dig("price", "sale_price").presence || raw.dig("price", "tax_exclusive_price")),
         stock_qty:           to_decimal((raw["inventory"] || []).sum { |inv| inv["quantity"].to_i }),
         external_product_id: raw["_parent_product_id"]&.to_s,
-        raw:                 raw.except("_product_title", "_parent_product_id")
+        raw:                 raw.except("_product_title", "_parent_product_id", "_product_status")
+      }.merge(normalize_selling_status(raw))
+    end
+
+    # ACTIVATE is the only status TikTok Shop actually sells through — every
+    # other value in Search Products 202309's documented status list is
+    # either pre-listing (DRAFT/PENDING/FAILED) or a platform/seller-side
+    # takedown (SELLER_DEACTIVATED/PLATFORM_DEACTIVATED/FREEZE/DELETED).
+    # None of those are ever offered as an editable target in the UI (see
+    # the Fase 4 modal) — TikTok only exposes an activate/deactivate toggle,
+    # never direct control over the platform-controlled ones.
+    def normalize_selling_status(raw)
+      status = raw["_product_status"]
+
+      selling_status =
+        case status
+        when "ACTIVATE" then "selling"
+        when "DRAFT", "PENDING", "FAILED" then "reviewing"
+        when "SELLER_DEACTIVATED" then "inactive"
+        when "PLATFORM_DEACTIVATED", "FREEZE" then "platform_blocked"
+        when "DELETED" then "deleted"
+        else "unknown"
+        end
+
+      {
+        remote_status: status,
+        remote_status_reason: nil,
+        remote_status_metadata: {},
+        selling_status: selling_status,
+        selling_enabled: status == "ACTIVATE",
+        replenishment_eligible: status == "ACTIVATE"
       }
+    end
+
+    # Fase 4 modal actions — activate/deactivate only (see
+    # #normalize_selling_status's comment on why the platform-controlled
+    # statuses are never offered as an editable target). Per TikTok Shop
+    # Partner Center's Product module: POST /product/202309/products/
+    # activate and .../deactivate, body { product_ids: [...] } — not
+    # verified against a live store, same disclosure as the rest of this
+    # adapter's write path (#update_stock).
+    def activate_product(product_id:)
+      post(PRODUCT_ACTIVATE_PATH, { product_ids: [ product_id.to_s ] })
+    end
+
+    def deactivate_product(product_id:)
+      post(PRODUCT_DEACTIVATE_PATH, { product_ids: [ product_id.to_s ] })
     end
 
     # One page of the Get Order List API. Time/status filters

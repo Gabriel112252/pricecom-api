@@ -30,7 +30,12 @@ module Integrations
 
         (body["products"] || []).each do |product|
           product["variants"].each do |variant|
-            variants << variant.merge("_product_title" => product["title"])
+            variants << variant.merge(
+              "_product_title"        => product["title"],
+              "_product_id"           => product["id"],
+              "_product_status"       => product["status"],
+              "_product_published_at" => product["published_at"]
+            )
           end
         end
 
@@ -90,14 +95,74 @@ module Integrations
         price:                      to_decimal(raw["price"]),
         stock_qty:                  to_decimal(raw["inventory_quantity"]),
         external_inventory_item_id: raw["inventory_item_id"]&.to_s,
-        raw:                        raw.except("_product_title")
+        external_product_id:       raw["_product_id"]&.to_s,
+        raw: raw.except("_product_title", "_product_id", "_product_status", "_product_published_at")
+      }.merge(normalize_selling_status(raw))
+    end
+
+    # REST only exposes "published to the store's default Online Store
+    # channel" (`published_at` non-nil) — there is no way, via REST, to
+    # check publication to one SPECIFIC sales channel; that's a GraphQL
+    # Admin API concept (resourcePublicationOnCurrentPublication), and this
+    # adapter has no GraphQL client. replenishment_eligible below is
+    # therefore "active AND published to the default channel," a documented
+    # approximation of "published on target channel," not a true per-channel
+    # check — flagged during the Fase 2 investigation, not silently assumed.
+    def normalize_selling_status(raw)
+      status = raw["_product_status"]
+      published = raw["_product_published_at"].present?
+
+      selling_status =
+        case status
+        when "active"   then published ? "selling" : "draft"
+        when "draft"    then "draft"
+        when "archived" then "inactive"
+        else "unknown"
+        end
+
+      {
+        remote_status: status,
+        remote_status_reason: status == "active" && !published ? "not published to the default sales channel" : nil,
+        remote_status_metadata: { published_at: raw["_product_published_at"] },
+        selling_status: selling_status,
+        selling_enabled: status == "active",
+        replenishment_eligible: status == "active" && published
       }
+    end
+
+    # Fase 4 modal actions. Both status (active/draft/archived) and
+    # publication (published_at) are set the same way — a plain PUT to the
+    # product resource, per shopify.dev/docs/api/admin-rest/latest/
+    # resources/product#put-products-product-id — not verified against a
+    # live store, same disclosure as the rest of this adapter.
+    #
+    # `status:` and `published:` are independent knobs on Shopify (a
+    # product can be "active" but unpublished, or "draft" and still
+    # carry an old published_at) — the Fase 4 modal exposes them as 5
+    # separate actions (ativar/rascunho/arquivar/publicar/despublicar)
+    # that each set exactly one of the two, never both at once, so this
+    # method only ever receives one non-nil argument per call.
+    def update_selling_status(product_id:, status: nil, published: nil)
+      attrs = { id: product_id.to_i }
+      attrs[:status] = status if status
+      attrs[:published_at] = published ? Time.now.utc.iso8601 : nil unless published.nil?
+
+      body = put("products/#{product_id}.json", { product: attrs })
+      body["product"]
     end
 
     private
 
     def get(path, **params)
       handle_response(raw_get(path, params))
+    end
+
+    def put(path, body)
+      response = connection(base_url).put(path) do |req|
+        req.headers["X-Shopify-Access-Token"] = credentials[:access_token]
+        req.body = body
+      end
+      handle_response(response)
     end
 
     def raw_get(path, params)

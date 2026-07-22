@@ -1,15 +1,17 @@
 module Api
   module V1
-    # Cadastro das regras de alerta/reposição de estoque por produto+canal
-    # — ver StockAlertRule e StockAlerts::EvaluationService, que usa essas
-    # regras a cada sync de catálogo pra decidir se dispara um StockAlert.
+    # Cadastro das regras de alerta/reposição de estoque por produto (Fase 2
+    # — uma regra por produto, não mais por produto+canal) — ver
+    # StockAlertRule e StockAlerts::EvaluationService, que usa essas regras
+    # a cada evento de estoque (venda, sync de canal, sync do idworks) pra
+    # decidir se dispara um StockAlert.
     class StockAlertRulesController < ApplicationController
       before_action :require_admin!, only: [ :create, :update, :destroy ]
 
       def index
         rules = current_tenant.stock_alert_rules
           .includes(:product)
-          .order(:channel, :product_id)
+          .order(:product_id)
 
         render json: rules.map { |r| rule_json(r) }
       end
@@ -43,7 +45,7 @@ module Api
       private
 
       def rule_params
-        params.permit(:product_id, :channel, :min_threshold, :target_level, :automation_level, :active)
+        params.permit(:product_id, :min_threshold, :target_level, :automation_level, :active)
       end
 
       def rule_json(rule)
@@ -51,7 +53,6 @@ module Api
           id: rule.id,
           product_id: rule.product_id,
           product_sku: rule.product.sku,
-          channel: rule.channel,
           min_threshold: rule.min_threshold,
           target_level: rule.target_level,
           automation_level: rule.automation_level,

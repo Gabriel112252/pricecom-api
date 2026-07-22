@@ -1,106 +1,150 @@
 module StockAlerts
-  # Decides whether a just-synced ChannelProductListing is low enough to
-  # need a StockAlert, and — depending on the tenant's StockAlertRule for
-  # that product/channel — whether to just notify (manual), wait for a
-  # human (semi_automatic), or replenish right away
-  # (automatic, via ReplenishmentExecutorService).
+  # Decides whether a product's central pool (Product#free_reserve) is low
+  # enough to need a StockAlert, edge-triggered: only the transition from
+  # "was fine" to "is now at/below min_threshold" creates a new
+  # StockReplenishmentExecution — a product that's been below threshold for
+  # a while and gets re-evaluated again (another sale, another sync) just
+  # refreshes the existing open StockAlert's numbers, it does not spawn a
+  # second attempt. See #call for how the crossing is detected without any
+  # caller needing to pass in a "previous" value explicitly.
   #
-  # Called from two places: ProductSyncService (right after a listing's
-  # stock_qty is written — the natural moment stock just changed on a
-  # channel) and Idworks::StockSyncService (via
-  # .reevaluate_insufficient_reserves, when a product's total qty_available
-  # changes — the free reserve every channel draws from may have changed
-  # too, so an old insufficient_reserve alert might now be fulfillable).
+  # IMPORTANT — a consequence of the "conservative pool" model (locked
+  # decision, see Product#free_reserve's own comment): a sale only ever
+  # DEDUCTS a channel's own stock_qty, and free_reserve = qty_available
+  # minus every channel's stock_qty, so a sale mechanically only ever
+  # INCREASES free_reserve, never decreases it. A sale can resolve an
+  # already-open alert (moving the pool back above min_threshold) but can
+  # never, by itself, be the event that first crosses the pool below
+  # min_threshold — that only happens from qty_available dropping
+  # (Idworks::StockSyncService) or a channel's own stock_qty rising
+  # (ProductSyncService pulling a higher number). OrderStockDeductionService
+  # still calls this on every deduction regardless, both because it's the
+  # cheapest place to catch a recovery (resolving an open alert) and so the
+  # per-product row lock it already takes is available if that ever
+  # changes.
+  #
+  # Fase 2 of the stock/alerts migration made this product-level instead of
+  # per-channel: StockAlertRule is one row per product (min_threshold/
+  # target_level no longer belong to a specific channel). min_threshold is
+  # compared against free_reserve (the pool). target_level keeps its old
+  # per-channel meaning ("top this channel's stock back up to X") — applied
+  # to whichever channel is currently the product's highest-priority one
+  # (ChannelProductListing#channel_priority), not a channel fixed on the
+  # rule itself. min_threshold and target_level are on two different
+  # scales (pool total vs. one channel's target), which is why
+  # StockAlertRule doesn't validate target_level > min_threshold.
+  #
+  # Called from four event-driven places, never a snapshot-scanning sweep:
+  # ProductSyncService (right after a listing's stock_qty is written),
+  # Idworks::StockSyncService (right after qty_available changes),
+  # OrderStockDeductionService (right after an order debits a channel's
+  # stock_qty, inside a per-product row lock — see that class for why), and
+  # StockAlertsController#confirm indirectly, via
+  # StockAlerts::CreateReplenishmentExecution (a human confirming a
+  # semi_automatic alert doesn't need a fresh crossing — see that class).
+  # A periodic reconciliation job (StockAlerts::ReconcileAlertsJob) also
+  # calls this, but only as a safety net — see that job's own comment.
   class EvaluationService
-    # TikTok's adapter#update_stock isn't implemented yet (unconfirmed
-    # write endpoint — see TiktokAdapter#update_stock). Any rule on this
-    # channel behaves as if automation_level were "manual", regardless of
-    # what's actually configured — a notification-only alert is still
-    # useful even where auto-execution isn't possible yet.
-    AUTOMATION_INCAPABLE_CHANNELS = %w[tiktok].freeze
+    # TikTok's write endpoint (TiktokAdapter#update_stock) is implemented
+    # and used in production paths — verified via git history: its
+    # implementation postdates this constant's original "not implemented
+    # yet" comment. No channel is currently write-incapable; kept as an
+    # empty whitelist point instead of deleted, since a future channel
+    # adapter may legitimately land without write support before its
+    # #update_stock does.
+    AUTOMATION_INCAPABLE_CHANNELS = [].freeze
 
-    def self.call(listing)
-      new(listing).call
+    Decision = Struct.new(:alert, :execution, keyword_init: true)
+
+    def self.call(product)
+      new(product).call
     end
 
-    # Re-runs the evaluation for every channel where this product currently
-    # has an open "insufficient_reserve" alert — meant to be called right
-    # after a product's qty_available changes (Idworks::StockSyncService).
-    # Deliberately simple: just re-checks each affected channel's current
-    # listing, reusing #call's normal upsert-in-place logic to
-    # promote/refresh/resolve the existing alert. No batching/backoff.
-    def self.reevaluate_insufficient_reserves(product)
-      channels = StockAlert.where(product: product, status: "insufficient_reserve").distinct.pluck(:channel)
-
-      channels.each do |channel|
-        listing = ChannelProductListing.find_by(product: product, channel: channel)
-        call(listing) if listing
-      end
+    def initialize(product)
+      @product = product
+      @tenant  = product.tenant
     end
 
-    def initialize(listing)
-      @listing = listing
-      @tenant  = listing.tenant
-      @product = listing.product
-      @channel = listing.channel
-    end
-
+    # Returns a Decision (alert + execution, either possibly nil), or nil
+    # if there's no active rule for this product at all. Never makes an
+    # HTTP call itself — execution (if any) is created "pending" and a
+    # separate async job (StockAlerts::ExecuteReplenishmentJob) does the
+    # actual channel write. Safe to call from inside a DB row lock.
     def call
-      rule = tenant.stock_alert_rules.active.find_by(product: product, channel: channel)
-      return unless rule # no rule configured — no default, no alert
+      rule = tenant.stock_alert_rules.active.find_by(product: product)
+      return unless rule
 
-      return if listing.stock_qty.to_d > rule.min_threshold.to_d
+      open_alert_before = tenant.stock_alerts.open.where(product: product).order(created_at: :desc).first
+      free_reserve = product.free_reserve
 
-      needed = rule.target_level.to_d - listing.stock_qty.to_d
-      replenish_qty = [ needed, product.free_reserve ].min
-
-      if replenish_qty <= 0
-        upsert_alert(rule, replenish_qty, "insufficient_reserve")
-        return
+      if free_reserve > rule.min_threshold
+        open_alert_before&.update!(status: "resolved", error_message: nil)
+        return Decision.new(alert: nil, execution: nil)
       end
 
-      alert = upsert_alert(rule, replenish_qty, initial_status_for(rule))
-      ReplenishmentExecutorService.call(alert) if auto_execute?(rule)
+      channel, listing = resolve_target
+      crossed_below = open_alert_before.nil?
+
+      alert = upsert_alert(rule, free_reserve: free_reserve, channel: channel, listing: listing)
+
+      execution = nil
+      if crossed_below && rule.automation_level == "automatic"
+        execution = CreateReplenishmentExecution.call(alert)
+      end
+
+      Decision.new(alert: alert, execution: execution)
     end
 
     private
 
-    attr_reader :listing, :tenant, :product, :channel
+    attr_reader :product, :tenant
 
-    def capable?
-      !AUTOMATION_INCAPABLE_CHANNELS.include?(channel)
+    # Lowest channel_priority among this product's own listings — nil (no
+    # listing has a priority set yet) is a real, expected state right after
+    # Fase 2 ships: the field starts empty for every existing listing,
+    # populated manually per product/channel afterwards.
+    def resolve_target
+      listing = product.channel_product_listings.where.not(channel_priority: nil).order(:channel_priority).first
+      [ listing&.channel, listing ]
     end
 
-    def auto_execute?(rule)
-      rule.automation_level == "automatic" && capable?
+    def capable?(channel)
+      channel.present? && !AUTOMATION_INCAPABLE_CHANNELS.include?(channel)
     end
 
-    def initial_status_for(rule)
-      return "pending" unless capable? # degrades to manual — see AUTOMATION_INCAPABLE_CHANNELS
+    def determine_status(rule, channel, listing, replenish_qty)
+      return "insufficient_reserve" if listing.nil? || replenish_qty.nil? || replenish_qty <= 0
+      return "pending" unless capable?(channel) # degrades to manual — see AUTOMATION_INCAPABLE_CHANNELS
 
       case rule.automation_level
       when "semi_automatic" then "awaiting_confirmation"
-      else "pending" # manual, or automatic (flipped to executed/failed right after by #call)
+      else "pending" # manual, or automatic (flipped to executed/failed once ExecuteReplenishmentJob finishes)
       end
     end
 
-    # One open alert per tenant/product/channel: if one already exists
-    # (pending/awaiting_confirmation/insufficient_reserve), refresh it in
-    # place instead of creating a second row. The underlying numbers
-    # (qty_at_trigger, free reserve) can legitimately change between polls
-    # while the human/system still hasn't acted on the alert, so
-    # overwriting keeps suggested_replenishment_qty accurate for whoever
-    # eventually confirms it — a plain "ignore if one exists" would leave a
-    # stale suggested quantity sitting there. See StockAlert::STATUSES for
-    # why this means #skipped_duplicate is never actually produced here.
-    def upsert_alert(rule, replenish_qty, status)
-      alert = StockAlert.open.where(tenant: tenant, product: product, channel: channel).order(created_at: :desc).first
+    # One open alert per tenant/product (channel is informational, not
+    # part of the identity): if one already exists (pending/
+    # awaiting_confirmation/insufficient_reserve), refresh it in place
+    # instead of creating a second row. The underlying numbers
+    # (qty_at_trigger = free_reserve, suggested_replenishment_qty) can
+    # legitimately change between evaluations while the human/system still
+    # hasn't acted on the alert, so overwriting keeps it accurate for
+    # whoever eventually confirms it — but see the class comment for why
+    # this refresh does NOT by itself spawn a new
+    # StockReplenishmentExecution.
+    def upsert_alert(rule, free_reserve:, channel:, listing:)
+      needed = listing ? rule.target_level.to_d - listing.stock_qty.to_d : nil
+      replenish_qty = listing ? [ needed, free_reserve ].min : 0
+      status = determine_status(rule, channel, listing, replenish_qty)
+
+      alert = StockAlert.open.where(tenant: tenant, product: product).order(created_at: :desc).first
 
       attrs = {
         stock_alert_rule: rule,
-        qty_at_trigger: listing.stock_qty,
+        channel: channel,
+        qty_at_trigger: free_reserve,
         target_level: rule.target_level,
-        suggested_replenishment_qty: replenish_qty,
+        suggested_replenishment_qty: replenish_qty || 0,
         automation_level_snapshot: rule.automation_level,
         status: status,
         error_message: nil
@@ -110,7 +154,7 @@ module StockAlerts
         alert.update!(attrs)
         alert
       else
-        StockAlert.create!(attrs.merge(tenant: tenant, product: product, channel: channel))
+        StockAlert.create!(attrs.merge(tenant: tenant, product: product))
       end
     end
   end
