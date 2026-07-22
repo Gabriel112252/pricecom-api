@@ -53,6 +53,7 @@ module Api
           id: rule.id,
           product_id: rule.product_id,
           product_sku: rule.product.sku,
+          product_name: rule.product.name,
           min_threshold: rule.min_threshold,
           target_level: rule.target_level,
           automation_level: rule.automation_level,
