@@ -232,6 +232,7 @@ RSpec.describe Integrations::Tiktok::FinancialBackfillService do
       "run_target_count" => 1_000
     )
     expect(first_metadata["last_order_id"]).to eq(orders[181].id)
+    expect(first_metadata["rate_limit_count"]).to eq(1)
 
     result = run_backfill(batch_size: 1_000, max_orders: 1_000, run_id: "run-rate-limit")
     metadata = latest_log.metadata

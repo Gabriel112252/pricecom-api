@@ -48,6 +48,73 @@ module Integrations
         ).call
       end
 
+      def self.clear_due_continuation!(channel_credential:, force:, run_id:)
+        log = run_log(channel_credential, force, run_id)
+        return false unless log
+
+        cleared = false
+        log.with_lock do
+          metadata = log.metadata || {}
+          continuation_run_at = timestamp_from_metadata(metadata["continuation_run_at"])
+
+          if continuation_run_at && continuation_run_at <= Time.current
+            metadata.delete("continuation_scheduled_at")
+            metadata.delete("continuation_run_at")
+            log.update!(metadata: metadata)
+            cleared = true
+          end
+        end
+        cleared
+      end
+
+      def self.claim_continuation!(channel_credential:, force:, run_id:, continuation_run_at:)
+        log = run_log(channel_credential, force, run_id)
+        return false unless log
+
+        scheduled = false
+        log.with_lock do
+          metadata = log.metadata || {}
+          existing_continuation_times = [
+            timestamp_from_metadata(metadata["continuation_scheduled_at"]),
+            timestamp_from_metadata(metadata["continuation_run_at"])
+          ].compact
+
+          unless existing_continuation_times.any? { |time| time > Time.current }
+            metadata["continuation_scheduled_at"] = Time.current
+            metadata["continuation_run_at"] = continuation_run_at
+            metadata["continuation_count"] = metadata.fetch("continuation_count", 0).to_i + 1
+            log.update!(status: "pending", finished_at: nil, metadata: metadata)
+            scheduled = true
+          end
+        end
+        scheduled
+      end
+
+      def self.run_log(channel_credential, force, run_id)
+        return unless run_id.present?
+
+        IntegrationSyncLog
+          .where(tenant: channel_credential.tenant, action: ACTION, status: %w[pending error])
+          .order(created_at: :desc)
+          .find do |candidate|
+            metadata = candidate.metadata || {}
+            metadata["channel_credential_id"].to_s == channel_credential.id.to_s &&
+              ActiveModel::Type::Boolean.new.cast(metadata["force"]) == force &&
+              metadata["run_id"].to_s == run_id.to_s
+          end
+      end
+
+      def self.timestamp_from_metadata(value)
+        return value if value.is_a?(Time)
+        return if value.blank?
+
+        Time.zone.parse(value.to_s)
+      rescue ArgumentError, TypeError
+        nil
+      end
+
+      private_class_method :run_log, :timestamp_from_metadata
+
       def initialize(channel_credential, batch_size:, batch_sleep:, force:, max_orders: nil, run_id: nil)
         @channel_credential = channel_credential
         @tenant = channel_credential.tenant
@@ -83,6 +150,7 @@ module Integrations
         finish_log("error", e.message)
         raise
       rescue Integrations::RateLimitError => e
+        @rate_limit_count += 1
         persist_checkpoint(error_message: "rate_limited: #{e.message}") if log
         raise
       ensure
@@ -101,6 +169,10 @@ module Integrations
         @run_started_processed_count = 0
         @run_processed_count = 0
         @run_target_count = max_orders
+        @continuation_scheduled_at = nil
+        @continuation_run_at = nil
+        @continuation_count = 0
+        @rate_limit_count = 0
         @synced_count = 0
         @skipped_count = 0
         @pending_statement_count = 0
@@ -178,6 +250,10 @@ module Integrations
         @run_target_count = metadata.key?("run_target_count") && !metadata["run_target_count"].nil? ?
           metadata["run_target_count"].to_i : max_orders
         @max_orders = @run_target_count
+        @continuation_scheduled_at = metadata["continuation_scheduled_at"]
+        @continuation_run_at = metadata["continuation_run_at"]
+        @continuation_count = metadata["continuation_count"].to_i
+        @rate_limit_count = metadata["rate_limit_count"].to_i
         @synced_count = metadata["synced_count"].to_i
         @skipped_count = metadata["skipped_count"].to_i
         @pending_statement_count = metadata["pending_statement_count"].to_i
@@ -412,6 +488,10 @@ module Integrations
           "run_started_processed_count" => run_started_processed_count,
           "run_processed_count" => run_processed_count,
           "run_target_count" => run_target_count,
+          "continuation_scheduled_at" => continuation_scheduled_at,
+          "continuation_run_at" => continuation_run_at,
+          "continuation_count" => continuation_count,
+          "rate_limit_count" => rate_limit_count,
           "max_orders" => max_orders,
           "run_started_at" => run_started_at,
           "pass_count" => pass_count,
@@ -471,6 +551,10 @@ module Integrations
       def run_started_processed_count = @run_started_processed_count
       def run_processed_count = @run_processed_count
       def run_target_count = @run_target_count
+      def continuation_scheduled_at = @continuation_scheduled_at
+      def continuation_run_at = @continuation_run_at
+      def continuation_count = @continuation_count
+      def rate_limit_count = @rate_limit_count
       def remaining_capacity
         return if run_target_count.nil?
 

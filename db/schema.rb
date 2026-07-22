@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_07_21_030000) do
+ActiveRecord::Schema[7.2].define(version: 2026_07_21_100000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -544,7 +544,18 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_21_030000) do
     t.decimal "shipping_fee_seller_discount", precision: 10, scale: 2
     t.decimal "seller_discount", precision: 10, scale: 2, default: "0.0", null: false
     t.decimal "platform_discount", precision: 10, scale: 2, default: "0.0", null: false
+    t.decimal "revenue_amount", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "settlement_amount", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "fee_and_tax_amount", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "shipping_cost_amount", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "platform_commission_amount", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "affiliate_commission_amount", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "item_fee_amount", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "service_fee_amount", precision: 12, scale: 2, default: "0.0", null: false
+    t.jsonb "financial_breakdown", default: {}, null: false
+    t.datetime "financial_synced_at"
     t.index "tenant_id, lower((status)::text)", name: "index_orders_on_tenant_id_and_lower_status"
+    t.index ["channel_id", "financial_synced_at"], name: "index_orders_on_channel_and_financial_synced_at"
     t.index ["channel_id"], name: "index_orders_on_channel_id"
     t.index ["tenant_id", "cart_token"], name: "index_orders_on_tenant_id_and_cart_token"
     t.index ["tenant_id", "coupon_code"], name: "index_orders_on_tenant_id_and_coupon_code"
