@@ -112,7 +112,8 @@ Rails.application.routes.draw do
       end
 
       # Estoque — visão agregada produto x canal (ver StockOverviewController)
-      get "stock_overview", to: "stock_overview#index"
+      get "stock_overview",     to: "stock_overview#index"
+      get "stock_overview/:id", to: "stock_overview#show"
 
       # Dashboard
       get "dashboard/summary",   to: "dashboard#summary"
