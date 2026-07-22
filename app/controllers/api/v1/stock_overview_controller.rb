@@ -28,28 +28,22 @@ module Api
       # column made "0" (real zero stock) indistinguishable from "product
       # doesn't exist on that channel" (blank) at a glance — fixed here at
       # the response shape, not just in the UI, so nothing pulls the raw
-      # per-channel numbers back into this view by accident.
+      # per-channel numbers back into this view by accident. Grouping by
+      # channel parent-product (below) does NOT apply here — the Pricecom
+      # Product already IS the grouping unit in this view.
       #
       # With a channel filter: one row per product that HAS a listing on
-      # that channel (#apply_filters' EXISTS clause), with that channel's
-      # own stock next to the origin figure and their difference — no
-      # ambiguity left, since a product without a listing there was
-      # already excluded.
+      # that channel, with that channel's own stock next to the origin
+      # figure and their difference — no ambiguity left, since a product
+      # without a listing there was already excluded. Rows are further
+      # grouped by that channel's own parent-product id (see
+      # #channel_grouped_response) when the channel exposes that concept.
       def index
-        products = apply_sort(apply_filters(current_tenant.products))
-
-        per   = [ [ params.fetch(:per_page, PER_PAGE_DEFAULT).to_i, 1 ].max, PER_PAGE_MAX ].min
-        paged = products.page(params[:page]).per(per)
-
-        listings_by_product = current_tenant.channel_product_listings
-          .where(product_id: paged.map(&:id))
-          .group_by(&:product_id)
-
-        render json: {
-          products: paged.map { |p| row_json(p, listings_by_product[p.id] || []) },
-          active_channels: active_channels,
-          meta: pagination_meta(paged)
-        }
+        if params[:channel].present?
+          render json: channel_grouped_response
+        else
+          render json: central_response
+        end
       end
 
       # Single product, every channel it's listed on — origin, channel
@@ -96,70 +90,141 @@ module Api
         (credential_channels | listing_channels).sort
       end
 
-      # Same filters as ProductsController#apply_filters, for the same
-      # search/channel UX on this screen.
-      def apply_filters(scope)
+      # Visão Central: plain SQL pagination over Product, unchanged from
+      # before grouping existed — the Pricecom Product already is the
+      # grouping unit here, so there's nothing to group further. No
+      # sort_by support (the frontend never sends one for this view; there
+      # is no single sortable per-channel column once every channel is
+      # summarized into one badge).
+      def central_response
+        products = apply_search(current_tenant.products).order(name: :asc)
+
+        per   = [ [ params.fetch(:per_page, PER_PAGE_DEFAULT).to_i, 1 ].max, PER_PAGE_MAX ].min
+        paged = products.page(params[:page]).per(per)
+
+        listings_by_product = current_tenant.channel_product_listings
+          .where(product_id: paged.map(&:id))
+          .group_by(&:product_id)
+
+        {
+          products: paged.map { |p| central_row_json(p, listings_by_product[p.id] || []) },
+          active_channels: active_channels,
+          meta: pagination_meta(paged)
+        }
+      end
+
+      # Visão por canal: starts from that channel's own listings (not
+      # Product — the EXISTS-filtered-product approach the old single
+      # #apply_filters used doesn't fit once grouping needs the listings
+      # themselves), grouped by the channel's own parent-product id
+      # (ChannelProductListing#external_product_id — see each adapter's
+      # #normalize_product; populated for Shopify/TikTok/Yampi alike).
+      #
+      # Grouping — and therefore pagination and sorting — happens in Ruby,
+      # not SQL: a group's members need to travel together across a page
+      # boundary (splitting a product's 3 SKUs across two pages would be a
+      # real correctness bug, not just a cosmetic one), and Postgres has no
+      # clean way to paginate "groups of rows" while still sorting by an
+      # aggregate over each group without a window-function query more
+      # complex than this screen's real traffic (a tenant's per-channel
+      # catalog, at most a few thousand rows) justifies right now.
+      # Kaminari.paginate_array gives the same .page/.per/pagination_meta
+      # interface as an AR relation, so nothing downstream needs to know
+      # the difference.
+      def channel_grouped_response
+        channel = params[:channel]
+        listings = current_tenant.channel_product_listings.where(channel: channel).includes(:product)
+
         if params[:q].present?
           term = "%#{params[:q]}%"
-          scope = scope.where("sku ILIKE :q OR name ILIKE :q", q: term)
+          matching_ids = current_tenant.products.where("sku ILIKE :q OR name ILIKE :q", q: term).ids
+          listings = listings.where(product_id: matching_ids)
         end
 
-        if params[:channel].present?
-          # EXISTS instead of joins(...).distinct: apply_sort below orders by
-          # a subquery column that isn't in the SELECT list, which Postgres
-          # rejects when combined with "SELECT DISTINCT" (needed here to
-          # collapse the one-row-per-listing fanout a plain join produces).
-          # EXISTS never fans out in the first place, so no DISTINCT is
-          # needed and the two can compose freely.
-          scope = scope.where(
-            "EXISTS (SELECT 1 FROM channel_product_listings cpl " \
-            "WHERE cpl.product_id = products.id AND cpl.tenant_id = products.tenant_id AND cpl.channel = ?)",
-            params[:channel]
-          )
-        end
+        groups = group_by_channel_parent(listings.to_a)
+        sorted = sort_channel_groups(groups)
 
-        scope
+        per   = [ [ params.fetch(:per_page, PER_PAGE_DEFAULT).to_i, 1 ].max, PER_PAGE_MAX ].min
+        paged = Kaminari.paginate_array(sorted).page(params[:page]).per(per)
+
+        {
+          products: paged.map { |group| channel_group_row_json(group) },
+          active_channels: active_channels,
+          meta: pagination_meta(paged)
+        }
       end
 
-      # sort_by is one channel's per-row stock — the only sortable column
-      # once a channel filter is active ("Estoque neste canal"); anything
-      # else falls back to the default name order. stock_qty lives on
-      # ChannelProductListing, one join away and not unique per product (a
-      # product can have zero or one listing per channel), so this uses a
-      # correlated subquery instead of a JOIN: a JOIN would need DISTINCT
-      # to avoid duplicating product rows across a page, and Postgres
-      # rejects "SELECT DISTINCT" combined with an ORDER BY column that
-      # isn't in the SELECT list.
-      #
-      # sort_by is checked against Channel::PLATFORMS (a fixed whitelist)
-      # before being interpolated into the subquery, so it's never
-      # attacker-controlled SQL by the time it reaches the string.
-      # NULLS LAST in both directions matches the previous frontend-only
-      # sort's tie-break: products without a listing for the sorted channel
-      # always sink to the bottom, not just for ASC (Postgres' own default
-      # would put nulls first on DESC).
-      def apply_sort(scope)
+      def apply_search(scope)
+        return scope unless params[:q].present?
+
+        term = "%#{params[:q]}%"
+        scope.where("sku ILIKE :q OR name ILIKE :q", q: term)
+      end
+
+      # Blank external_product_id (channel doesn't expose a parent-product
+      # concept, or a listing predates that field being captured) falls
+      # back to a synthetic per-listing key — it becomes a "group of 1" and
+      # renders as a plain row (see #channel_group_row_json), never forced
+      # into an accordion the channel gave no basis for.
+      def group_by_channel_parent(listings)
+        listings.group_by { |listing| listing.external_product_id.presence || "listing-#{listing.id}" }.values
+      end
+
+      # sort_by is the same channel currently filtered (the only sortable
+      # column this view has — "Estoque neste canal"); a group sorts by the
+      # SUM of its members' stock_qty, which for a group of 1 is just that
+      # listing's own value, so no special-casing standalone rows. NULLS
+      # LAST in both directions, same tie-break the old SQL version used:
+      # a group with no stock data at all always sinks to the bottom.
+      def sort_channel_groups(groups)
         sort_by = params[:sort_by].to_s
-        return scope.order(name: :asc) unless Channel::PLATFORMS.include?(sort_by)
+        return groups.sort_by { |g| g.first.product.name.to_s.downcase } unless Channel::PLATFORMS.include?(sort_by)
 
-        sort_dir = params[:sort_dir].to_s.downcase == "desc" ? "DESC" : "ASC"
-        quoted_channel = ActiveRecord::Base.connection.quote(sort_by)
+        sort_dir = params[:sort_dir].to_s.downcase == "desc" ? -1 : 1
 
-        scope
-          .order(Arel.sql(<<~SQL.squish))
-            (SELECT stock_qty FROM channel_product_listings cpl
-             WHERE cpl.product_id = products.id AND cpl.tenant_id = products.tenant_id AND cpl.channel = #{quoted_channel}
-             LIMIT 1) #{sort_dir} NULLS LAST
-          SQL
-          .order(name: :asc)
+        groups.sort do |a, b|
+          a_total = group_stock_total(a)
+          b_total = group_stock_total(b)
+
+          next (a_total.nil? ? 1 : 0) <=> (b_total.nil? ? 1 : 0) if a_total.nil? != b_total.nil?
+          next a.first.product.name.to_s.downcase <=> b.first.product.name.to_s.downcase if a_total.nil?
+
+          (a_total <=> b_total) * sort_dir
+        end
       end
 
-      def row_json(product, listings)
-        if params[:channel].present?
-          channel_row_json(product, listings.find { |l| l.channel == params[:channel] })
-        else
-          central_row_json(product, listings)
-        end
+      def group_stock_total(listings)
+        values = listings.filter_map(&:stock_qty)
+        values.empty? ? nil : values.sum
+      end
+
+      # A group of 1 renders exactly like the old flat channel row (same
+      # shape #channel_row_json always returned) — grouping is invisible
+      # for a channel/product that has no sibling SKUs, per the "não quebra
+      # a visão atual" requirement. A real group (2+ listings sharing a
+      # parent) gets a distinct shape: totals at the parent level, plus a
+      # `children` array of that exact same per-SKU shape for the frontend
+      # to render inside the expanded accordion — one row shape reused at
+      # both levels instead of two to keep in sync.
+      def channel_group_row_json(listings)
+        return channel_row_json(listings.first.product, listings.first) if listings.size == 1
+
+        children = listings.map { |listing| channel_row_json(listing.product, listing) }
+        channel_total = group_stock_total(listings)
+        origin_known = children.select { |c| c[:has_origin] }
+        origin_total = origin_known.sum { |c| c[:origin_qty_available].to_d }
+
+        {
+          group_key: listings.first.external_product_id,
+          name: listings.first.product.name,
+          sku_count: listings.size,
+          channel_stock_qty: channel_total,
+          has_origin: origin_known.any?,
+          origin_qty_available: origin_known.any? ? origin_total : nil,
+          difference: origin_known.any? && channel_total ? channel_total - origin_total : nil,
+          divergent: origin_known.any? && channel_total ? divergent?(channel_total, origin_total) : nil,
+          children: children
+        }
       end
 
       def central_row_json(product, listings)
@@ -179,9 +244,10 @@ module Api
       end
 
       # listing is nil only if the data changed between the filter query
-      # and this fetch (deleted mid-request) — #apply_filters' EXISTS
-      # clause already guarantees a matching listing for every paged
-      # product under normal concurrency.
+      # and this fetch (deleted mid-request) — #channel_grouped_response
+      # only ever builds listings/groups from that channel's own listings
+      # in the first place, so a nil listing here would mean a race, not a
+      # normal case.
       def channel_row_json(product, listing)
         channel_qty = listing&.stock_qty
         difference  = channel_qty && has_origin?(product) ? channel_qty - product.qty_available : nil
