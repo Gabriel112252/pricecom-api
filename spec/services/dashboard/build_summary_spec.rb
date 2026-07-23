@@ -632,6 +632,168 @@ RSpec.describe Dashboard::BuildSummary do
       end
     end
 
+    describe "Visão Geral — receita efetiva com TikTok pendente (backfill em andamento)" do
+      let(:channel_tiktok) { tenant.channels.create!(name: "TikTok Shop", platform: "tiktok") }
+
+      def overview_summary(channel_ids: nil)
+        params = { from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601 }
+        params[:channel_ids] = channel_ids if channel_ids
+        described_class.call(tenant: tenant, params: ActionController::Parameters.new(params))
+      end
+
+      it "uses revenue_amount for a synced TikTok order, not gross_value - discount" do
+        make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago).update!(
+          discount: 30, revenue_amount: 85, financial_synced_at: Time.current
+        )
+
+        result = overview_summary(channel_ids: [ channel_tiktok.id.to_s ])
+
+        expect(result[:kpis][:net_revenue]).to eq(85.0)
+      end
+
+      it "excludes a pending TikTok order from revenue but keeps it in the operational order count" do
+        make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago) # sem financial_synced_at
+        synced = make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago)
+        synced.update!(revenue_amount: 45, financial_synced_at: Time.current)
+
+        result = overview_summary(channel_ids: [ channel_tiktok.id.to_s ])
+
+        expect(result[:kpis][:orders_count]).to eq(2)
+        expect(result[:kpis][:net_revenue]).to eq(45.0)
+        expect(result[:kpis][:financial_orders_count]).to eq(1)
+        expect(result[:kpis][:tiktok_pending_orders_count]).to eq(1)
+      end
+
+      it "keeps the legacy gross - discount - refund formula for non-TikTok channels" do
+        make_order(channel_a, gross: 200, margin: 0, ordered_at: 1.day.ago, refund: 10).update!(discount: 20)
+
+        result = overview_summary
+
+        expect(result[:kpis][:net_revenue]).to eq(170.0)
+      end
+
+      it "computes financial average ticket only over orders with revenue available, not the full TikTok order count" do
+        make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago) # pendente
+        synced = make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago)
+        synced.update!(revenue_amount: 40, financial_synced_at: Time.current)
+
+        result = overview_summary(channel_ids: [ channel_tiktok.id.to_s ])
+
+        expect(result[:kpis][:average_ticket]).to eq(40.0)
+        expect(result[:kpis][:average_ticket_available]).to eq(true)
+      end
+
+      it "returns average_ticket as nil, not a false zero, when no order has revenue available" do
+        make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago) # só pendente
+
+        result = overview_summary(channel_ids: [ channel_tiktok.id.to_s ])
+
+        expect(result[:kpis][:average_ticket]).to be_nil
+        expect(result[:kpis][:average_ticket_available]).to eq(false)
+        expect(result[:kpis][:net_revenue]).to eq(0.0)
+      end
+
+      it "separates total orders from financial orders in the daily timeline" do
+        make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago) # pendente
+        synced = make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago)
+        synced.update!(revenue_amount: 45, financial_synced_at: Time.current)
+
+        result = overview_summary(channel_ids: [ channel_tiktok.id.to_s ])
+        day = result[:revenue_timeline].first
+
+        expect(day[:orders_count]).to eq(2)
+        expect(day[:financial_orders_count]).to eq(1)
+        expect(day[:tiktok_pending_orders_count]).to eq(1)
+        expect(day[:net]).to eq(45.0)
+      end
+
+      it "uses real TikTok revenue in sales by channel and flags coverage" do
+        make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago) # pendente
+        synced = make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago)
+        synced.update!(revenue_amount: 45, financial_synced_at: Time.current)
+        make_order(channel_a, gross: 30, margin: 0, ordered_at: 1.day.ago)
+
+        result = overview_summary
+        tiktok_row = result[:sales_by_channel].find { |row| row[:channel] == "TikTok Shop" }
+
+        expect(tiktok_row[:net_revenue]).to eq(45.0)
+        expect(tiktok_row[:orders_count]).to eq(2)
+        expect(tiktok_row[:tiktok_coverage_percentage]).to eq(50.0)
+      end
+
+      it "keeps operational order count per state but excludes pending TikTok revenue from the state total" do
+        make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago).update!(state: "SP") # pendente
+        synced = make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago)
+        synced.update!(state: "SP", revenue_amount: 45, financial_synced_at: Time.current)
+
+        result = overview_summary(channel_ids: [ channel_tiktok.id.to_s ])
+        sp = result[:regional_sales][:states].find { |row| row[:state] == "SP" }
+
+        expect(sp[:orders_count]).to eq(2)
+        expect(sp[:net_revenue]).to eq(45.0)
+        expect(sp[:tiktok_pending_orders_count]).to eq(1)
+        expect(sp[:financial_coverage_partial]).to eq(true)
+      end
+
+      it "separates seller-funded discount from platform-funded incentive in the main discount total" do
+        make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago).update!(
+          discount: 10, seller_discount: 6, platform_discount: 4, revenue_amount: 40, financial_synced_at: Time.current
+        )
+
+        result = overview_summary(channel_ids: [ channel_tiktok.id.to_s ])
+
+        expect(result[:coupons][:display_discount_total]).to eq(6.0)
+        expect(result[:coupons][:platform_incentive_total]).to eq(4.0)
+      end
+
+      it "flags the revenue delta as partial, with a coverage note, when either period has pending TikTok orders" do
+        make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago) # pendente
+        synced = make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago)
+        synced.update!(revenue_amount: 45, financial_synced_at: Time.current)
+
+        result = overview_summary(channel_ids: [ channel_tiktok.id.to_s ])
+
+        expect(result[:kpis][:net_revenue_delta_partial]).to eq(true)
+        expect(result[:kpis][:net_revenue_delta_note]).to include("Comparação parcial")
+      end
+
+      it "exposes current and previous period TikTok coverage" do
+        make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago) # pendente (atual)
+        synced_prev = make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 32.days.ago)
+        synced_prev.update!(revenue_amount: 45, financial_synced_at: Time.current)
+
+        result = described_class.call(
+          tenant: tenant,
+          params: ActionController::Parameters.new(
+            from: 29.days.ago.to_date.iso8601, to: Date.current.iso8601, channel_ids: [ channel_tiktok.id.to_s ]
+          )
+        )
+
+        coverage = result[:overview_financial_coverage]
+        expect(coverage[:current_period_partial]).to eq(true)
+        expect(coverage[:tiktok_orders_count]).to eq(1)
+      end
+
+      it "does not flag a partial-coverage warning when the filter excludes TikTok entirely" do
+        make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+
+        result = overview_summary(channel_ids: [ channel_a.id.to_s ])
+
+        expect(result[:overview_financial_coverage][:current_period_partial]).to eq(false)
+        expect(result[:overview_financial_coverage][:tiktok_orders_count]).to eq(0)
+      end
+
+      it "shows coverage when the filter is TikTok-only" do
+        make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago) # pendente
+        synced = make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago)
+        synced.update!(revenue_amount: 45, financial_synced_at: Time.current)
+
+        result = overview_summary(channel_ids: [ channel_tiktok.id.to_s ])
+
+        expect(result[:overview_financial_coverage][:tiktok_coverage_percentage]).to eq(50.0)
+      end
+    end
+
     it "surfaces uncoded discounts without inventing coupon rankings" do
       make_order(channel_a, gross: 120, margin: 0, ordered_at: 1.day.ago).update!(state: "SP", discount: 20)
 
