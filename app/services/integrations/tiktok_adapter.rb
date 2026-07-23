@@ -33,6 +33,8 @@ module Integrations
     WAREHOUSE_LIST_PATH = "/logistics/202309/warehouses".freeze
     ORDER_SEARCH_PATH = "/order/202309/orders/search".freeze
     ORDER_DETAIL_PATH = "/order/202309/orders".freeze
+    FINANCIAL_STATEMENTS_PATH = "/finance/202309/statements".freeze
+    STATEMENT_TRANSACTIONS_PATH = "/finance/202501/statements".freeze
     ORDER_STATEMENT_TRANSACTIONS_PATH = "/finance/202501/orders".freeze
     SHOP_SCOPED_PATHS = [
       PRODUCT_SEARCH_PATH,
@@ -41,7 +43,8 @@ module Integrations
       INVENTORY_SEARCH_PATH,
       WAREHOUSE_LIST_PATH,
       ORDER_SEARCH_PATH,
-      ORDER_DETAIL_PATH
+      ORDER_DETAIL_PATH,
+      FINANCIAL_STATEMENTS_PATH
     ].freeze
     # The inventory-update path has a dynamic {product_id} segment, so it
     # can't live in SHOP_SCOPED_PATHS (an exact-match list) — matched by
@@ -56,7 +59,7 @@ module Integrations
     # the app lacks the scope for an endpoint); keyword matching stays as a
     # fallback for other auth-shaped messages.
     AUTH_ERROR_KEYWORDS = %w[sign signature access_token token auth].freeze
-    PERMISSION_ERROR_KEYWORDS = ["permission", "scope", "not authorized", "unauthorized"].freeze
+    PERMISSION_ERROR_KEYWORDS = %w[permission scope].freeze + [ "not authorized", "unauthorized" ].freeze
     AUTH_ERROR_CODES = (105_000..105_999).freeze
     RATE_LIMIT_KEYWORDS = %w[rate frequency too many limit].freeze
 
@@ -268,7 +271,143 @@ module Integrations
       get(path, query_params: { shop_cipher: shop_cipher })
     end
 
+    # Get Statements 202309. The API only exposes data after 2023-07-01 and
+    # uses an opaque cursor. Return the original statement objects unchanged;
+    # the small PaginatedPayload wrapper only adds the raw response pages for
+    # audit logs and tests.
+    def fetch_financial_statements(
+      statement_time_ge:,
+      statement_time_lt:,
+      page_size: PAGE_SIZE,
+      page_token: nil,
+      payment_status: nil
+    )
+      records = PaginatedPayload.new
+      cursor = page_token
+
+      loop do
+        response = fetch_financial_statements_page(
+          statement_time_ge: statement_time_ge,
+          statement_time_lt: statement_time_lt,
+          page_size: page_size,
+          page_token: cursor,
+          payment_status: payment_status
+        )
+        records.raw_pages << response
+        data = response.fetch("data")
+        statements = data.fetch("statements")
+        records.concat(statements)
+        cursor = data["next_page_token"]
+        break if cursor.blank?
+      end
+
+      records
+    end
+
+    # One page is public as well so the statement backfill can checkpoint
+    # between requests without restarting an entire date interval.
+    def fetch_financial_statements_page(
+      statement_time_ge:,
+      statement_time_lt:,
+      page_size: PAGE_SIZE,
+      page_token: nil,
+      payment_status: nil
+    )
+      query_params = {
+        statement_time_ge: statement_time_ge,
+        statement_time_lt: statement_time_lt,
+        page_size: page_size,
+        page_token: page_token.presence,
+        payment_status: payment_status.presence,
+        sort_field: "statement_time",
+        sort_order: "ASC"
+      }.compact
+
+      response = get(FINANCIAL_STATEMENTS_PATH, query_params: query_params)
+      validate_finance_page!(response, "statements")
+      response
+    end
+
+    # Get Transactions by Statement 202501. Like statements, this returns
+    # raw transaction objects and retains every response page.
+    def fetch_statement_transactions(statement_id:, page_size: PAGE_SIZE, page_token: nil)
+      normalized_statement_id = statement_id.to_s.strip
+      if normalized_statement_id.blank?
+        raise ArgumentError, "TiktokAdapter#fetch_statement_transactions: statement_id inválido"
+      end
+
+      records = PaginatedPayload.new
+      cursor = page_token
+
+      loop do
+        response = fetch_statement_transactions_page(
+          statement_id: normalized_statement_id,
+          page_size: page_size,
+          page_token: cursor
+        )
+        records.raw_pages << response
+        data = response.fetch("data")
+        transactions = data.fetch("transactions")
+        records.concat(transactions)
+        cursor = data["next_page_token"]
+        break if cursor.blank?
+      end
+
+      records
+    end
+
+    def fetch_statement_transactions_page(statement_id:, page_size: PAGE_SIZE, page_token: nil)
+      normalized_statement_id = statement_id.to_s.strip
+      if normalized_statement_id.blank?
+        raise ArgumentError, "TiktokAdapter#fetch_statement_transactions: statement_id inválido"
+      end
+
+      shop_cipher = credentials[:shop_cipher].presence
+      if shop_cipher.blank?
+        raise AuthenticationError,
+          "TiktokAdapter: shop_cipher ausente; reautorize a integração TikTok Shop"
+      end
+
+      path = "#{STATEMENT_TRANSACTIONS_PATH}/#{normalized_statement_id}/statement_transactions"
+      response = get(
+        path,
+        query_params: {
+          page_size: page_size,
+          page_token: page_token.presence,
+          sort_field: "order_create_time",
+          sort_order: "ASC",
+          shop_cipher: shop_cipher
+        }.compact
+      )
+      validate_finance_page!(response, "transactions")
+      response
+    end
+
     private
+
+    class PaginatedPayload < Array
+      attr_reader :raw_pages
+
+      def initialize
+        super
+        @raw_pages = []
+      end
+    end
+
+    def validate_finance_page!(response, collection_key)
+      unless response.is_a?(Hash) && response["code"] == 0
+        code = response.is_a?(Hash) ? response["code"] : nil
+        message = response.is_a?(Hash) ? response["message"] : nil
+        raise ApiError,
+          "TiktokAdapter Finance API: code=#{code.inspect} message=#{message.inspect}"
+      end
+
+      data = response["data"]
+      unless data.is_a?(Hash) && data[collection_key].is_a?(Array)
+        raise ApiError,
+          "TiktokAdapter Finance API: data.#{collection_key} inválido"
+      end
+    end
 
     def post(path, body, query_params: {})
       timestamp = Time.now.to_i

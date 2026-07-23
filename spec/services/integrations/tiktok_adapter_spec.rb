@@ -279,6 +279,74 @@ RSpec.describe Integrations::TiktokAdapter do
     end
   end
 
+  describe "#fetch_financial_statements" do
+    let(:statements_url) { "https://open-api.tiktokglobalshop.com/finance/202309/statements" }
+
+    it "paginates statements, sends the shop cipher and preserves raw pages" do
+      stub_request(:get, /\A#{Regexp.escape(statements_url)}/)
+        .to_return(
+          { status: 200, body: { code: 0, data: { statements: [ { "id" => "s-1", "statement_time" => 1 } ], next_page_token: "next" } }.to_json },
+          { status: 200, body: { code: 0, data: { statements: [ { "id" => "s-2", "statement_time" => 2 } ], next_page_token: "" } }.to_json }
+        )
+
+      statements = adapter.fetch_financial_statements(
+        statement_time_ge: 1_751_000_000,
+        statement_time_lt: 1_751_086_400,
+        payment_status: "PAID"
+      )
+
+      expect(statements.map { |statement| statement["id"] }).to eq(%w[s-1 s-2])
+      expect(statements.raw_pages.size).to eq(2)
+      expect(WebMock).to have_requested(:get, /\A#{Regexp.escape(statements_url)}/)
+        .with(query: hash_including("shop_cipher" => "GCP_cipher", "payment_status" => "PAID"))
+        .twice
+    end
+
+    it "raises for an invalid finance page and for HTTP 500" do
+      stub_request(:get, /\A#{Regexp.escape(statements_url)}/)
+        .to_return(status: 200, body: { code: 0, data: { statements: {} } }.to_json)
+      expect {
+        adapter.fetch_financial_statements(statement_time_ge: 1, statement_time_lt: 2)
+      }.to raise_error(Integrations::ApiError, /statements inválido/)
+
+      stub_request(:get, /\A#{Regexp.escape(statements_url)}/)
+        .to_return(status: 500, body: "server error")
+      expect {
+        adapter.fetch_financial_statements(statement_time_ge: 1, statement_time_lt: 2)
+      }.to raise_error(Integrations::ApiError, /HTTP|resposta inesperada/)
+    end
+  end
+
+  describe "#fetch_statement_transactions" do
+    let(:statement_transactions_url) do
+      "https://open-api.tiktokglobalshop.com/finance/202501/statements/s-1/statement_transactions"
+    end
+
+    it "paginates statement transactions and sends token and shop cipher" do
+      stub_request(:get, /\A#{Regexp.escape(statement_transactions_url)}/)
+        .to_return(
+          { status: 200, body: { code: 0, data: { transactions: [ { "id" => "tx-1" } ], next_page_token: "next" } }.to_json },
+          { status: 200, body: { code: 0, data: { transactions: [ { "id" => "tx-2" } ], next_page_token: "" } }.to_json }
+        )
+
+      transactions = adapter.fetch_statement_transactions(statement_id: "s-1")
+
+      expect(transactions.map { |transaction| transaction["id"] }).to eq(%w[tx-1 tx-2])
+      expect(transactions.raw_pages.size).to eq(2)
+      expect(WebMock).to have_requested(:get, /\A#{Regexp.escape(statement_transactions_url)}/)
+        .with(query: hash_including("shop_cipher" => "GCP_cipher"))
+        .twice
+    end
+
+    it "raises RateLimitError on HTTP 429" do
+      stub_request(:get, /\A#{Regexp.escape(statement_transactions_url)}/)
+        .to_return(status: 429, body: { message: "too many requests" }.to_json, headers: { "Retry-After" => "7" })
+
+      expect { adapter.fetch_statement_transactions(statement_id: "s-1") }
+        .to raise_error(Integrations::RateLimitError) { |error| expect(error.retry_after).to eq(7) }
+    end
+  end
+
   describe "#fetch_warehouses" do
     let(:warehouses_url) { "https://open-api.tiktokglobalshop.com/logistics/202309/warehouses" }
     let(:warehouses_fixture) { File.read(Rails.root.join("spec/fixtures/integrations/tiktok_warehouses.json")) }

@@ -329,11 +329,13 @@ module Integrations
 
       def process_order(order)
         handled = false
-        Integrations::Tiktok::OrderFinancialSyncService.call(
+        options = {
           order: order,
           channel_credential: channel_credential,
           adapter: adapter
-        )
+        }
+        options[:force] = true if force
+        Integrations::Tiktok::OrderFinancialSyncService.call(**options)
         @processed_count += 1
         @run_processed_count += 1
         @synced_count += 1

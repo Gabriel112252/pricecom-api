@@ -30,14 +30,14 @@ module Integrations
           run_id: run_id
         )
 
-        Integrations::Tiktok::FinancialBackfillService.call(
-          channel_credential,
+        options = {
           batch_size: batch_size,
           batch_sleep: batch_sleep,
           force: force,
           max_orders: max_orders,
           run_id: run_id
-        )
+        }
+        Integrations::Tiktok::FinancialBackfillService.call(channel_credential, **options)
       rescue Integrations::RateLimitError => e
         schedule_rate_limit_continuation(
           channel_credential: channel_credential,

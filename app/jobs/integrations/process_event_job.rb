@@ -56,6 +56,7 @@ module Integrations
           processor_metadata: result.metadata
         }
       )
+      enqueue_tiktok_financial_sync(event, result) if result.success?
     rescue => e
       event&.update_columns(
         status:        "error",
@@ -63,6 +64,26 @@ module Integrations
         error_message: e.message
       )
       raise
+    end
+
+    private
+
+    def enqueue_tiktok_financial_sync(event, result)
+      return unless event.provider.to_s.casecmp?("tiktok")
+
+      order_id = result.metadata.to_h["order_id"]
+      credential = event.tenant.channel_credentials.find_by(channel: "tiktok", status: "active")
+      return unless credential && order_id.present?
+
+      Integrations::Tiktok::PendingFinancialSyncJob.perform_later(
+        credential.id,
+        order_ids: [ order_id ],
+        batch_size: 1
+      )
+    rescue => e
+      # Enqueuing a financial retry must never turn a successfully processed
+      # webhook into an error; the proposed cron remains the safety net.
+      Rails.logger.error("[Integrations::ProcessEventJob] TikTok financial enqueue failed: #{e.message}")
     end
   end
 end

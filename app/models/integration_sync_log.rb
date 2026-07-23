@@ -1,6 +1,7 @@
 class IntegrationSyncLog < ApplicationRecord
   belongs_to :tenant
   belongs_to :integration, optional: true
+  belongs_to :channel_credential, optional: true
 
   STATUSES    = %w[pending success error skipped].freeze
   DIRECTIONS  = %w[inbound outbound].freeze

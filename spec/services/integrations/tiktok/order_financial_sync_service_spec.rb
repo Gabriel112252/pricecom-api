@@ -36,11 +36,12 @@ RSpec.describe Integrations::Tiktok::OrderFinancialSyncService do
       .and_return(statement_response)
   end
 
-  def sync_order(current_order: order, credential: channel_credential, current_adapter: adapter)
+  def sync_order(current_order: order, credential: channel_credential, current_adapter: adapter, force: false)
     described_class.call(
       order: current_order,
       channel_credential: credential,
-      adapter: current_adapter
+      adapter: current_adapter,
+      force: force
     )
   end
 
@@ -65,7 +66,7 @@ RSpec.describe Integrations::Tiktok::OrderFinancialSyncService do
     expect(order.financial_synced_at).to be_present
   end
 
-  it "is idempotent and does not recreate order items or alter order pricing fields" do
+  it "is idempotent, does not re-query a synced order, and does not recreate items" do
     item = order.order_items.create!(sku: "SKU-1", name: "Produto", quantity: 1, unit_cost: 17.23)
     original_values = order.attributes.slice("gross_value", "discount", "seller_discount", "platform_discount")
 
@@ -80,6 +81,16 @@ RSpec.describe Integrations::Tiktok::OrderFinancialSyncService do
     expect(order.fee_and_tax_amount).to eq(BigDecimal("28.59"))
     expect(order.margin).to eq(BigDecimal("31.04"))
     expect(order.margin_pct).to eq(BigDecimal("40.39"))
+    expect(adapter).to have_received(:fetch_order_statement_transactions).once
+  end
+
+  it "re-queries an already synchronized order only with force" do
+    sync_order
+
+    sync_order
+    expect(adapter).to have_received(:fetch_order_statement_transactions).once
+
+    sync_order(force: true)
     expect(adapter).to have_received(:fetch_order_statement_transactions).twice
   end
 

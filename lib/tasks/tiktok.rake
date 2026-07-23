@@ -247,4 +247,134 @@ namespace :tiktok do
     puts "started_at=#{log.started_at}"
     puts "finished_at=#{log.finished_at || 'nil'}"
   end
+
+  desc "Enfileira o backfill financeiro TikTok por statement"
+  task :statement_financial_backfill, [ :tenant_slug, :date_from, :date_to, :max_statements, :force ] => :environment do |_t, args|
+    usage = "Uso: bin/rails 'tiktok:statement_financial_backfill[tenant_slug,date_from,date_to,max_statements,force]'"
+    tenant_slug = args[:tenant_slug]
+    date_from = args[:date_from]
+    date_to = args[:date_to]
+    abort usage if [ tenant_slug, date_from, date_to ].any?(&:blank?)
+
+    begin
+      Date.iso8601(date_from)
+      Date.iso8601(date_to)
+    rescue ArgumentError
+      abort "#{usage}; date_from/date_to devem estar em YYYY-MM-DD"
+    end
+
+    raw_max = args[:max_statements].to_s.strip
+    max_statements = if raw_max.blank? || raw_max.casecmp?("all")
+      nil
+    elsif raw_max.match?(/\A[1-9]\d*\z/)
+      raw_max.to_i
+    else
+      abort "#{usage}; max_statements deve ser um inteiro positivo ou all"
+    end
+
+    raw_force = args[:force]
+    force = if raw_force.nil? || raw_force.to_s.casecmp?("false")
+      false
+    elsif raw_force.to_s.casecmp?("true")
+      true
+    else
+      abort "#{usage}; force deve ser true ou false"
+    end
+
+    tenant = Tenant.find_by(slug: tenant_slug)
+    abort "Tenant '#{tenant_slug}' não encontrado" unless tenant
+    credential = tenant.channel_credentials.find_by(channel: "tiktok", status: "active")
+    abort "Tenant '#{tenant_slug}' não tem ChannelCredential tiktok ativa" unless credential
+
+    job = Integrations::Tiktok::StatementFinancialBackfillJob.perform_later(
+      credential.id,
+      date_from: date_from,
+      date_to: date_to,
+      force: force,
+      max_statements: max_statements
+    )
+    puts "job_id=#{job.job_id}"
+    puts "tenant_slug=#{tenant_slug}"
+    puts "date_from=#{date_from}"
+    puts "date_to=#{date_to}"
+    puts "max_statements=#{max_statements || 'all'}"
+    puts "force=#{force}"
+    puts "tiktok_statement_financial_backfill_enqueued=true"
+  end
+
+  desc "Mostra o status do backfill financeiro TikTok por statement"
+  task :statement_financial_backfill_status, [ :tenant_slug ] => :environment do |_t, args|
+    tenant_slug = args[:tenant_slug]
+    abort "Uso: bin/rails tiktok:statement_financial_backfill_status[tenant_slug]" if tenant_slug.blank?
+
+    tenant = Tenant.find_by(slug: tenant_slug)
+    abort "Tenant '#{tenant_slug}' não encontrado" unless tenant
+    log = IntegrationSyncLog.where(tenant: tenant, action: Integrations::Tiktok::StatementFinancialBackfillService::ACTION)
+      .order(created_at: :desc).first
+    unless log
+      puts "Nenhum backfill por statement encontrado para #{tenant_slug}."
+      next
+    end
+
+    metadata = log.metadata.to_h
+    puts "status=#{log.status}"
+    puts "run_id=#{metadata['run_id']}"
+    puts "date_from=#{metadata['date_from']}"
+    puts "date_to=#{metadata['date_to']}"
+    puts "current_statement_time=#{metadata['current_statement_time']}"
+    puts "current_statement_id=#{metadata['current_statement_id']}"
+    puts "current_page_token=#{metadata['current_page_token']}"
+    puts "processed_statements=#{metadata['processed_statements'] || 0}"
+    puts "processed_transactions=#{metadata['processed_transactions'] || 0}"
+    puts "matched_orders=#{metadata['matched_orders'] || 0}"
+    puts "synced_orders=#{metadata['synced_orders'] || 0}"
+    puts "missing_orders=#{metadata['missing_orders'] || 0}"
+    puts "skipped_orders=#{metadata['skipped_orders'] || 0}"
+    puts "error_count=#{metadata['error_count'] || 0}"
+    puts "started_at=#{log.started_at}"
+    puts "finished_at=#{log.finished_at || 'nil'}"
+  end
+
+  desc "Mostra o diagnóstico de pendências financeiras TikTok"
+  task :pending_financial_status, [ :tenant_slug ] => :environment do |_t, args|
+    tenant_slug = args[:tenant_slug]
+    abort "Uso: bin/rails tiktok:pending_financial_status[tenant_slug]" if tenant_slug.blank?
+
+    tenant = Tenant.find_by(slug: tenant_slug)
+    abort "Tenant '#{tenant_slug}' não encontrado" unless tenant
+    channel = tenant.channels.find_by(platform: "tiktok")
+    scope = channel ? channel.orders : Order.none
+    pending = scope.where(financial_synced_at: nil)
+    pending = pending.where.not("LOWER(COALESCE(orders.status, '')) IN (?)", Order::NON_REVENUE_STATUSES)
+
+    total = scope.count
+    synced = scope.where.not(financial_synced_at: nil).count
+    never_attempted = if Order.column_names.include?("financial_sync_attempts")
+      pending.where(financial_sync_attempts: 0).count
+    else
+      pending.count
+    end
+    waiting_next = if Order.column_names.include?("financial_next_attempt_at")
+      pending.where("financial_next_attempt_at > ?", Time.current).count
+    else
+      0
+    end
+    errors = if Order.column_names.include?("financial_pending_reason")
+      pending.where(financial_pending_reason: %w[temporary_error error authentication_invalid]).count
+    else
+      0
+    end
+    latest = IntegrationSyncLog.where(tenant: tenant, action: Integrations::Tiktok::PendingFinancialSyncService::ACTION)
+      .order(created_at: :desc).first
+
+    puts "total_tiktok=#{total}"
+    puts "sincronizados=#{synced}"
+    puts "pendentes=#{pending.count}"
+    puts "nunca_tentados=#{never_attempted}"
+    puts "aguardando_proxima_tentativa=#{waiting_next}"
+    puts "erros=#{errors}"
+    puts "pedido_mais_antigo_pendente=#{pending.where.not(ordered_at: nil).minimum(:ordered_at)}"
+    puts "pedido_mais_novo_pendente=#{pending.where.not(ordered_at: nil).maximum(:ordered_at)}"
+    puts "ultima_execucao_job=#{latest&.finished_at || latest&.started_at || 'nil'}"
+  end
 end

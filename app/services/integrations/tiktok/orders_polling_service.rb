@@ -63,6 +63,7 @@ module Integrations
         @lock_acquired = true
         Channel.ensure_for!(tenant, "tiktok")
         fetch_and_process_pages
+        enqueue_pending_financial_sync if created_count.positive? || updated_count.positive?
 
         if error_count.positive?
           finish_log(status: "error", error_message: item_errors.first&.fetch(:message, nil))
@@ -240,6 +241,15 @@ module Integrations
         processed_examples << { external_id: external_id, outcome: outcome }
       end
 
+      def enqueue_pending_financial_sync
+        Integrations::Tiktok::PendingFinancialSyncJob.perform_later(
+          channel_credential.id,
+          batch_size: Integrations::Tiktok::PendingFinancialSyncService::DEFAULT_BATCH_SIZE
+        )
+      rescue => e
+        Rails.logger.error("[Integrations::Tiktok::OrdersPollingService] financial enqueue failed: #{e.message}")
+      end
+
       def start_log
         IntegrationSyncLog.create!(
           tenant: tenant,
@@ -303,6 +313,8 @@ module Integrations
       end
 
       def error_count = @error_count
+      def created_count = @created_count
+      def updated_count = @updated_count
       def item_errors = @item_errors
       def ignored_examples = @ignored_examples
       def processed_examples = @processed_examples
