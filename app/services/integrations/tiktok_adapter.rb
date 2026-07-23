@@ -297,7 +297,7 @@ module Integrations
       params = {
         app_key: credentials[:app_key],
         timestamp: Time.now.to_i
-      }.merge(query_params.compact).merge(shop_scoped_query_params(path))
+      }.merge(query_params.compact).merge(shop_scoped_query_params(path)).merge(warehouse_compat_params(path))
       params[:sign] = sign(path, params)
 
       response = connection(BASE_URL).get(path) do |req|
@@ -371,6 +371,27 @@ module Integrations
       end
 
       { shop_cipher: shop_cipher }
+    end
+
+    # Get Warehouse List 202309 still enforces the legacy-era signed
+    # parameter set despite living under a /202309/ path — confirmed
+    # 2026-07-22 by diffing a manually-built curl that succeeded against
+    # the real API for this exact path against what this method was
+    # sending. The working call had `access_token` as an explicit query
+    # param (in addition to the x-tts-access-token header), `version`
+    # (matching the path's own version), and `shop_id` present even as an
+    # empty string — none of which this adapter was sending, which is why
+    # every call here failed with a scope-shaped 401 even though
+    # granted_scopes actually contains the right scope. `access_token` is
+    # excluded from the signed base by #sign either way (see
+    # TiktokRequestSigning#tiktok_sign), same as the working curl's own
+    # sign; `version`/`shop_id` do get signed. Scoped to just this path —
+    # product/order 202309 endpoints work fine today without any of this
+    # and shouldn't get it added speculatively.
+    def warehouse_compat_params(path)
+      return {} unless path == WAREHOUSE_LIST_PATH
+
+      { access_token: credentials[:access_token], version: "202309", shop_id: "" }
     end
 
     # TikTok Shop's API returns HTTP 200 for most application-level errors
