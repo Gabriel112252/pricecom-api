@@ -123,6 +123,7 @@ Rails.application.routes.draw do
       get "dashboard/summary",   to: "dashboard#summary"
       get "dashboard/financial", to: "dashboard#financial"
       get "dashboard/freight_orders", to: "dashboard#freight_orders"
+      get "dashboard/tiktok_orders", to: "dashboard#tiktok_orders"
 
       # TV Mode token (admin only) — regenerating invalidates the previous link
       get    "tv_token", to: "tv_tokens#show"

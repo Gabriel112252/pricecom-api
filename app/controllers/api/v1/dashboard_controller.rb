@@ -21,6 +21,17 @@ module Api
       }.freeze
       FREIGHT_ORDERS_PER_PAGE_DEFAULT = 50
 
+      TIKTOK_ORDER_SORTS = {
+        "revenue" => "orders.revenue_amount",
+        "settlement" => "orders.settlement_amount",
+        "fees" => "orders.fee_and_tax_amount",
+        "profit" => "orders.margin",
+        "margin_pct" => "orders.margin_pct",
+        "ordered_at" => "orders.ordered_at"
+      }.freeze
+      TIKTOK_ORDERS_PER_PAGE_DEFAULT = 50
+      TIKTOK_ERROR_REASONS = %w[error temporary_error authentication_invalid].freeze
+
       INSTALLMENT_BUCKETS = {
         "1" => { label: "À vista (1x)", range: 1..1 },
         "2_6" => { label: "Parcelado 2-6x", range: 2..6 },
@@ -61,6 +72,29 @@ module Api
             without_real_cost: without_real_cost,
             total: with_real_cost + without_real_cost
           }
+        }
+      end
+
+      # GET /api/v1/dashboard/tiktok_orders — subtab "TikTok Shop" da aba
+      # Financeiro: tabela paginada por pedido, com o breakdown financeiro já
+      # persistido em orders (revenue_amount, settlement_amount, margin...).
+      # Mesmos filtros de período/canal do resto do dashboard + filtros
+      # próprios da subtab (status financeiro, afiliado, subsídio, margem).
+      def tiktok_orders
+        scope = apply_tiktok_order_filters(tiktok_orders_scope)
+
+        sort = TIKTOK_ORDER_SORTS.fetch(params[:sort].to_s, TIKTOK_ORDER_SORTS["ordered_at"])
+        direction = params[:direction].to_s.downcase == "asc" ? "ASC" : "DESC"
+        per = [ [ params.fetch(:per_page, TIKTOK_ORDERS_PER_PAGE_DEFAULT).to_i, 1 ].max, PER_PAGE_MAX ].min
+
+        paged = scope
+          .reorder(Arel.sql("#{sort} #{direction}"), id: :asc)
+          .page(params[:page])
+          .per(per)
+
+        render json: {
+          rows: paged.map { |order| tiktok_order_json(order) },
+          meta: pagination_meta(paged)
         }
       end
 
@@ -122,6 +156,153 @@ module Api
           real_freight_cost: real_cost&.round(2),
           freight_margin: real_cost.nil? ? nil : (freight - real_cost).round(2)
         }
+      end
+
+      # Mesmo filtro período/tipo/status de Dashboard::BuildSummary#financial_orders
+      # (sale+refund, não cancelado, revenue_countable), restrito ao(s)
+      # canal(is) TikTok do tenant — mantém a tabela consistente com os
+      # agregados de /dashboard/summary#financial.
+      def tiktok_orders_scope
+        period = resolve_freight_period
+        scope = current_tenant.orders
+          .joins(:channel)
+          .where(channels: { platform: "tiktok" })
+          .where(ordered_at: period[:from].beginning_of_day..period[:to].end_of_day)
+          .where(order_type: %w[sale refund])
+          .not_canceled
+          .revenue_countable
+
+        channel_ids = Array(params[:channel_ids]).reject(&:blank?)
+        scope = scope.where(channel_id: channel_ids) if channel_ids.present?
+        scope
+      end
+
+      def apply_tiktok_order_filters(scope)
+        scope = scope.where("orders.order_number ILIKE ?", "%#{params[:order_number]}%") if params[:order_number].present?
+
+        case params[:financial_status]
+        when "synced"   then scope = scope.where.not(financial_synced_at: nil).where(Arel.sql("NOT (#{tiktok_refunded_sql})"))
+        when "pending"  then scope = scope.where(financial_synced_at: nil).where(Arel.sql("NOT (#{tiktok_error_sql})"))
+        when "refunded" then scope = scope.where.not(financial_synced_at: nil).where(Arel.sql(tiktok_refunded_sql))
+        when "partial"  then scope = scope.where.not(financial_synced_at: nil).where(order_type: "refund").where(Arel.sql("NOT (#{tiktok_refunded_sql})"))
+        when "error"    then scope = scope.where(financial_synced_at: nil).where(Arel.sql(tiktok_error_sql))
+        end
+
+        case params[:affiliate]
+        when "with"    then scope = scope.where("COALESCE(orders.affiliate_commission_amount, 0) > 0")
+        when "without" then scope = scope.where("COALESCE(orders.affiliate_commission_amount, 0) = 0")
+        end
+
+        scope = scope.where(Arel.sql("(#{tiktok_platform_subsidy_sql}) > 0")) if params[:subsidy] == "with"
+        scope = scope.where(Arel.sql("(#{tiktok_seller_discount_sql}) > 0")) if params[:seller_discount] == "with"
+
+        case params[:margin]
+        when "positive" then scope = scope.where("orders.margin > 0")
+        when "negative" then scope = scope.where("orders.margin < 0")
+        end
+
+        scope
+      end
+
+      def tiktok_refunded_sql
+        "COALESCE(orders.revenue_amount, 0) = 0 AND COALESCE(orders.fee_and_tax_amount, 0) = 0 " \
+          "AND COALESCE(orders.settlement_amount, 0) = 0"
+      end
+
+      # financial_pending_reason só existe após a migration de tracking de
+      # sync financeiro TikTok (20260723120000) — guarda defensiva pro
+      # filtro "Com erro" não quebrar em ambientes ainda não migrados,
+      # mesmo padrão de Dashboard::BuildSummary#tiktok_financial_fields_available?.
+      def tiktok_error_sql
+        return "1=0" unless Order.column_names.include?("financial_pending_reason")
+
+        sanitized = TIKTOK_ERROR_REASONS.map { |reason| ActiveRecord::Base.connection.quote(reason) }.join(", ")
+        "orders.financial_pending_reason IN (#{sanitized})"
+      end
+
+      def tiktok_seller_discount_sql
+        "CASE WHEN COALESCE(orders.seller_discount, 0) > 0 " \
+          "THEN COALESCE(orders.seller_discount, 0) " \
+          "WHEN orders.financial_synced_at IS NOT NULL " \
+          "THEN GREATEST(COALESCE(orders.gross_value, 0) - COALESCE(orders.revenue_amount, 0), 0) " \
+          "ELSE 0 END"
+      end
+
+      def tiktok_platform_subsidy_sql
+        "CASE WHEN COALESCE(orders.platform_discount, 0) > 0 " \
+          "THEN COALESCE(orders.platform_discount, 0) " \
+          "WHEN orders.financial_synced_at IS NOT NULL " \
+          "THEN GREATEST(COALESCE(orders.discount, 0) - (#{tiktok_seller_discount_sql}), 0) " \
+          "ELSE 0 END"
+      end
+
+      def tiktok_order_json(order)
+        seller_discount = tiktok_order_seller_discount(order)
+        platform_subsidy = tiktok_order_platform_subsidy(order)
+        revenue = order.revenue_amount.to_f
+
+        {
+          id: order.id,
+          order_number: order.order_number,
+          ordered_at: order.ordered_at,
+          reference_price: order.gross_value&.to_f&.round(2),
+          seller_discount: seller_discount.round(2),
+          platform_subsidy: platform_subsidy.round(2),
+          buyer_paid: (revenue - platform_subsidy).round(2),
+          effective_revenue: revenue.round(2),
+          fees_total: order.fee_and_tax_amount.to_f.round(2),
+          affiliate_commission: order.affiliate_commission_amount.to_f.round(2),
+          platform_commission: order.platform_commission_amount.to_f.round(2),
+          settlement_amount: order.settlement_amount.to_f.round(2),
+          product_cost: order.cost_price.to_f.round(2),
+          profit: order.financial_synced_at.present? ? order.margin&.to_f&.round(2) : nil,
+          # revenue_amount zerado (estorno total) não deve virar "0%" — a
+          # regra de negócio pede "—", não um número que pareça definitivo.
+          margin_pct: (order.financial_synced_at.present? && revenue.nonzero?) ? order.margin_pct&.to_f : nil,
+          financial_status: tiktok_order_financial_status(order)
+        }
+      end
+
+      def tiktok_order_seller_discount(order)
+        if order.seller_discount.to_f > 0
+          order.seller_discount.to_f
+        elsif order.financial_synced_at.present?
+          [ order.gross_value.to_f - order.revenue_amount.to_f, 0 ].max
+        else
+          0.0
+        end
+      end
+
+      def tiktok_order_platform_subsidy(order)
+        if order.platform_discount.to_f > 0
+          order.platform_discount.to_f
+        elsif order.financial_synced_at.present?
+          [ order.discount.to_f - tiktok_order_seller_discount(order), 0 ].max
+        else
+          0.0
+        end
+      end
+
+      def tiktok_order_financial_status(order)
+        if order.financial_synced_at.blank?
+          tiktok_order_error?(order) ? "error" : "pending"
+        elsif tiktok_order_refunded?(order)
+          "refunded"
+        elsif order.order_type == "refund"
+          "partial"
+        else
+          "synced"
+        end
+      end
+
+      def tiktok_order_refunded?(order)
+        order.revenue_amount.to_f.zero? && order.fee_and_tax_amount.to_f.zero? && order.settlement_amount.to_f.zero?
+      end
+
+      def tiktok_order_error?(order)
+        return false unless order.respond_to?(:financial_pending_reason)
+
+        TIKTOK_ERROR_REASONS.include?(order.financial_pending_reason)
       end
 
       def apply_financial_filters(scope)

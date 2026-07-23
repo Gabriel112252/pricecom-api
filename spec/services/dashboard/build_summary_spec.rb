@@ -481,6 +481,157 @@ RSpec.describe Dashboard::BuildSummary do
       end
     end
 
+    describe "TikTok real profit, coverage and consolidated financial view" do
+      let(:channel_tiktok) { tenant.channels.create!(name: "TikTok Shop", platform: "tiktok") }
+
+      def tiktok_summary
+        described_class.call(
+          tenant: tenant,
+          params: ActionController::Parameters.new(
+            from: 6.days.ago.to_date.iso8601,
+            to: Date.current.iso8601,
+            channel_ids: [ channel_tiktok.id.to_s ]
+          )
+        )
+      end
+
+      it "computes real profit as settlement minus product cost, weighted by revenue for the margin" do
+        order = make_order(channel_tiktok, gross: 36.46, margin: 0, ordered_at: 1.day.ago)
+        order.update!(revenue_amount: 29.90, settlement_amount: 17.83, fee_and_tax_amount: 12.07, cost_price: 5.83, financial_synced_at: Time.current)
+        product = tenant.products.create!(sku: "SKU-TK", name: "Produto TikTok", cost_price: 5.83)
+        order.order_items.create!(product: product, sku: product.sku, name: product.name, quantity: 1, unit_price: 29.90, unit_cost: 5.83)
+
+        financial = tiktok_summary[:financial][:tiktok_financial_breakdown]
+
+        expect(financial[:real_profit_total]).to eq(12.0)
+        expect(financial[:real_margin_pct]).to eq(40.13)
+        expect(financial[:real_profit_available]).to eq(true)
+      end
+
+      it "hides real profit and margin when product cost coverage is incomplete, without hiding raw settlement totals" do
+        order = make_order(channel_tiktok, gross: 36.46, margin: 0, ordered_at: 1.day.ago)
+        order.update!(revenue_amount: 29.90, settlement_amount: 17.83, fee_and_tax_amount: 12.07, financial_synced_at: Time.current)
+        order.order_items.create!(sku: "NO-COST", name: "Sem custo", quantity: 1, unit_price: 29.90, unit_cost: nil)
+
+        financial = tiktok_summary[:financial][:tiktok_financial_breakdown]
+
+        expect(financial[:real_profit_available]).to eq(false)
+        expect(financial[:real_profit_total]).to be_nil
+        expect(financial[:real_margin_pct]).to be_nil
+        expect(financial[:settlement_amount_total]).to eq(17.83)
+        expect(financial[:revenue_amount_total]).to eq(29.90)
+      end
+
+      it "returns margin as nil (not zero) when a fully refunded order has zero revenue" do
+        order = make_order(channel_tiktok, gross: 36.46, margin: 0, ordered_at: 1.day.ago)
+        order.update!(revenue_amount: 0, settlement_amount: 0, fee_and_tax_amount: 0, cost_price: 0, financial_synced_at: Time.current)
+        order.order_items.create!(sku: "SKU-REFUND", name: "Estornado", quantity: 1, unit_price: 0, unit_cost: 0)
+
+        financial = tiktok_summary[:financial][:tiktok_financial_breakdown]
+
+        expect(financial[:real_margin_pct]).to be_nil
+        expect(financial[:revenue_amount_total]).to eq(0.0)
+        expect(financial[:settlement_amount_total]).to eq(0.0)
+      end
+
+      it "exposes an explicit 'other adjustments' reconciliation line instead of folding discrepancies into another category" do
+        order = make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago)
+        order.update!(
+          revenue_amount: 50.0,
+          settlement_amount: 30.0,
+          fee_and_tax_amount: 15.0,
+          platform_commission_amount: 10.0,
+          item_fee_amount: 3.0,
+          service_fee_amount: 2.0,
+          shipping_cost_amount: 0,
+          financial_synced_at: Time.current
+        )
+
+        reconciliation = tiktok_summary[:financial][:tiktok_financial_breakdown][:reconciliation]
+
+        # explicado = 50 (receita) - 15 (taxas) - 0 (frete) = 35; ajuste = 30 (liquidado real) - 35 = -5
+        expect(reconciliation.find { |row| row[:key] == "other_adjustments" }[:amount]).to eq(-5.0)
+        expect(reconciliation.find { |row| row[:key] == "settlement_amount" }[:amount]).to eq(30.0)
+        expect(order.reload.margin).to eq(30.0 - order.cost_price.to_f)
+      end
+
+      it "breaks fees down by category with percentage of revenue and orders reached, keeping affiliate separate from platform commission" do
+        order = make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago)
+        order.update!(
+          revenue_amount: 80.0,
+          settlement_amount: 60.0,
+          fee_and_tax_amount: 20.0,
+          platform_commission_amount: 8.0,
+          affiliate_commission_amount: 4.0,
+          item_fee_amount: 5.0,
+          service_fee_amount: 3.0,
+          shipping_cost_amount: 0,
+          financial_synced_at: Time.current
+        )
+
+        fee_composition = tiktok_summary[:financial][:tiktok_financial_breakdown][:fee_composition]
+        platform_line = fee_composition.find { |row| row[:key] == "platform_commission" }
+        affiliate_line = fee_composition.find { |row| row[:key] == "affiliate_commission" }
+
+        expect(platform_line).to include(amount: 8.0, orders_count: 1, percentage_of_revenue: 10.0)
+        expect(affiliate_line).to include(amount: 4.0, orders_count: 1, percentage_of_revenue: 5.0)
+        expect(platform_line[:key]).not_to eq(affiliate_line[:key])
+      end
+
+      it "reports tiktok financial coverage with a pending count and a processing status" do
+        synced = make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago)
+        synced.update!(revenue_amount: 45, settlement_amount: 40, financial_synced_at: Time.current)
+        make_order(channel_tiktok, gross: 30, margin: 0, ordered_at: 1.day.ago)
+
+        coverage = tiktok_summary[:financial][:tiktok_coverage]
+
+        expect(coverage).to include(
+          orders_count: 2,
+          synced_orders_count: 1,
+          pending_orders_count: 1,
+          coverage_percentage: 50.0,
+          status: "Dados históricos ainda em processamento."
+        )
+      end
+
+      it "returns a per-day series with revenue, settlement and real profit for synced orders only" do
+        synced = make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago)
+        synced.update!(revenue_amount: 45, settlement_amount: 40, cost_price: 10, financial_synced_at: Time.current)
+        make_order(channel_tiktok, gross: 30, margin: 0, ordered_at: 1.day.ago) # não sincronizado, não entra na série
+
+        series = tiktok_summary[:financial][:tiktok_daily_series]
+
+        expect(series.size).to eq(1)
+        expect(series.first).to include(revenue_amount: 45.0, settlement_amount: 40.0, profit: 30.0, orders_count: 1)
+      end
+
+      it "consolidates yampi and tiktok totals without mixing their profit formulas" do
+        yampi_product = tenant.products.create!(sku: "SKU-Y", name: "Produto Yampi", cost_price: 20)
+        yampi_order = make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+        yampi_order.update!(discount: 10)
+        yampi_order.order_items.create!(product: yampi_product, sku: yampi_product.sku, name: yampi_product.name, quantity: 1, unit_price: 100, unit_cost: 20)
+
+        tiktok_product = tenant.products.create!(sku: "SKU-TK2", name: "Produto TikTok", cost_price: 5)
+        tiktok_order = make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago)
+        tiktok_order.update!(revenue_amount: 45, settlement_amount: 40, cost_price: 5, financial_synced_at: Time.current)
+        tiktok_order.order_items.create!(product: tiktok_product, sku: tiktok_product.sku, name: tiktok_product.name, quantity: 1, unit_price: 45, unit_cost: 5)
+
+        result = described_class.call(
+          tenant: tenant,
+          params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601)
+        )
+        consolidated = result[:financial][:consolidated]
+
+        # Yampi: net = 100 - 10 = 90; lucro (fórmula geral) = 90 - 20 (custo) = 70 (sem frete/comissão/imposto/gateway configurados)
+        # TikTok: receita efetiva 45; lucro real = 40 (liquidado) - 5 (custo) = 35
+        expect(consolidated[:effective_revenue]).to eq(135.0)
+        expect(consolidated[:yampi][:real_profit]).to eq(70.0)
+        expect(consolidated[:tiktok][:real_profit]).to eq(35.0)
+        expect(consolidated[:real_profit]).to eq(105.0)
+        expect(consolidated[:orders_count]).to eq(2)
+      end
+    end
+
     it "surfaces uncoded discounts without inventing coupon rankings" do
       make_order(channel_a, gross: 120, margin: 0, ordered_at: 1.day.ago).update!(state: "SP", discount: 20)
 
