@@ -406,7 +406,8 @@ module Integrations
             page_token: cursor
           )
           raw_pages << response
-          transactions.concat(Array(response.dig("data", "transactions")))
+          page_transactions = Array(response.dig("data", "transactions"))
+          transactions.concat(page_transactions)
 
           cursor = response.dig("data", "next_page_token").presence
           @current_page_token = cursor
@@ -416,7 +417,14 @@ module Integrations
           )
           statement_log.save!
           persist_checkpoint
-          break if cursor.blank?
+          # Statement PAID sem nenhuma transação (ou fim real da paginação)
+          # chega como página vazia — parar aqui é o que garante o avanço.
+          # Sem essa guarda, uma TikTok que devolve next_page_token não-nulo
+          # numa página vazia prende o loop pra sempre no mesmo cursor: o
+          # statement nunca chega em finish_statement_log, processed_at
+          # nunca é preenchido, e o job — ao reencontrar o mesmo checkpoint
+          # na próxima execução — repete o mesmo ciclo indefinidamente.
+          break if page_transactions.empty? || cursor.blank?
         end
 
         [ transactions, raw_pages ]

@@ -315,6 +315,28 @@ RSpec.describe Integrations::TiktokAdapter do
         adapter.fetch_financial_statements(statement_time_ge: 1, statement_time_lt: 2)
       }.to raise_error(Integrations::ApiError, /HTTP|resposta inesperada/)
     end
+
+    it "treats a missing statements array as an empty page instead of raising" do
+      stub_request(:get, /\A#{Regexp.escape(statements_url)}/)
+        .to_return(status: 200, body: { code: 0, data: {} }.to_json)
+
+      statements = adapter.fetch_financial_statements(statement_time_ge: 1, statement_time_lt: 2)
+
+      expect(statements).to eq([])
+    end
+
+    # Reproduz o quirk real que travava o backfill TikTok: a página volta
+    # vazia mas a API ainda manda um next_page_token não-nulo. Parar aqui é
+    # o que impede o loop de nunca convergir.
+    it "stops paginating on an empty page even when the API still returns a next_page_token" do
+      stub_request(:get, /\A#{Regexp.escape(statements_url)}/)
+        .to_return(status: 200, body: { code: 0, data: { statements: [], next_page_token: "stale-token" } }.to_json)
+
+      statements = adapter.fetch_financial_statements(statement_time_ge: 1, statement_time_lt: 2)
+
+      expect(statements).to eq([])
+      expect(WebMock).to have_requested(:get, /\A#{Regexp.escape(statements_url)}/).once
+    end
   end
 
   describe "#fetch_statement_transactions" do
@@ -344,6 +366,27 @@ RSpec.describe Integrations::TiktokAdapter do
 
       expect { adapter.fetch_statement_transactions(statement_id: "s-1") }
         .to raise_error(Integrations::RateLimitError) { |error| expect(error.retry_after).to eq(7) }
+    end
+
+    # Statement PAID sem nenhuma transação chega assim: code 0, mas sem a
+    # chave "transactions" (ou null) — uma página vazia válida, não um erro.
+    it "treats a missing transactions array as an empty page instead of raising" do
+      stub_request(:get, /\A#{Regexp.escape(statement_transactions_url)}/)
+        .to_return(status: 200, body: { code: 0, data: {} }.to_json)
+
+      transactions = adapter.fetch_statement_transactions(statement_id: "s-1")
+
+      expect(transactions).to eq([])
+    end
+
+    it "stops paginating on an empty transactions page even with a stale next_page_token" do
+      stub_request(:get, /\A#{Regexp.escape(statement_transactions_url)}/)
+        .to_return(status: 200, body: { code: 0, data: { transactions: [], next_page_token: "stale-token" } }.to_json)
+
+      transactions = adapter.fetch_statement_transactions(statement_id: "s-1")
+
+      expect(transactions).to eq([])
+      expect(WebMock).to have_requested(:get, /\A#{Regexp.escape(statement_transactions_url)}/).once
     end
   end
 

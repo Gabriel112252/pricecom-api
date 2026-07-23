@@ -295,10 +295,13 @@ module Integrations
         )
         records.raw_pages << response
         data = response.fetch("data")
-        statements = data.fetch("statements")
+        statements = Array(data["statements"])
         records.concat(statements)
         cursor = data["next_page_token"]
-        break if cursor.blank?
+        # Página vazia é fim de paginação de verdade, mesmo se a TikTok ainda
+        # mandar um next_page_token não-nulo — nunca continuar batendo na API
+        # por um cursor que não avança.
+        break if statements.empty? || cursor.blank?
       end
 
       records
@@ -347,10 +350,14 @@ module Integrations
         )
         records.raw_pages << response
         data = response.fetch("data")
-        transactions = data.fetch("transactions")
+        transactions = Array(data["transactions"])
         records.concat(transactions)
         cursor = data["next_page_token"]
-        break if cursor.blank?
+        # Um statement PAID sem nenhuma transação (ou o fim real da
+        # paginação) vem como página vazia — parar aqui, mesmo com
+        # next_page_token preenchido, evita voltar a bater na mesma página
+        # pra sempre.
+        break if transactions.empty? || cursor.blank?
       end
 
       records
@@ -403,7 +410,11 @@ module Integrations
       end
 
       data = response["data"]
-      unless data.is_a?(Hash) && data[collection_key].is_a?(Array)
+      # TikTok pode omitir a chave ou devolver null pra esse array quando não
+      # há registro nenhum (ex: statement PAID sem transação) — isso é uma
+      # página vazia válida, não uma resposta malformada. Só um valor de tipo
+      # errado (string, hash, etc.) é de fato inválido.
+      unless data.is_a?(Hash) && (data[collection_key].nil? || data[collection_key].is_a?(Array))
         raise ApiError,
           "TiktokAdapter Finance API: data.#{collection_key} inválido"
       end
