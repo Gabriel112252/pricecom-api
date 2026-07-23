@@ -880,8 +880,8 @@ module Dashboard
         .where(payment_date: period[:from]..period[:to])
 
       received, pending = scope.pick(
-        Arel.sql("COALESCE(SUM(net_amount) FILTER (WHERE status = 'paid'), 0)"),
-        Arel.sql("COALESCE(SUM(net_amount) FILTER (WHERE status != 'paid'), 0)")
+        Arel.sql("COALESCE(SUM(financial_receivables.net_amount) FILTER (WHERE financial_receivables.status = 'paid'), 0)"),
+        Arel.sql("COALESCE(SUM(financial_receivables.net_amount) FILTER (WHERE financial_receivables.status != 'paid'), 0)")
       ) || [ 0, 0 ]
 
       { received: received.to_f.round(2), pending: pending.to_f.round(2) }
