@@ -1,9 +1,8 @@
 require "rails_helper"
 
-# ⚠️ See ShopeeAdapter's class comment: the real Shopee docs couldn't be
-# fetched in this environment, so these assertions only prove the adapter
-# parses/handles the shape it itself assumes — not that the design matches
-# Shopee's actual API. No real Shopee call is made anywhere in this spec.
+# ⚠️ These assertions prove the adapter parses/handles the v2 shapes it
+# assumes — the money/pagination fields still need confirmation against a
+# real sandbox payload (Fase 2/4 gates). No real Shopee call is made here.
 RSpec.describe Integrations::ShopeeAdapter do
   let(:credentials) { { shop_id: "555", partner_id: "111", partner_key: "secretkey", access_token: "tok" } }
   let(:adapter) { described_class.new(credentials) }
@@ -91,5 +90,191 @@ RSpec.describe Integrations::ShopeeAdapter do
     adapter.authenticate
 
     expect(stub).to have_been_requested
+  end
+
+  it "delegates the sign to ShopeeAuthService#shop_sign (single signature source)" do
+    stub_request(:get, list_url).to_return(status: 200, body: list_body, headers: { "Content-Type" => "application/json" })
+    allow_any_instance_of(Integrations::ShopeeAuthService).to receive(:shop_sign).and_return("delegated-sign")
+
+    adapter.authenticate
+
+    expect(WebMock).to have_requested(:get, list_url)
+      .with(query: hash_including("sign" => "delegated-sign"))
+  end
+
+  it "uses the sandbox base URL when environment=sandbox" do
+    sandbox_adapter = described_class.new(credentials.merge(environment: "sandbox"))
+    stub = stub_request(:get, %r{\Ahttps://partner\.test-stable\.shopeemobile\.com/api/v2/product/get_item_list})
+      .to_return(status: 200, body: list_body, headers: { "Content-Type" => "application/json" })
+
+    sandbox_adapter.authenticate
+
+    expect(stub).to have_been_requested
+  end
+
+  describe "variations (has_model)" do
+    let(:model_url) { %r{\Ahttps://partner\.shopeemobile\.com/api/v2/product/get_model_list} }
+    let(:info_with_model) do
+      {
+        error: "", message: "",
+        response: {
+          item_list: [
+            {
+              item_id: 1001,
+              item_sku: "PAI-1",
+              item_name: "Produto Variado",
+              has_model: true
+            }
+          ]
+        }
+      }.to_json
+    end
+    let(:model_body) do
+      {
+        error: "", message: "",
+        response: {
+          tier_variation: [
+            { name: "Tamanho", option_list: [ { option: "30ml" }, { option: "60ml" } ] }
+          ],
+          model: [
+            {
+              model_id: 9001,
+              model_sku: "SKU-30",
+              tier_index: [ 0 ],
+              price_info: [ { current_price: 45.5 } ],
+              stock_info_v2: { summary_info: { total_available_stock: 7 } }
+            },
+            {
+              model_id: 9002,
+              model_sku: "",
+              tier_index: [ 1 ],
+              price_info: [ { current_price: 79.9 } ],
+              stock_info_v2: { summary_info: { total_available_stock: 3 } }
+            }
+          ]
+        }
+      }.to_json
+    end
+
+    before do
+      stub_request(:get, list_url).to_return(
+        status: 200,
+        body: { error: "", message: "", response: { item: [ { item_id: 1001 } ], has_next_page: false } }.to_json,
+        headers: { "Content-Type" => "application/json" }
+      )
+      stub_request(:get, info_url).to_return(status: 200, body: info_with_model, headers: { "Content-Type" => "application/json" })
+      stub_request(:get, model_url)
+        .with(query: hash_including("item_id" => "1001"))
+        .to_return(status: 200, body: model_body, headers: { "Content-Type" => "application/json" })
+    end
+
+    it "expands each model into its own purchasable-SKU row" do
+      raws = adapter.fetch_products
+
+      expect(raws.size).to eq(2)
+      expect(raws.map { |r| r["model_id"] }).to contain_exactly(9001, 9002)
+    end
+
+    it "normalizes a model with parent name, variation label and model_id fallback for blank SKU" do
+      raws = adapter.fetch_products
+
+      first = adapter.normalize_product(raws.find { |r| r["model_id"] == 9001 })
+      expect(first).to include(
+        external_id: "9001",
+        external_sku: "SKU-30",
+        name: "Produto Variado (30ml)",
+        price: BigDecimal("45.5"),
+        stock_qty: BigDecimal("7"),
+        external_product_id: "1001"
+      )
+
+      second = adapter.normalize_product(raws.find { |r| r["model_id"] == 9002 })
+      expect(second[:external_sku]).to eq("9002")
+      expect(second[:name]).to eq("Produto Variado (60ml)")
+    end
+  end
+
+  describe "#fetch_orders_page" do
+    let(:order_list_url) { %r{\Ahttps://partner\.shopeemobile\.com/api/v2/order/get_order_list} }
+
+    it "requests the window with cursor pagination params and returns the response hash" do
+      stub_request(:get, order_list_url)
+        .with(query: hash_including(
+          "time_range_field" => "create_time",
+          "time_from" => "1000",
+          "time_to" => "2000",
+          "cursor" => "",
+          "page_size" => "50"
+        ))
+        .to_return(
+          status: 200,
+          body: {
+            error: "", message: "",
+            response: { order_list: [ { order_sn: "SN-1" } ], more: true, next_cursor: "abc" }
+          }.to_json,
+          headers: { "Content-Type" => "application/json" }
+        )
+
+      page = adapter.fetch_orders_page(time_range_field: "create_time", time_from: 1000, time_to: 2000)
+
+      expect(page["order_list"].first["order_sn"]).to eq("SN-1")
+      expect(page["more"]).to be(true)
+      expect(page["next_cursor"]).to eq("abc")
+    end
+
+    it "refuses windows above the documented 15-day maximum" do
+      expect {
+        adapter.fetch_orders_page(time_range_field: "create_time", time_from: 0, time_to: 16.days.to_i)
+      }.to raise_error(ArgumentError, /15 dias/)
+    end
+  end
+
+  describe "#fetch_order_details" do
+    let(:order_detail_url) { %r{\Ahttps://partner\.shopeemobile\.com/api/v2/order/get_order_detail} }
+
+    it "requests the batch with the money/item optional fields" do
+      stub_request(:get, order_detail_url)
+        .with(query: hash_including("order_sn_list" => "SN-1,SN-2"))
+        .to_return(
+          status: 200,
+          body: { error: "", message: "", response: { order_list: [ { order_sn: "SN-1" }, { order_sn: "SN-2" } ] } }.to_json,
+          headers: { "Content-Type" => "application/json" }
+        )
+
+      details = adapter.fetch_order_details(%w[SN-1 SN-2])
+
+      expect(details.map { |d| d["order_sn"] }).to eq(%w[SN-1 SN-2])
+      expect(WebMock).to have_requested(:get, order_detail_url)
+        .with(query: hash_including("response_optional_fields" => /item_list/))
+    end
+
+    it "rejects batches above 50 order_sn" do
+      expect { adapter.fetch_order_details((1..51).map { |i| "SN-#{i}" }) }
+        .to raise_error(ArgumentError, /50/)
+    end
+  end
+
+  describe "#fetch_escrow_detail" do
+    it "returns the escrow response hash for one order_sn" do
+      stub_request(:get, %r{\Ahttps://partner\.shopeemobile\.com/api/v2/payment/get_escrow_detail})
+        .with(query: hash_including("order_sn" => "SN-1"))
+        .to_return(
+          status: 200,
+          body: { error: "", message: "", response: { order_sn: "SN-1", order_income: { escrow_amount: 80.0 } } }.to_json,
+          headers: { "Content-Type" => "application/json" }
+        )
+
+      escrow = adapter.fetch_escrow_detail("SN-1")
+
+      expect(escrow["order_sn"]).to eq("SN-1")
+      expect(escrow.dig("order_income", "escrow_amount")).to eq(80.0)
+    end
+  end
+
+  describe "#update_stock" do
+    it "refuses explicitly instead of guessing the unvalidated write schema" do
+      expect { adapter.update_stock(external_id: "9001", quantity: 5) }
+        .to raise_error(Integrations::UnsupportedOperationError)
+    end
   end
 end

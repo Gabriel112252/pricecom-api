@@ -19,6 +19,19 @@ yampi_cart_polling_dispatch:
   class: "Integrations::Yampi::CartsPollingSchedulerJob"
   queue: integrations
 
+shopee_order_polling_dispatch:
+  cron: "*/15 * * * *"
+  class: "Integrations::Shopee::OrdersPollingSchedulerJob"
+  queue: integrations
+
+# Shopee: access_token dura ~4h e o refresh_token (30 dias) é rotativo.
+# Rodando a cada 3h com a folga de EXPIRY_LEEWAY do job, o token é sempre
+# renovado com >= 30min de margem antes de expirar.
+shopee_token_refresh_dispatch:
+  cron: "0 */3 * * *"
+  class: "Integrations::Shopee::TokenRefreshSchedulerJob"
+  queue: integrations
+
 tiktok_order_polling_dispatch:
   cron: "*/15 * * * *"
   class: "Integrations::Tiktok::OrdersPollingSchedulerJob"

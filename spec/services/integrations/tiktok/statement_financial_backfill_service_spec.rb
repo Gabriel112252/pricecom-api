@@ -40,6 +40,26 @@ RSpec.describe Integrations::Tiktok::StatementFinancialBackfillService do
     allow(adapter).to receive(:fetch_statement_transactions).and_return([ transaction ])
   end
 
+  def create_statement_log(status: "success", processed_at: 1.hour.ago, error_count: 0,
+    missing_order_count: 0, metadata: {})
+    channel
+    tenant.integration_sync_logs.create!(
+      channel_credential: credential,
+      action: described_class::STATEMENT_ACTION,
+      direction: "inbound",
+      status: status,
+      statement_id: statement["id"],
+      processed_at: processed_at,
+      error_count: error_count,
+      missing_order_count: missing_order_count,
+      metadata: {
+        "channel_credential_id" => credential.id,
+        "statement_id" => statement["id"],
+        "missing_order_count" => missing_order_count
+      }.merge(metadata)
+    )
+  end
+
   it "updates an existing order and does not create a missing order" do
     order = tenant.orders.create!(channel: channel, external_id: "order-1", status: "COMPLETED")
 
@@ -70,6 +90,47 @@ RSpec.describe Integrations::Tiktok::StatementFinancialBackfillService do
     expect(adapter).to have_received(:fetch_statement_transactions).twice
   end
 
+  it "skips a completed statement even when orders are missing, preserving its data" do
+    synced_at = 2.days.ago.change(usec: 0)
+    order = tenant.orders.create!(
+      channel: channel,
+      external_id: "order-1",
+      status: "COMPLETED",
+      financial_synced_at: synced_at
+    )
+    log = create_statement_log(missing_order_count: 39)
+    original_log = log.attributes
+
+    expect(adapter).not_to receive(:fetch_statement_transactions)
+
+    result = described_class.call(credential, date_from: "2026-07-01", date_to: "2026-07-01", run_id: "run-missing")
+
+    expect(result.success?).to eq(true)
+    expect(log.reload.attributes).to eq(original_log)
+    expect(order.reload.financial_synced_at).to eq(synced_at)
+  end
+
+  it "processes a successful statement again when processed_at is nil" do
+    create_statement_log(processed_at: nil)
+    expect(adapter).to receive(:fetch_statement_transactions).once.and_return([])
+
+    described_class.call(credential, date_from: "2026-07-01", date_to: "2026-07-01", run_id: "run-no-processed-at")
+  end
+
+  it "processes a completed statement again when it has errors" do
+    create_statement_log(error_count: 1)
+    expect(adapter).to receive(:fetch_statement_transactions).once.and_return([])
+
+    described_class.call(credential, date_from: "2026-07-01", date_to: "2026-07-01", run_id: "run-errors")
+  end
+
+  it "processes a statement again when its status is not success" do
+    create_statement_log(status: "error")
+    expect(adapter).to receive(:fetch_statement_transactions).once.and_return([])
+
+    described_class.call(credential, date_from: "2026-07-01", date_to: "2026-07-01", run_id: "run-status")
+  end
+
   # Regressão: em produção, um statement TikTok PAID sem nenhuma transação
   # travava o backfill (job reagendando o mesmo statement a cada 2 minutos,
   # para sempre — ver StatementFinancialBackfillJob). A causa raiz era o
@@ -89,6 +150,8 @@ RSpec.describe Integrations::Tiktok::StatementFinancialBackfillService do
     let(:empty_statement) { { "id" => "s-empty", "statement_time" => 1_749_024_000, "payment_status" => "PAID" } }
 
     before do
+      channel
+      allow(Integrations::TiktokAdapter).to receive(:new).and_call_original
       allow(Integrations::TiktokAdapter).to receive(:new).and_return(real_adapter)
     end
 
@@ -155,6 +218,54 @@ RSpec.describe Integrations::Tiktok::StatementFinancialBackfillService do
       described_class.call(credential, date_from: "2026-06-04", date_to: "2026-06-04", run_id: "run-2")
 
       expect(real_adapter).to have_received(:fetch_statement_transactions_page).once
+    end
+
+    it "resumes after rate limiting at the first pending statement" do
+      completed_statement = { "id" => "s-completed", "statement_time" => 1_749_024_000, "payment_status" => "PAID" }
+      pending_statement = { "id" => "s-pending", "statement_time" => 1_749_110_400, "payment_status" => "PAID" }
+      completed_order = tenant.orders.create!(channel: channel, external_id: "order-completed", status: "COMPLETED")
+      pending_order = tenant.orders.create!(channel: channel, external_id: "order-pending", status: "COMPLETED")
+      first_attempt = true
+      transaction_calls = []
+
+      allow(real_adapter).to receive(:fetch_financial_statements_page)
+        .and_return({
+          "data" => {
+            "statements" => [ completed_statement, pending_statement ],
+            "next_page_token" => nil
+          }
+        })
+      allow(real_adapter).to receive(:fetch_statement_transactions_page) do |args|
+        transaction_calls << args[:statement_id]
+        if args[:statement_id] == "s-pending" && first_attempt
+          first_attempt = false
+          raise Integrations::RateLimitError.new("too many requests", retry_after: 1)
+        end
+
+        order_id = args[:statement_id] == "s-completed" ? completed_order.external_id : pending_order.external_id
+        { "data" => { "transactions" => [ transaction.merge("order_id" => order_id) ], "next_page_token" => nil } }
+      end
+
+      expect {
+        described_class.call(credential, date_from: "2026-06-04", date_to: "2026-06-04", run_id: "run-resume")
+      }.to raise_error(Integrations::RateLimitError)
+
+      completed_log = statement_log_for("s-completed")
+      completed_log_attributes = completed_log.attributes
+      completed_financial_synced_at = completed_order.reload.financial_synced_at
+
+      result = described_class.call(
+        credential,
+        date_from: "2026-06-04",
+        date_to: "2026-06-04",
+        run_id: "run-resume"
+      )
+
+      expect(result.success?).to eq(true)
+      expect(transaction_calls).to eq([ "s-completed", "s-pending", "s-pending" ])
+      expect(statement_log_for("s-completed").attributes).to eq(completed_log_attributes)
+      expect(completed_order.reload.financial_synced_at).to eq(completed_financial_synced_at)
+      expect(statement_log_for("s-pending").status).to eq("success")
     end
   end
 end

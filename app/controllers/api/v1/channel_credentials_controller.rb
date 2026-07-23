@@ -50,7 +50,11 @@ module Api
 
         Channel.ensure_for!(current_tenant, credential.channel)
 
-        if credential.channel == "tiktok"
+        # Canais OAuth: no connect só existem as chaves do app (TikTok
+        # app_key/app_secret, Shopee partner_id/partner_key) — não há
+        # access_token pra validar até a loja autorizar via authorize_url,
+        # então o authenticate imediato abaixo não se aplica.
+        if %w[tiktok shopee].include?(credential.channel)
           return render json: channel_json(credential.channel, credential, [])
         end
 

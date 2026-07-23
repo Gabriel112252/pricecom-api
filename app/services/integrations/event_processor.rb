@@ -39,6 +39,12 @@ module Integrations
         else
           skipped("No processor configured for tiktok/#{event_type}")
         end
+      when "shopee"
+        if event_type.include?("order")
+          Processors::ShopeeOrderProcessor.call(@event)
+        else
+          skipped("No processor configured for shopee/#{event_type}")
+        end
       when "idworks"
         skipped("IDWorks events are not processed yet")
       else

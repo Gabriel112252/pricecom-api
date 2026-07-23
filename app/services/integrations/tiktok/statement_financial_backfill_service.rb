@@ -295,7 +295,7 @@ module Integrations
         checksum = Digest::SHA256.hexdigest(JSON.generate(statement))
         statement_log = find_statement_log(statement_id)
 
-        if skip_statement?(statement_log, checksum)
+        if skip_statement?(statement_log)
           @skipped_statement_count = @skipped_statement_count.to_i + 1
           return
         end
@@ -496,16 +496,13 @@ module Integrations
         end
       end
 
-      def skip_statement?(statement_log, checksum)
+      def skip_statement?(statement_log)
         return false unless statement_log.persisted?
         return false if force
-        return false unless statement_log.status == "success"
-        stored_checksum = column_value(statement_log, :payload_checksum)
-        return false if stored_checksum.present? && stored_checksum != checksum
 
-        column_value(statement_log, :missing_order_count).to_i.zero? &&
-          column_value(statement_log, :error_count).to_i.zero? &&
-          statement_log.metadata.to_h["missing_order_count"].to_i.zero?
+        statement_log.status == "success" &&
+          column_value(statement_log, :processed_at).present? &&
+          column_value(statement_log, :error_count).to_i.zero?
       end
 
       def mark_statement_started(statement_log, statement, checksum)

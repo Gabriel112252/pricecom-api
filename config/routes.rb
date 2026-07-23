@@ -65,6 +65,7 @@ Rails.application.routes.draw do
         post  "pagarme/sync",    to: "pagarme#sync"
 
         get   "tiktok/authorize_url", to: "tiktok_oauth#authorize_url"
+        get   "shopee/authorize_url", to: "shopee_oauth#authorize_url"
 
         post  ":channel/connect", to: "channel_credentials#connect"
         post  ":channel/sync",    to: "channel_credentials#sync"
@@ -136,6 +137,10 @@ Rails.application.routes.draw do
       # Public OAuth callback from TikTok Shop. TikTok redirects the browser
       # with GET, while the generic webhook receiver below is POST-only.
       get "webhooks/tiktok", to: "tiktok_oauth#callback"
+
+      # Public OAuth callback from Shopee (auth_partner redirect with
+      # code + shop_id) — same GET-vs-POST split as the TikTok route above.
+      get "webhooks/shopee", to: "shopee_oauth#callback"
 
       # Public webhook receiver — sem autenticação JWT
       post "webhooks/:provider", to: "webhooks#receive"

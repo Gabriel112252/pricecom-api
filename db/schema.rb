@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_07_22_060000) do
+ActiveRecord::Schema[7.2].define(version: 2026_07_23_120000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -400,9 +400,22 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_22_060000) do
     t.jsonb "metadata", default: {}, null: false
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.bigint "channel_credential_id"
+    t.string "statement_id"
+    t.datetime "statement_time"
+    t.string "payment_status"
+    t.integer "transaction_count", default: 0, null: false
+    t.integer "matched_order_count", default: 0, null: false
+    t.integer "synced_order_count", default: 0, null: false
+    t.integer "missing_order_count", default: 0, null: false
+    t.integer "error_count", default: 0, null: false
+    t.string "payload_checksum"
+    t.datetime "processed_at"
+    t.index ["channel_credential_id"], name: "index_integration_sync_logs_on_channel_credential_id"
     t.index ["integration_id", "status"], name: "index_integration_sync_logs_on_integration_id_and_status"
     t.index ["integration_id"], name: "index_integration_sync_logs_on_integration_id"
     t.index ["metadata"], name: "index_integration_sync_logs_on_metadata", using: :gin
+    t.index ["tenant_id", "channel_credential_id", "statement_id"], name: "idx_sync_logs_on_tenant_credential_statement", unique: true
     t.index ["tenant_id", "created_at"], name: "index_integration_sync_logs_on_tenant_id_and_created_at"
     t.index ["tenant_id", "direction"], name: "index_integration_sync_logs_on_tenant_id_and_direction"
     t.index ["tenant_id", "status"], name: "index_integration_sync_logs_on_tenant_id_and_status"
@@ -565,7 +578,12 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_22_060000) do
     t.decimal "service_fee_amount", precision: 12, scale: 2, default: "0.0", null: false
     t.jsonb "financial_breakdown", default: {}, null: false
     t.datetime "financial_synced_at"
+    t.integer "financial_sync_attempts", default: 0, null: false
+    t.datetime "financial_last_attempt_at"
+    t.datetime "financial_next_attempt_at"
+    t.string "financial_pending_reason"
     t.index "tenant_id, lower((status)::text)", name: "index_orders_on_tenant_id_and_lower_status"
+    t.index ["channel_id", "financial_next_attempt_at"], name: "index_orders_on_channel_and_financial_next_attempt_at"
     t.index ["channel_id", "financial_synced_at"], name: "index_orders_on_channel_and_financial_synced_at"
     t.index ["channel_id"], name: "index_orders_on_channel_id"
     t.index ["tenant_id", "cart_token"], name: "index_orders_on_tenant_id_and_cart_token"
@@ -713,7 +731,7 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_22_060000) do
     t.datetime "finished_at"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
-    t.index ["channel_product_listing_id", "stock_alert_rule_id"], name: "idx_one_inflight_execution_per_listing_rule", unique: true, where: "((status)::text = ANY ((ARRAY['pending'::character varying, 'executing'::character varying])::text[]))"
+    t.index ["channel_product_listing_id", "stock_alert_rule_id"], name: "idx_one_inflight_execution_per_listing_rule", unique: true, where: "((status)::text = ANY (ARRAY[('pending'::character varying)::text, ('executing'::character varying)::text]))"
     t.index ["channel_product_listing_id"], name: "idx_on_channel_product_listing_id_11f29f72e1"
     t.index ["idempotency_key"], name: "index_stock_replenishment_executions_on_idempotency_key", unique: true
     t.index ["product_id"], name: "index_stock_replenishment_executions_on_product_id"
@@ -805,6 +823,7 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_22_060000) do
   add_foreign_key "integration_events", "tenants"
   add_foreign_key "integration_mappings", "integrations"
   add_foreign_key "integration_mappings", "tenants"
+  add_foreign_key "integration_sync_logs", "channel_credentials"
   add_foreign_key "integration_sync_logs", "integrations"
   add_foreign_key "integration_sync_logs", "tenants"
   add_foreign_key "integrations", "channels"

@@ -24,7 +24,12 @@ class ChannelCredential < ApplicationRecord
     "shopify"      => %w[shop_domain access_token webhook_secret],
     "tiktok"       => %w[app_key app_secret],
     "mercadolivre" => %w[user_id access_token],
-    "shopee"       => %w[shop_id partner_id partner_key access_token],
+    # Shopee: só o par partner é digitado; shop_id, access_token,
+    # refresh_token e token_expires_at são campos gerenciados, gravados no
+    # mesmo JSONB pelo OAuth (ShopeeOauthController) e renovados pelo
+    # Integrations::Shopee::TokenRefreshJob — mesmo modelo do TikTok
+    # (app_key/app_secret digitados, tokens via OAuth).
+    "shopee"       => %w[partner_id partner_key],
     # LucrofreteClient also caches session state inside the same JSONB
     # (access_token + token_expires_at, TikTok-style) — those are managed
     # fields, not required user input, so they're not listed here.
