@@ -105,7 +105,14 @@ module Integrations
           scope = scope.where("orders.financial_next_attempt_at IS NULL OR orders.financial_next_attempt_at <= ?", Time.current)
         end
         if tracking_column?(:financial_pending_reason)
-          scope = scope.where.not(financial_pending_reason: "authentication_invalid")
+          # NULL-safe de propósito: `where.not(col: valor)` vira `col !=
+          # 'valor'` e descarta as linhas NULL — que são exatamente os
+          # pedidos nunca tentados. Com a coluna recém-migrada, isso fazia a
+          # fila inteira parecer vazia.
+          scope = scope.where(
+            "orders.financial_pending_reason IS NULL OR orders.financial_pending_reason != ?",
+            "authentication_invalid"
+          )
         end
 
         if resume_order_id.present? && order_ids.empty?
@@ -128,7 +135,8 @@ module Integrations
         clear_pending(order)
       rescue OrderFinancialSyncService::PendingStatementError => e
         @processed_count += 1
-        @pending_count += 1
+        # pending_count é incrementado dentro de schedule_retry — somar aqui
+        # de novo dobrava a contagem reportada no IntegrationSyncLog.
         schedule_retry(order, "not_settled", e.message)
       rescue Integrations::AuthenticationError => e
         @processed_count += 1

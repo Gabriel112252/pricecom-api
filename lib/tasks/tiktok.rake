@@ -335,6 +335,67 @@ namespace :tiktok do
     puts "finished_at=#{log.finished_at || 'nil'}"
   end
 
+  desc "Executa UMA rodada controlada (síncrona) do sync de pendências financeiras TikTok — mesmo " \
+       "serviço do cron de 15min, mas com lote/janela explícitos e resultado impresso na hora. " \
+       "Respeita o FinancialSyncLock (aborta se o cron estiver rodando) e todo o backoff por pedido. " \
+       "Uso: bin/rails 'tiktok:pending_financial_sync[tenant_slug,batch_size,window_days]'"
+  task :pending_financial_sync, [ :tenant_slug, :batch_size, :window_days ] => :environment do |_t, args|
+    usage = "Uso: bin/rails 'tiktok:pending_financial_sync[tenant_slug,batch_size,window_days]'"
+    tenant_slug = args[:tenant_slug]
+    abort usage if tenant_slug.blank?
+
+    raw_batch_size = args[:batch_size]
+    batch_size = if raw_batch_size.nil?
+      Integrations::Tiktok::PendingFinancialSyncSchedulerJob::SCHEDULED_BATCH_SIZE
+    elsif raw_batch_size.to_s.strip.match?(/\A[1-9]\d*\z/)
+      raw_batch_size.to_i
+    else
+      abort "#{usage}; batch_size deve ser um inteiro positivo"
+    end
+
+    raw_window_days = args[:window_days]
+    window_days = if raw_window_days.nil?
+      Integrations::Tiktok::PendingFinancialSyncService::DEFAULT_WINDOW_DAYS
+    elsif raw_window_days.to_s.strip.match?(/\A[1-9]\d*\z/)
+      raw_window_days.to_i
+    else
+      abort "#{usage}; window_days deve ser um inteiro positivo"
+    end
+
+    tenant = Tenant.find_by(slug: tenant_slug)
+    abort "Tenant '#{tenant_slug}' não encontrado" unless tenant
+    credential = tenant.channel_credentials.find_by(channel: "tiktok", status: "active")
+    abort "Tenant '#{tenant_slug}' não tem ChannelCredential tiktok ativa" unless credential
+
+    begin
+      result = Integrations::Tiktok::PendingFinancialSyncService.call(
+        credential,
+        batch_size: batch_size,
+        window_days: window_days
+      )
+    rescue Integrations::Tiktok::FinancialSyncLock::LockBusyError
+      abort "Sync financeiro TikTok já em execução para este tenant (lock ocupado) — tente novamente em alguns minutos"
+    end
+
+    metadata = result.metadata.to_h
+    puts "outcome=#{result.outcome}"
+    puts "batch_size=#{batch_size}"
+    puts "window_days=#{window_days}"
+    puts "processed_count=#{metadata['processed_count'] || 0}"
+    puts "synced_count=#{metadata['synced_count'] || 0}"
+    puts "pending_count=#{metadata['pending_count'] || 0}"
+    puts "error_count=#{metadata['error_count'] || 0}"
+    puts "auth_error_count=#{metadata['auth_error_count'] || 0}"
+    puts "next_retry_at=#{metadata['next_retry_at'] || 'nil'}"
+    if metadata["error_samples"].present?
+      puts "Amostra de erros:"
+      metadata["error_samples"].first(5).each { |e| puts "  - #{e}" }
+    end
+    puts "Acompanhe o quadro geral com: bin/rails 'tiktok:pending_financial_status[#{tenant_slug}]'"
+
+    abort "tiktok_pending_financial_sync=error" if result.error?
+  end
+
   desc "Mostra o diagnóstico de pendências financeiras TikTok"
   task :pending_financial_status, [ :tenant_slug ] => :environment do |_t, args|
     tenant_slug = args[:tenant_slug]

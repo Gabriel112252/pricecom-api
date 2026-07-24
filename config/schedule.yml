@@ -52,13 +52,16 @@ tiktok_unpaid_reconciliation_dispatch:
   class: "Integrations::Tiktok::UnpaidReconciliationSchedulerJob"
   queue: integrations
 
-# Proposed after pilot approval. Keep disabled during implementation review;
-# PendingFinancialSyncJob is also enqueued after successful TikTok ingestion,
-# so enabling this is a safety net rather than the webhook's critical path.
-# tiktok_pending_financial_sync_dispatch:
-#   cron: "*/15 * * * *"
-#   class: "Integrations::Tiktok::PendingFinancialSyncSchedulerJob"
-#   queue: integrations
+# Ativado definitivamente (2026-07-24): o backfill por statements fechou em
+# ~65,7% de cobertura nos últimos 30 dias — o resto são pedidos que ainda não
+# apareceram em statement liquidado. Este cron drena essas pendências em lote
+# pequeno (ver PendingFinancialSyncSchedulerJob::SCHEDULED_BATCH_SIZE) com
+# backoff por pedido; o enqueue pós-ingestão continua existindo, este é o
+# caminho garantido.
+tiktok_pending_financial_sync_dispatch:
+  cron: "*/15 * * * *"
+  class: "Integrations::Tiktok::PendingFinancialSyncSchedulerJob"
+  queue: integrations
 
 # idworks (ERP) has no webhooks — polling is the only option (see
 # Integrations::Idworks::OrderSyncService/ProductCostSyncService class
