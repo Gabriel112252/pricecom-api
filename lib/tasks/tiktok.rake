@@ -396,6 +396,57 @@ namespace :tiktok do
     abort "tiktok_pending_financial_sync=error" if result.error?
   end
 
+  desc "Reseta financial_synced_at para pedidos TikTok afetados pelo bug de validate_response! que " \
+       "aceitava statement_transactions ainda não fechado (sku_transactions vazio/total_count 0) como " \
+       "sucesso definitivo, gravando revenue_amount/settlement_amount/fee_and_tax_amount = 0 pra sempre. " \
+       "Roda em lotes (BATCH_SIZE, default 1000) e loga o progresso; NÃO chama a API do TikTok — só " \
+       "reabre a elegibilidade pra PendingFinancialSyncService reprocessar no próximo ciclo do cron. " \
+       "Uso: bin/rails 'tiktok:reset_zeroed_financial_sync[tenant_slug]' (omita tenant_slug ou use 'all' " \
+       "para rodar em todos os tenants TikTok) BATCH_SIZE=1000 bin/rails tiktok:reset_zeroed_financial_sync"
+  task :reset_zeroed_financial_sync, [ :tenant_slug ] => :environment do |_t, args|
+    batch_size = ENV["BATCH_SIZE"].to_i.positive? ? ENV["BATCH_SIZE"].to_i : 1000
+    tenant_slug = args[:tenant_slug]
+
+    scope = Order.joins(:channel).where(channels: { platform: "tiktok" })
+    if tenant_slug.present? && !tenant_slug.casecmp?("all")
+      tenant = Tenant.find_by(slug: tenant_slug)
+      abort "Tenant '#{tenant_slug}' não encontrado" unless tenant
+      scope = scope.where(tenant_id: tenant.id)
+    end
+
+    affected = scope
+      .where.not(financial_synced_at: nil)
+      .where(revenue_amount: 0, settlement_amount: 0, fee_and_tax_amount: 0)
+      .where("COALESCE(orders.gross_value, 0) > 0")
+      .where.not(order_type: %w[refund cancellation])
+      .where("LOWER(COALESCE(orders.status, '')) NOT IN (?)", Order::CANCELED_STATUS_ALIASES)
+
+    total = affected.count
+    puts "tenant_slug=#{tenant_slug.presence || 'all'}"
+    puts "batch_size=#{batch_size}"
+    puts "pedidos_afetados_encontrados=#{total}"
+
+    if total.zero?
+      puts "Nada para resetar."
+      next
+    end
+
+    reset_attributes = { financial_synced_at: nil }
+    reset_attributes[:financial_sync_attempts] = 0 if Order.column_names.include?("financial_sync_attempts")
+    reset_attributes[:financial_next_attempt_at] = nil if Order.column_names.include?("financial_next_attempt_at")
+    reset_attributes[:financial_pending_reason] = nil if Order.column_names.include?("financial_pending_reason")
+
+    processed = 0
+    affected.in_batches(of: batch_size) do |batch|
+      count = batch.update_all(reset_attributes)
+      processed += count
+      puts "lote processado: #{processed}/#{total}"
+    end
+
+    puts "Done. #{processed} pedido(s) resetado(s); serão reprocessados pelo " \
+         "PendingFinancialSyncService no próximo ciclo do cron (tiktok_pending_financial_sync_dispatch)."
+  end
+
   desc "Mostra o diagnóstico de pendências financeiras TikTok"
   task :pending_financial_status, [ :tenant_slug ] => :environment do |_t, args|
     tenant_slug = args[:tenant_slug]

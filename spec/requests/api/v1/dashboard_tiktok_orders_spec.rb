@@ -32,9 +32,9 @@ RSpec.describe "Dashboard TikTok orders", type: :request do
       expect(rows.first["effective_revenue"]).to eq(45.0)
     end
 
-    it "labels a fully zeroed synced order as refunded and shows margin as nil instead of a misleading zero" do
+    it "labels a fully zeroed synced refund order as refunded and shows margin as nil instead of a misleading zero" do
       make_order(
-        tenant, channel_tiktok, gross: 40, ordered_at: 1.day.ago,
+        tenant, channel_tiktok, gross: 40, ordered_at: 1.day.ago, order_type: "refund",
         revenue_amount: 0, settlement_amount: 0, fee_and_tax_amount: 0, financial_synced_at: Time.current
       )
 
@@ -42,6 +42,19 @@ RSpec.describe "Dashboard TikTok orders", type: :request do
 
       row = JSON.parse(response.body)["rows"].first
       expect(row["financial_status"]).to eq("refunded")
+      expect(row["margin_pct"]).to be_nil
+    end
+
+    it "does not label a fully zeroed SALE order as refunded (financial sync bug, not a real TikTok refund)" do
+      make_order(
+        tenant, channel_tiktok, gross: 40, ordered_at: 1.day.ago, order_type: "sale",
+        revenue_amount: 0, settlement_amount: 0, fee_and_tax_amount: 0, financial_synced_at: Time.current
+      )
+
+      get "/api/v1/dashboard/tiktok_orders", headers: auth_headers(operador)
+
+      row = JSON.parse(response.body)["rows"].first
+      expect(row["financial_status"]).not_to eq("refunded")
       expect(row["margin_pct"]).to be_nil
     end
 

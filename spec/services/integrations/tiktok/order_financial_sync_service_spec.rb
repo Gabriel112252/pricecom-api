@@ -117,6 +117,32 @@ RSpec.describe Integrations::Tiktok::OrderFinancialSyncService do
     expect(order.reload.financial_synced_at).to be_nil
   end
 
+  it "classifies a zeroed statement placeholder (sku_transactions empty, total_count 0) as pending, " \
+     "even with an otherwise well-formed data Hash" do
+    allow(adapter).to receive(:fetch_order_statement_transactions)
+      .with("584933315891857248")
+      .and_return(
+        "code" => 0,
+        "data" => {
+          "order_id" => "585094004449511088",
+          "total_count" => 0,
+          "revenue_amount" => "0",
+          "sku_transactions" => [],
+          "order_create_time" => 0,
+          "settlement_amount" => "0",
+          "fee_and_tax_amount" => "0",
+          "shipping_cost_amount" => "0"
+        }
+      )
+
+    expect { sync_order }
+      .to raise_error(Integrations::Tiktok::OrderFinancialSyncService::PendingStatementError)
+
+    order.reload
+    expect(order.financial_synced_at).to be_nil
+    expect(order.revenue_amount).to eq(BigDecimal("0"))
+  end
+
   it "rejects an order belonging to another channel before the external call" do
     order.update!(channel: tenant.channels.create!(name: "Yampi", platform: "yampi"))
 

@@ -204,9 +204,14 @@ module Api
         scope
       end
 
+      # order_type = 'refund' é exigido além do zero-heurístico: sem essa
+      # checagem, um pedido 'sale' com financeiro zerado só por causa de um
+      # bug de sincronização (ex: OrderFinancialSyncService aceitando um
+      # statement ainda não fechado como definitivo) era rotulado como
+      # "refunded" mesmo nunca tendo sido estornado do lado do TikTok.
       def tiktok_refunded_sql
-        "COALESCE(orders.revenue_amount, 0) = 0 AND COALESCE(orders.fee_and_tax_amount, 0) = 0 " \
-          "AND COALESCE(orders.settlement_amount, 0) = 0"
+        "orders.order_type = 'refund' AND COALESCE(orders.revenue_amount, 0) = 0 " \
+          "AND COALESCE(orders.fee_and_tax_amount, 0) = 0 AND COALESCE(orders.settlement_amount, 0) = 0"
       end
 
       # financial_pending_reason só existe após a migration de tracking de
@@ -296,7 +301,8 @@ module Api
       end
 
       def tiktok_order_refunded?(order)
-        order.revenue_amount.to_f.zero? && order.fee_and_tax_amount.to_f.zero? && order.settlement_amount.to_f.zero?
+        order.order_type == "refund" &&
+          order.revenue_amount.to_f.zero? && order.fee_and_tax_amount.to_f.zero? && order.settlement_amount.to_f.zero?
       end
 
       def tiktok_order_error?(order)

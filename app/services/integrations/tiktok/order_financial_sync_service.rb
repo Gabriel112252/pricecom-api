@@ -96,9 +96,20 @@ module Integrations
             "TiktokOrderFinancialSync: Finance API ainda não disponibilizou o demonstrativo"
         end
 
-        return if data.is_a?(Hash)
+        unless data.is_a?(Hash)
+          raise Integrations::ApiError, "TiktokOrderFinancialSync: Finance API retornou data inválido"
+        end
 
-        raise Integrations::ApiError, "TiktokOrderFinancialSync: Finance API retornou data inválido"
+        # A Finance API pode responder code=0 com um Hash "válido" (order_id
+        # presente) mas com o statement ainda não fechado — nesse caso ela
+        # devolve sku_transactions: [] e total_count: 0, com todos os campos
+        # financeiros como "0" explícito. Sem essa checagem, esse zero-
+        # placeholder era persistido como sucesso definitivo (financial_synced_at
+        # preenchido com revenue_amount/settlement_amount = 0 pra sempre).
+        if data["sku_transactions"].blank? || (data.key?("total_count") && data["total_count"].to_i.zero?)
+          raise PendingStatementError,
+            "TiktokOrderFinancialSync: Finance API ainda não fechou o demonstrativo (sku_transactions vazio)"
+        end
       end
     end
   end
