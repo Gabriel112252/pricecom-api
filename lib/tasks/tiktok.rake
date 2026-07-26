@@ -83,8 +83,15 @@ namespace :tiktok do
     puts "Done."
   end
 
-  desc "Backfill seller_discount/platform_discount para pedidos TikTok já sincronizados (re-busca cada " \
-       "pedido na API do TikTok — ver Integrations::Tiktok::DiscountBackfillService). " \
+  desc "Backfill seller_discount/platform_discount para pedidos TikTok já sincronizados — nível de PEDIDO " \
+       "(orders, desde 2026-07-21) E nível de ITEM (order_items, desde 2026-07-26: antes dessa data o " \
+       "normalizer só gravava a soma combinada em order_items.discount, sem separar seller_discount/ " \
+       "platform_discount por item — ver TiktokOrderNormalizer#extract_items e " \
+       "Dashboard::BuildSummary#item_revenue_amount_sql). Re-busca cada pedido na API do TikTok e reprocessa " \
+       "o pedido INTEIRO via TiktokOrderProcessor (ver Integrations::Tiktok::DiscountBackfillService), " \
+       "reescrevendo order_items via upsert — não existe uma task separada 'só item-level' porque é a MESMA " \
+       "operação: rodar esta task de novo (mesmo em tenants que já rodaram o backfill de 07/21) também " \
+       "preenche os campos por item. " \
        "Uso: rake tiktok:backfill_discounts[Hidrabene]"
   task :backfill_discounts, [ :tenant_name ] => :environment do |_t, args|
     tenant_name = args[:tenant_name]
@@ -101,7 +108,9 @@ namespace :tiktok do
     puts "Pedidos TikTok encontrados: #{total}"
     puts "Isso re-busca CADA pedido na API do TikTok (Get Order Detail, lotes de " \
          "#{Integrations::Tiktok::DiscountBackfillService::BATCH_SIZE}) e reprocessa o pedido inteiro " \
-         "(status, endereço, itens, frete, desconto) — não só as colunas de desconto."
+         "(status, endereço, itens, frete, desconto de pedido E de item) — não só as colunas de desconto. " \
+         "Já rodou este backfill antes de 2026-07-26? Rode de novo: os campos seller_discount/" \
+         "platform_discount por ITEM só existem a partir de hoje e não foram preenchidos na vez anterior."
     print "Confirma o início do backfill? (digite 'sim' para continuar): "
     confirmation = $stdin.gets&.strip
 

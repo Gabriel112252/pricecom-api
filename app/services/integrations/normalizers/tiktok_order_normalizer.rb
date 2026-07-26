@@ -277,7 +277,15 @@ module Integrations
             # TikTok doesn't expose product cost; unit_cost comes from the
             # local Product (see UpsertOrder#unit_cost_for_item).
             unit_cost:     to_f(i["cost_price"] || i["cost"] || i["unit_cost"]),
-            discount:      units.sum { |unit| to_f(unit["seller_discount"]) + to_f(unit["platform_discount"]) },
+            # discount kept as the combined seller+platform sum for backward
+            # compatibility (nothing besides seller_discount/platform_discount
+            # below should read it going forward). unit_price/sale_price is
+            # already net of BOTH discounts, same identity as the order-level
+            # fix: sale_price + seller_discount + platform_discount =
+            # original_price.
+            discount:          units.sum { |unit| to_f(unit["seller_discount"]) + to_f(unit["platform_discount"]) },
+            seller_discount:   units.sum { |unit| to_f(unit["seller_discount"]) },
+            platform_discount: units.sum { |unit| to_f(unit["platform_discount"]) },
             is_gift:       extract_item_gift(i, name_key: "product_name", price_key: "sale_price"),
             nf_unit_price: to_f(i["nf_unit_price"] || i.dig("invoice", "unit_price")),
             external_product_id: i["product_id"]&.to_s

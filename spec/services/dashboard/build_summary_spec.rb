@@ -1082,4 +1082,55 @@ RSpec.describe Dashboard::BuildSummary do
       expect(leaf_summary[:kit_only]).to eq(true)
     end
   end
+
+  describe "TikTok item-level discount (seller vs platform, no double count)" do
+    let(:tiktok_channel) { tenant.channels.create!(name: "TikTok Shop", platform: "tiktok") }
+    let(:product) { tenant.products.create!(sku: "CAMISA-P", name: "Camisa Básica P", cost_price: 17.23) }
+
+    # Mesmo pedido de exemplo da correção de 21/07/2026: item original_price
+    # 59.45 x2, seller_discount 21.02 x2, platform_discount 3.39 x2 =>
+    # unit_price (já líquido dos DOIS descontos) 35.04 x2 = 70.08.
+    def make_tiktok_item(order)
+      order.order_items.create!(
+        product: product, sku: "CAMISA-P", name: "Camisa Básica P", quantity: 2,
+        unit_price: 35.04, unit_cost: 17.23,
+        discount: 48.82, seller_discount: 42.04, platform_discount: 6.78
+      )
+    end
+
+    it "does not double-count platform_discount in top_products_by_revenue " \
+       "(unit_price is already net of both discounts; correct revenue adds platform_discount back)" do
+      order = make_order(tiktok_channel, gross: 118.90, margin: 0, ordered_at: 1.day.ago)
+      make_tiktok_item(order)
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      # 70.08 (qty*unit_price) + 6.78 (platform_discount) = 76.86, matching
+      # TikTok's own "Vendas líquidas dos produtos" (118.90 - seller 42.04).
+      # The old formula (qty*unit_price - discount) yielded 21.26.
+      expect(result[:top_products_by_revenue].first).to include(sku: "CAMISA-P", revenue: 76.86)
+    end
+
+    it "computes top_products_by_margin against the correct (seller-discount-only) revenue" do
+      order = make_order(tiktok_channel, gross: 118.90, margin: 0, ordered_at: 1.day.ago)
+      make_tiktok_item(order)
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      # revenue 76.86, cost 2*17.23=34.46 => (76.86-34.46)/76.86*100 = 55.17%
+      expect(result[:top_products_by_margin].first).to include(sku: "CAMISA-P", margin_pct: 55.17)
+    end
+
+    it "shows only seller_discount (not seller+platform) as the item discount in coupons.by_product" do
+      order = make_order(tiktok_channel, gross: 118.90, margin: 0, ordered_at: 1.day.ago)
+      make_tiktok_item(order)
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      row = result[:coupons][:by_product].first
+      # discount_total 42.04 (seller only, not 48.82 combined); list price
+      # reconstructed as 70.08 + 42.04 + 6.78 = 118.90 => 42.04/118.90 = 35.36%.
+      expect(row).to include(sku: "CAMISA-P", discount_total: 42.04, discount_pct: 35.36)
+    end
+  end
 end

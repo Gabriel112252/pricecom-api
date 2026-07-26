@@ -1174,26 +1174,31 @@ module Dashboard
     # qualquer margem aqui seria enganosa até isso ser corrigido.
     def build_discount_by_product(scope)
       rows = OrderItem
+        .joins(order: :channel)
         .where(order_id: scope.select(:id), is_gift: false)
-        .where("COALESCE(order_items.discount, 0) > 0")
-        .group(:sku, :name)
-        .order(Arel.sql("COALESCE(SUM(order_items.discount), 0) DESC"))
+        .where("COALESCE(#{item_discount_amount_sql}, 0) > 0")
+        .group("order_items.sku", "order_items.name")
+        .order(Arel.sql("COALESCE(SUM(#{item_discount_amount_sql}), 0) DESC"))
         .limit(10)
         .pluck(
-          :sku,
-          :name,
-          Arel.sql("COALESCE(SUM(order_items.discount), 0)"),
+          Arel.sql("order_items.sku"),
+          Arel.sql("order_items.name"),
+          Arel.sql("COALESCE(SUM(#{item_discount_amount_sql}), 0)"),
           Arel.sql("COALESCE(SUM(order_items.quantity * order_items.unit_price), 0)"),
+          Arel.sql("COALESCE(SUM(order_items.platform_discount), 0)"),
           Arel.sql("COUNT(DISTINCT order_items.order_id)")
         )
 
-      rows.map do |sku, name, discount_total, net_total, orders_count|
+      rows.map do |sku, name, discount_total, net_total, platform_discount_total, orders_count|
         discount_f = discount_total.to_f
-        # order_items.unit_price é o preço LÍQUIDO (pós-desconto) neste
-        # schema — o preço de tabela é unit_price + desconto, e é sobre ele
-        # que o % é calculado (senão passa de 100%). nf_unit_price não serve
-        # de base: está zerado em produção.
-        list_price_f = net_total.to_f + discount_f
+        # order_items.unit_price é o preço LÍQUIDO (pós-desconto operacional)
+        # neste schema — o preço de tabela é unit_price + desconto (+
+        # platform_discount para TikTok, cujo unit_price já vem líquido dos
+        # DOIS descontos: sem somar platform_discount aqui de volta, o
+        # denominador ficaria mais baixo que o preço de tabela real e
+        # inflaria discount_pct). nf_unit_price não serve de base: está
+        # zerado em produção.
+        list_price_f = net_total.to_f + discount_f + platform_discount_total.to_f
 
         {
           sku: sku,
@@ -1522,23 +1527,23 @@ module Dashboard
 
     def build_top_products_by_margin(period)
       rows = OrderItem
-        .joins(:order, :product)
+        .joins(:product, order: :channel)
         .merge(Order.revenue_countable)
         .where(orders: { tenant_id: tenant.id, ordered_at: period_range(period) })
         .where(is_gift: false)
         .where("order_items.unit_cost IS NOT NULL AND order_items.unit_cost > 0")
         .group("products.id", "products.sku", "products.name")
-        .having("SUM(order_items.quantity * order_items.unit_price - order_items.discount) > 0")
+        .having("SUM(#{item_revenue_amount_sql}) > 0")
         .order(Arel.sql(
-          "(SUM(order_items.quantity * order_items.unit_price - order_items.discount) " \
+          "(SUM(#{item_revenue_amount_sql}) " \
           "- SUM(#{item_cost_amount_sql})) " \
-          "/ SUM(order_items.quantity * order_items.unit_price - order_items.discount) DESC"
+          "/ SUM(#{item_revenue_amount_sql}) DESC"
         ))
         .limit(10)
         .pluck(
           Arel.sql("products.sku"),
           Arel.sql("products.name"),
-          Arel.sql("SUM(order_items.quantity * order_items.unit_price - order_items.discount)"),
+          Arel.sql("SUM(#{item_revenue_amount_sql})"),
           Arel.sql("SUM(#{item_cost_amount_sql})")
         )
 
@@ -1551,17 +1556,17 @@ module Dashboard
 
     def build_top_products_by_revenue(period)
       rows = OrderItem
-        .joins(:order, :product)
+        .joins(:product, order: :channel)
         .merge(Order.revenue_countable)
         .where(orders: { tenant_id: tenant.id, ordered_at: period_range(period) })
         .where(is_gift: false)
         .group("products.id", "products.sku", "products.name")
-        .order(Arel.sql("SUM(order_items.quantity * order_items.unit_price - order_items.discount) DESC"))
+        .order(Arel.sql("SUM(#{item_revenue_amount_sql}) DESC"))
         .limit(10)
         .pluck(
           Arel.sql("products.sku"),
           Arel.sql("products.name"),
-          Arel.sql("SUM(order_items.quantity * order_items.unit_price - order_items.discount)")
+          Arel.sql("SUM(#{item_revenue_amount_sql})")
         )
 
       rows.map { |sku, name, revenue| { sku: sku, name: name, revenue: revenue.to_f.round(2) } }
@@ -1992,6 +1997,37 @@ module Dashboard
 
     def item_cost_amount_sql
       "order_items.quantity * order_items.unit_cost"
+    end
+
+    # Yampi/Shopify store order_items.unit_price as the GROSS per-unit price
+    # and order_items.discount as the real per-item discount, so
+    # `quantity * unit_price - discount` is correct for them. TikTok's
+    # unit_price is its own sale_price — already NET of BOTH seller_discount
+    # and platform_discount — while order_items.discount keeps summing both
+    # for backward compatibility. Subtracting `discount` from an
+    # already-net unit_price there double-counts platform_discount, which
+    # TikTok itself reimburses and must never reduce revenue (same rule as
+    # Order#calculate_margin/orders.discount). Adding platform_discount back
+    # instead lands exactly on TikTok's own "Vendas líquidas dos produtos"
+    # (gross - seller_discount only) — confirmed against a real settlement
+    # statement: item original_price 59.45 x2, seller_discount 21.02 x2,
+    # platform_discount 3.39 x2, unit_price(net) 35.04 x2 => qty*unit_price
+    # (70.08) + platform_discount (6.78) = 76.86 = 118.90 - 42.04. Requires
+    # the query to join order_items -> orders -> channels.
+    def item_revenue_amount_sql
+      "CASE WHEN channels.platform = 'tiktok' " \
+        "THEN order_items.quantity * order_items.unit_price + order_items.platform_discount " \
+        "ELSE order_items.quantity * order_items.unit_price - order_items.discount END"
+    end
+
+    # Operational (seller-funded) discount only, mirroring orders.discount:
+    # for TikTok, order_items.discount still holds seller+platform combined,
+    # so the real per-item seller discount is order_items.seller_discount.
+    # Other channels never populate seller_discount (always 0), so their
+    # real discount stays order_items.discount. Requires the same
+    # order_items -> orders -> channels join as item_revenue_amount_sql.
+    def item_discount_amount_sql
+      "CASE WHEN channels.platform = 'tiktok' THEN order_items.seller_discount ELSE order_items.discount END"
     end
   end
 end

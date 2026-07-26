@@ -11,6 +11,15 @@ module Integrations
     # has to be re-fetched and reprocessed to know which ones actually had
     # a platform_discount.
     #
+    # Since 2026-07-26 this same reprocessing also backfills the per-ITEM
+    # equivalent (order_items.seller_discount/platform_discount, see
+    # TiktokOrderNormalizer#extract_items and UpsertOrder#upsert_items,
+    # which destroys and recreates order_items on every call). Orders
+    # already reprocessed by an earlier run of this exact service (before
+    # that date) still need re-running to get the item-level fields — the
+    # order-level columns being already correct does not imply the
+    # item-level ones are.
+    #
     # Reusing TiktokOrderProcessor (UpsertOrder → stock deduction, cart
     # conversion, freight-margin sync, etc.) instead of writing a narrower
     # "just update discount columns" path is deliberate: every one of those

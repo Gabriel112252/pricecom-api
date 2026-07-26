@@ -106,10 +106,15 @@ RSpec.describe Integrations::Normalizers::TiktokOrderNormalizer do
         is_gift:             false
       )
       expect(normalized[:items].first[:unit_price]).to be_within(0.001).of(35.04)
-      # 2 × (seller_discount 21.02 + platform_discount 3.39) — per-item
-      # discount is untouched by this fix (out of scope: it isn't read by
-      # Order#calculate_margin, only the order-level `discount` is)
+      # discount stays the combined seller+platform sum for backward
+      # compatibility: 2 × (seller_discount 21.02 + platform_discount 3.39).
       expect(normalized[:items].first[:discount]).to be_within(0.001).of(48.82)
+      # seller_discount/platform_discount are the new source of truth for
+      # per-item dashboard math: unit_price is already net of BOTH, so only
+      # seller_discount (the seller's own component) should be subtracted
+      # again anywhere — 2 × 21.02 and 2 × 3.39 respectively.
+      expect(normalized[:items].first[:seller_discount]).to be_within(0.001).of(42.04)
+      expect(normalized[:items].first[:platform_discount]).to be_within(0.001).of(6.78)
     end
   end
 

@@ -107,6 +107,8 @@ module Integrations
             unit_price:    item_data[:unit_price].to_f,
             unit_cost:     unit_cost_for_item(item_data, product),
             discount:      item_data[:discount].to_f,
+            seller_discount:   item_data[:seller_discount].to_f,
+            platform_discount: item_data[:platform_discount].to_f,
             is_gift:       item_data[:is_gift] || false,
             nf_unit_price: item_data[:nf_unit_price].to_f
           )

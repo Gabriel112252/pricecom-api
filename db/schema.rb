@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_07_23_120000) do
+ActiveRecord::Schema[7.2].define(version: 2026_07_26_000000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -503,6 +503,8 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_23_120000) do
     t.datetime "updated_at", null: false
     t.boolean "is_gift", default: false, null: false
     t.decimal "nf_unit_price", precision: 10, scale: 2, default: "0.0", null: false
+    t.decimal "seller_discount", precision: 10, scale: 2, default: "0.0", null: false
+    t.decimal "platform_discount", precision: 10, scale: 2, default: "0.0", null: false
     t.index ["order_id"], name: "index_order_items_on_order_id"
     t.index ["product_id"], name: "index_order_items_on_product_id"
   end
@@ -731,7 +733,7 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_23_120000) do
     t.datetime "finished_at"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
-    t.index ["channel_product_listing_id", "stock_alert_rule_id"], name: "idx_one_inflight_execution_per_listing_rule", unique: true, where: "((status)::text = ANY (ARRAY[('pending'::character varying)::text, ('executing'::character varying)::text]))"
+    t.index ["channel_product_listing_id", "stock_alert_rule_id"], name: "idx_one_inflight_execution_per_listing_rule", unique: true, where: "((status)::text = ANY ((ARRAY['pending'::character varying, 'executing'::character varying])::text[]))"
     t.index ["channel_product_listing_id"], name: "idx_on_channel_product_listing_id_11f29f72e1"
     t.index ["idempotency_key"], name: "index_stock_replenishment_executions_on_idempotency_key", unique: true
     t.index ["product_id"], name: "index_stock_replenishment_executions_on_product_id"
