@@ -81,7 +81,50 @@ module Api
         }
       end
 
+      # POST /api/v1/integrations/idworks/reconcile
+      # Gatilho manual do botão "Rodar agora" da aba Reconciliação idworks
+      # — não depende de DataSourceConfig (igual #sync), é uma ação
+      # explícita do usuário. threshold_pct e o próprio período pedido não
+      # são persistidos em lugar nenhum além do ReconciliationItem gerado.
+      def reconcile
+        integration = current_tenant.integrations.find_by(provider: "idworks")
+
+        if integration.nil? || integration.status != "connected"
+          return render json: { error: "idworks ainda não está conectado" }, status: :unprocessable_entity
+        end
+
+        begin
+          period_from, period_to = reconcile_period
+        rescue ArgumentError
+          return render json: { errors: [ "Datas inválidas" ] }, status: :unprocessable_entity
+        end
+
+        result = Reconciliation::OrderReconciliationService.call(
+          tenant: current_tenant,
+          period_from: period_from,
+          period_to: period_to,
+          threshold_pct: reconcile_threshold_pct
+        )
+
+        render json: {
+          success:         result.success?,
+          items_count:     result.items_count,
+          divergent_count: result.divergent_count,
+          error_message:   result.error_message
+        }
+      end
+
       private
+
+      def reconcile_period
+        from = params[:from].present? ? Date.parse(params[:from]) : 1.week.ago.to_date
+        to   = params[:to].present? ? Date.parse(params[:to]) : Date.current
+        [ from, to ]
+      end
+
+      def reconcile_threshold_pct
+        params[:threshold_pct].present? ? params[:threshold_pct].to_f : Reconciliation::OrderReconciliationService::DEFAULT_THRESHOLD_PCT
+      end
 
       def credential_params
         params.require(:credentials).permit!.to_h

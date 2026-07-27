@@ -1,7 +1,7 @@
 class DataSourceConfig < ApplicationRecord
   belongs_to :tenant
 
-  DATA_TYPES = %w[cost freight tax payment_reconciliation stock].freeze
+  DATA_TYPES = %w[cost freight tax payment_reconciliation stock order_reconciliation].freeze
   SOURCES    = %w[idworks pagarme lucrofrete].freeze
   # "lucrofrete" fornece o custo real de frete dos pedidos Yampi ja
   # casados pelo parceiro (Order#real_freight_cost via
@@ -12,12 +12,17 @@ class DataSourceConfig < ApplicationRecord
   # "stock" (QtyAvailable/QtyReserved/etc. via GET /sku — ver
   # Integrations::Idworks::StockSyncService) só tem a idworks como fonte
   # por enquanto; nenhum outro provider deste projeto expõe estoque de ERP.
+  #
+  # "order_reconciliation" (quantidade vendida por SKU x nota fiscal
+  # idworks — ver Reconciliation::OrderReconciliationService) também só tem
+  # idworks como fonte possível.
   AVAILABLE_SOURCES_BY_DATA_TYPE = {
     "cost" => %w[idworks],
     "freight" => %w[idworks lucrofrete],
     "tax" => [],
     "payment_reconciliation" => %w[pagarme],
-    "stock" => %w[idworks]
+    "stock" => %w[idworks],
+    "order_reconciliation" => %w[idworks]
   }.freeze
 
   # Which source a data_type defaults to the first time its provider is
@@ -31,6 +36,15 @@ class DataSourceConfig < ApplicationRecord
   # field anywhere (only fiscal classification codes), so it's never a
   # valid default source for "tax" — see
   # Integrations::Idworks::ProductCostSyncService's class comment.
+  #
+  # "order_reconciliation" is also deliberately absent from defaults:
+  # Integrations::Idworks::InvoicedQuantityFetcher IS implemented now
+  # (2026-07-27, confirmed against real hidrabene data — GET /orders?
+  # SkuView=1 + GET /invoice), but the weekly job hasn't been battle-tested
+  # against production-scale order volume/pagination yet. Turn it on
+  # per-tenant via PATCH data_source_configs/order_reconciliation once
+  # confirmed safe, rather than auto-enabling for every idworks-connected
+  # tenant on this connect.
   DEFAULTS_BY_SOURCE = {
     "idworks" => %w[cost freight stock],
     "pagarme" => %w[payment_reconciliation]

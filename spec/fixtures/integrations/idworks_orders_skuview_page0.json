@@ -1,0 +1,98 @@
+[
+  {
+    "IDOrder": 1001,
+    "Order": "TT1001",
+    "Recordtimestamp": "2026-07-21T10:00:00.000Z",
+    "IDStatusOrder": 1,
+    "StatusOrder": "Fechado",
+    "Items": [
+      {
+        "IDSku": 501,
+        "SkuName": "Produto Solo",
+        "IDSkuKit": null,
+        "Quantity": 3,
+        "KitSkuName": null,
+        "QuantityKit": null,
+        "IDSkuCompany": "SKU-A",
+        "KitIDSkuCompany": null
+      }
+    ]
+  },
+  {
+    "IDOrder": 1002,
+    "Order": "TT1002",
+    "Recordtimestamp": "2026-07-22T11:00:00.000Z",
+    "IDStatusOrder": 1,
+    "StatusOrder": "Fechado",
+    "Items": [
+      {
+        "IDSku": 601,
+        "SkuName": "Sabonete Liquido Facial",
+        "IDSkuKit": 9001,
+        "Quantity": 1,
+        "KitSkuName": "Kit Skincare",
+        "QuantityKit": 1,
+        "IDSkuCompany": "0107",
+        "KitIDSkuCompany": "KIT044"
+      },
+      {
+        "IDSku": 602,
+        "SkuName": "Protetor Solar Clareador",
+        "IDSkuKit": 9001,
+        "Quantity": 1,
+        "KitSkuName": "Kit Skincare",
+        "QuantityKit": 1,
+        "IDSkuCompany": "2080",
+        "KitIDSkuCompany": "KIT044"
+      },
+      {
+        "IDSku": 603,
+        "SkuName": "Serum Multicorretivo",
+        "IDSkuKit": 9001,
+        "Quantity": 1,
+        "KitSkuName": "Kit Skincare",
+        "QuantityKit": 1,
+        "IDSkuCompany": "0109",
+        "KitIDSkuCompany": "KIT044"
+      }
+    ]
+  },
+  {
+    "IDOrder": 1003,
+    "Order": "TT1003",
+    "Recordtimestamp": "2026-07-23T12:00:00.000Z",
+    "IDStatusOrder": 90,
+    "StatusOrder": "Cancelado",
+    "Items": [
+      {
+        "IDSku": 501,
+        "SkuName": "Produto Solo",
+        "IDSkuKit": null,
+        "Quantity": 2,
+        "KitSkuName": null,
+        "QuantityKit": null,
+        "IDSkuCompany": "SKU-A",
+        "KitIDSkuCompany": null
+      }
+    ]
+  },
+  {
+    "IDOrder": 1004,
+    "Order": "TT1004",
+    "Recordtimestamp": "2026-07-24T13:00:00.000Z",
+    "IDStatusOrder": 1,
+    "StatusOrder": "Fechado",
+    "Items": [
+      {
+        "IDSku": 602,
+        "SkuName": "Protetor Solar Clareador",
+        "IDSkuKit": 9002,
+        "Quantity": 3,
+        "KitSkuName": "Pack 3un",
+        "QuantityKit": 1,
+        "IDSkuCompany": "2080",
+        "KitIDSkuCompany": "2080_3"
+      }
+    ]
+  }
+]

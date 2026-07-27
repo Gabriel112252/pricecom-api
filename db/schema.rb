@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_07_27_115759) do
+ActiveRecord::Schema[7.2].define(version: 2026_07_27_120000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -684,6 +684,27 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_27_115759) do
     t.index ["tenant_id"], name: "index_products_on_tenant_id"
   end
 
+  create_table "reconciliation_items", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "integration_id"
+    t.bigint "product_id"
+    t.date "period_start", null: false
+    t.date "period_end", null: false
+    t.string "sku", null: false
+    t.string "product_name"
+    t.decimal "idworks_qty", precision: 12, scale: 3, default: "0.0", null: false
+    t.decimal "pricecom_qty", precision: 12, scale: 3, default: "0.0", null: false
+    t.decimal "diff_qty", precision: 12, scale: 3, default: "0.0", null: false
+    t.decimal "diff_pct", precision: 10, scale: 2
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["integration_id"], name: "index_reconciliation_items_on_integration_id"
+    t.index ["product_id"], name: "index_reconciliation_items_on_product_id"
+    t.index ["tenant_id", "period_start", "period_end"], name: "idx_reconciliation_items_on_tenant_period"
+    t.index ["tenant_id", "sku", "period_start", "period_end"], name: "idx_reconciliation_items_on_tenant_sku_period", unique: true
+    t.index ["tenant_id"], name: "index_reconciliation_items_on_tenant_id"
+  end
+
   create_table "stock_alert_rules", force: :cascade do |t|
     t.bigint "tenant_id", null: false
     t.bigint "product_id", null: false
@@ -897,6 +918,9 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_27_115759) do
   add_foreign_key "pricing_rules", "channels"
   add_foreign_key "pricing_rules", "products"
   add_foreign_key "products", "tenants"
+  add_foreign_key "reconciliation_items", "integrations"
+  add_foreign_key "reconciliation_items", "products"
+  add_foreign_key "reconciliation_items", "tenants"
   add_foreign_key "stock_alert_rules", "products"
   add_foreign_key "stock_alert_rules", "tenants"
   add_foreign_key "stock_alerts", "products"

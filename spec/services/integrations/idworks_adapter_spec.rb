@@ -145,4 +145,89 @@ RSpec.describe Integrations::IdworksAdapter do
       )
     end
   end
+
+  # Field names confirmed against real hidrabene.api-idworks.com.br data on
+  # 2026-07-27 — see IdworksAdapter#fetch_order_items's class comment for
+  # the full discovery notes (SkuView=1, DateFrom/DateTo as plain
+  # YYYY-MM-DD, Items already kit-decomposed by idworks itself).
+  describe "#fetch_order_items" do
+    let(:order_items_fixture) { File.read(Rails.root.join("spec/fixtures/integrations/idworks_orders_skuview_page0.json")) }
+
+    before do
+      stub_signin
+      stub_request(:get, orders_url)
+        .with(query: hash_including("Page" => "0", "SkuView" => "1", "DateFrom" => "2026-07-20", "DateTo" => "2026-07-27"))
+        .to_return(status: 200, body: order_items_fixture, headers: { "Content-Type" => "application/json" })
+      stub_request(:get, orders_url).with(query: hash_including("Page" => "1"))
+        .to_return(status: 200, body: [].to_json, headers: { "Content-Type" => "application/json" })
+    end
+
+    it "requests SkuView=1 with plain-date DateFrom/DateTo" do
+      adapter.fetch_order_items(from: Date.new(2026, 7, 20), to: Date.new(2026, 7, 27))
+
+      expect(WebMock).to have_requested(:get, orders_url)
+        .with(query: hash_including("Page" => "0", "SkuView" => "1", "DateFrom" => "2026-07-20", "DateTo" => "2026-07-27"))
+    end
+
+    it "flattens Items into idworks_order_id/sku/quantity rows, one per SKU line" do
+      items = adapter.fetch_order_items(from: Date.new(2026, 7, 20), to: Date.new(2026, 7, 27))
+
+      expect(items).to include(
+        { idworks_order_id: "1001", sku: "SKU-A", quantity: BigDecimal("3") },
+        { idworks_order_id: "1003", sku: "SKU-A", quantity: BigDecimal("2") }
+      )
+    end
+
+    it "uses idworks' own kit decomposition (IDSkuCompany/Quantity) instead of the literal kit/pack SKU sold" do
+      items = adapter.fetch_order_items(from: Date.new(2026, 7, 20), to: Date.new(2026, 7, 27))
+
+      kit_order_items = items.select { |i| i[:idworks_order_id] == "1002" }
+      expect(kit_order_items).to contain_exactly(
+        { idworks_order_id: "1002", sku: "0107", quantity: BigDecimal("1") },
+        { idworks_order_id: "1002", sku: "2080", quantity: BigDecimal("1") },
+        { idworks_order_id: "1002", sku: "0109", quantity: BigDecimal("1") }
+      )
+      # "KIT044" (KitIDSkuCompany) never appears as a sku on its own — only
+      # the real base-SKU components idworks already resolved it to.
+      expect(items.map { |i| i[:sku] }).not_to include("KIT044")
+    end
+
+    it "already reflects the pack multiplier in Quantity for a pack SKU (2080_3 -> 3x base SKU 2080)" do
+      items = adapter.fetch_order_items(from: Date.new(2026, 7, 20), to: Date.new(2026, 7, 27))
+
+      pack_order_items = items.select { |i| i[:idworks_order_id] == "1004" }
+      expect(pack_order_items).to contain_exactly({ idworks_order_id: "1004", sku: "2080", quantity: BigDecimal("3") })
+    end
+  end
+
+  describe "#fetch_invoiced_order_ids" do
+    let(:invoice_fixture) { File.read(Rails.root.join("spec/fixtures/integrations/idworks_invoice_list.json")) }
+    let(:invoice_url) { "https://cliente.idworks.com.br/1.0/invoice" }
+
+    before do
+      stub_signin
+      stub_request(:get, invoice_url)
+        .with(query: hash_including("Page" => "0", "IDOrder" => "1001,1002,1003,1004"))
+        .to_return(status: 200, body: invoice_fixture, headers: { "Content-Type" => "application/json" })
+      stub_request(:get, invoice_url).with(query: hash_including("Page" => "1"))
+        .to_return(status: 200, body: [].to_json, headers: { "Content-Type" => "application/json" })
+    end
+
+    it "returns only the order ids whose invoice has IDStatusInvoice == 3 (Emitida)" do
+      ids = adapter.fetch_invoiced_order_ids(%w[1001 1002 1003 1004])
+
+      expect(ids).to eq(Set.new(%w[1001 1002 1004])) # 1003's invoice is IDStatusInvoice=7 (Cancelada)
+    end
+
+    it "batches order_ids into the IDOrder comma-separated filter instead of one request per order" do
+      adapter.fetch_invoiced_order_ids(%w[1001 1002 1003 1004])
+
+      expect(WebMock).to have_requested(:get, invoice_url).with(query: hash_including("Page" => "0", "IDOrder" => "1001,1002,1003,1004")).once
+    end
+
+    it "returns an empty Set without any HTTP call when order_ids is empty" do
+      expect(adapter.fetch_invoiced_order_ids([])).to eq(Set.new)
+      expect(WebMock).not_to have_requested(:get, invoice_url)
+    end
+  end
 end

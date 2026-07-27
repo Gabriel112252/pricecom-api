@@ -51,13 +51,16 @@ module Integrations
     ].freeze
     MAX_PAGES = 1_000
 
-    attr_reader :product_response_debug, :order_response_debug
+    attr_reader :product_response_debug, :order_response_debug,
+                :order_items_response_debug, :invoice_response_debug
 
     def initialize(credentials)
       super
       @client = Idworks::BaseClient.new(credentials)
       @product_response_debug = []
       @order_response_debug = []
+      @order_items_response_debug = []
+      @invoice_response_debug = []
     end
 
     def authenticate
@@ -99,6 +102,122 @@ module Integrations
       end
 
       products
+    end
+
+    # → [{ idworks_order_id:, sku:, quantity: }] — one row per SKU line
+    # across every order in [from, to]. CONFIRMED against real Hidrabene
+    # data on 2026-07-27 (tenant hidrabene.api-idworks.com.br), via
+    # GET /orders?Page=N&SkuView=1&DateFrom=YYYY-MM-DD&DateTo=YYYY-MM-DD:
+    #
+    #   - SkuView=1 makes /orders include an "Items" array per order.
+    #     Response is a bare JSON array (no Data/Items wrapper) — same
+    #     shape #extract_collection already handles.
+    #   - DateFrom/DateTo DO filter server-side here (tested: a 1-day
+    #     window returned only that day's Recordtimestamp) — contrary to
+    #     the old "unverified" note on #fetch_orders above, no client-side
+    #     date fallback is needed. Format confirmed as plain YYYY-MM-DD
+    #     (not a full timestamp) — that's what was tested against.
+    #   - The order's own date field is "Recordtimestamp" (ISO8601 UTC).
+    #     Note: this may be a last-modified timestamp rather than a strict
+    #     "order placed" date (an order's Recordtimestamp could move if its
+    #     status changes later) — the only date field the endpoint exposes,
+    #     used here as-is since DateFrom/DateTo filter against it too.
+    #   - Items already come pre-decomposed by idworks itself: each item's
+    #     "IDSkuCompany" is the real base-SKU code (e.g. "2080", not
+    #     "2080_3" or "KIT044") and "Quantity" is already the total real
+    #     unit count for that line (confirmed against a QuantityKit=2 kit
+    #     line: Quantity was 2, matching QuantityKit, not 1). Do NOT run
+    #     this through Products::ExplodeKit/kit_compositions again — that
+    #     would double-decompose. "KitIDSkuCompany"/"QuantityKit"/
+    #     "IDSkuKit"/"KitSkuName" describe what was literally sold (the
+    #     kit/pack SKU) and are informational only, not used here.
+    #   - No invoice/NF status field exists anywhere on this endpoint
+    #     (checked every key across a 4000-order sample) — despite
+    #     help.idworks.com.br/api/orders-list's prose claiming NF data is
+    #     "resolved" on this response. Invoice status lives on the
+    #     separate GET /invoice endpoint instead — see
+    #     #fetch_invoiced_order_ids below, which pairs with this method by
+    #     idworks_order_id.
+    def fetch_order_items(from:, to:)
+      items = []
+      page = 0 # 0-indexed, same as #fetch_products/#fetch_orders
+      @order_items_response_debug = []
+
+      loop do
+        body = with_rate_limit_retry do
+          client.get("orders", "Page" => page, "SkuView" => 1, "DateFrom" => from.to_date.iso8601, "DateTo" => to.to_date.iso8601)
+        end
+        collection = extract_collection(body)
+        orders = collection[:items]
+        record_response_debug(
+          @order_items_response_debug,
+          endpoint: "orders?SkuView=1",
+          page: page,
+          body: body,
+          collection: collection
+        )
+        break if orders.blank?
+
+        orders.each { |raw_order| items.concat(normalize_order_items(raw_order)) }
+        break if last_page?(collection[:pagination], page)
+
+        page += 1
+        break if page > MAX_PAGES
+      end
+
+      items
+    end
+
+    # → Set of idworks_order_id (String) whose invoice status is "Emitida"
+    # (IDStatusInvoice == 3 — CONFIRMED 2026-07-27 against real /invoice
+    # data: distinct values seen were 3="Emitida", 7="Cancelada",
+    # 1="Erro"; matches the IDStatusInvoice=3 convention already known
+    # from other idworks endpoints). Batches order_ids into the
+    # comma-separated "IDOrder" filter (confirmed working, incl. multiple
+    # IDs at once) — a single request with ~2000 IDs hits idworks' own
+    # HTTP line-length limit (414), so batches stay well under that.
+    ORDER_ID_BATCH_SIZE = 300
+    INVOICE_STATUS_ISSUED = 3
+
+    def fetch_invoiced_order_ids(order_ids)
+      order_ids = order_ids.compact.uniq
+      return Set.new if order_ids.empty?
+
+      issued = Set.new
+      @invoice_response_debug = []
+
+      order_ids.each_slice(ORDER_ID_BATCH_SIZE) do |batch|
+        page = 0
+
+        loop do
+          body = with_rate_limit_retry do
+            client.get("invoice", "Page" => page, "IDOrder" => batch.join(","))
+          end
+          collection = extract_collection(body)
+          invoices = collection[:items]
+          record_response_debug(
+            @invoice_response_debug,
+            endpoint: "invoice",
+            page: page,
+            body: body,
+            collection: collection
+          )
+          break if invoices.blank?
+
+          invoices.each do |raw|
+            next unless first_present(raw, "IDStatusInvoice").to_i == INVOICE_STATUS_ISSUED
+
+            order_id = first_present(raw, "IDOrder")&.to_s
+            issued << order_id if order_id
+          end
+          break if last_page?(collection[:pagination], page)
+
+          page += 1
+          break if page > MAX_PAGES
+        end
+      end
+
+      issued
     end
 
     # → [{ order_ref:, idworks_order_id:, value_shipping:, value_product:,
@@ -168,6 +287,28 @@ module Integrations
       end
 
       { items: [], pagination: pagination, path: path }
+    end
+
+    # Field names confirmed 2026-07-27 against real /orders?SkuView=1 data
+    # — see #fetch_order_items's comment. IDSkuCompany/Quantity are the
+    # already-decomposed base-SKU + real unit count; KitIDSkuCompany/
+    # QuantityKit describe the literal kit/pack sold and are intentionally
+    # not used here.
+    def normalize_order_items(raw_order)
+      idworks_order_id = first_present(raw_order, "IDOrder")&.to_s
+      raw_items = raw_order.is_a?(Hash) ? raw_order["Items"] : nil
+      return [] if idworks_order_id.blank? || raw_items.blank?
+
+      raw_items.filter_map do |raw_item|
+        sku = first_present(raw_item, "IDSkuCompany")&.to_s
+        next if sku.blank?
+
+        {
+          idworks_order_id: idworks_order_id,
+          sku: sku,
+          quantity: to_decimal(first_present(raw_item, "Quantity")) || BigDecimal(0)
+        }
+      end
     end
 
     def normalize_product(raw)

@@ -88,6 +88,16 @@ idworks_stock_sync_dispatch:
   class: "Integrations::Idworks::ScheduleStockSyncsJob"
   queue: integrations
 
+# Compara quantidade vendida por SKU (Pricecom) x faturada (idworks NF) da
+# última semana corrida. Desligado por padrão via DataSourceConfig
+# ("order_reconciliation" não entra em DEFAULTS_BY_SOURCE) até o fetch real
+# de itens de NF ser implementado — ver
+# Integrations::Idworks::InvoicedQuantityFetcher.
+idworks_order_reconciliation_dispatch:
+  cron: "0 6 * * 1"
+  class: "Integrations::Idworks::ScheduleOrderReconciliationJob"
+  queue: integrations
+
 # LucroFrete: custo real de frete via pedidos ja casados pelo parceiro
 # (/api/reports/orders). O polling antigo de /api/logs fica disponivel
 # apenas para analise de cotacoes brutas, nao para real_freight_cost.

@@ -1,0 +1,38 @@
+[
+  {
+    "IDNfCompany": 1,
+    "IDOrder": 1001,
+    "IDStatusInvoice": 3,
+    "StatusInvoice": "Emitida",
+    "NfeNumber": 100,
+    "NfeSerie": 1,
+    "NfedhEmi": "2026-07-21T10:05:00.000Z"
+  },
+  {
+    "IDNfCompany": 2,
+    "IDOrder": 1002,
+    "IDStatusInvoice": 3,
+    "StatusInvoice": "Emitida",
+    "NfeNumber": 101,
+    "NfeSerie": 1,
+    "NfedhEmi": "2026-07-22T11:05:00.000Z"
+  },
+  {
+    "IDNfCompany": 3,
+    "IDOrder": 1003,
+    "IDStatusInvoice": 7,
+    "StatusInvoice": "Cancelada",
+    "NfeNumber": 102,
+    "NfeSerie": 1,
+    "NfedhEmi": "2026-07-23T12:05:00.000Z"
+  },
+  {
+    "IDNfCompany": 4,
+    "IDOrder": 1004,
+    "IDStatusInvoice": 3,
+    "StatusInvoice": "Emitida",
+    "NfeNumber": 103,
+    "NfeSerie": 1,
+    "NfedhEmi": "2026-07-24T13:05:00.000Z"
+  }
+]

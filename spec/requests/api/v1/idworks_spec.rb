@@ -102,4 +102,44 @@ RSpec.describe "idworks integration", type: :request do
       expect(body["orders_synced_count"]).to eq(0)
     end
   end
+
+  describe "POST /api/v1/integrations/idworks/reconcile" do
+    it "rejects when idworks isn't connected yet" do
+      post "/api/v1/integrations/idworks/reconcile", headers: auth_headers(admin)
+      expect(response).to have_http_status(:unprocessable_entity)
+    end
+
+    it "requires admin" do
+      tenant.integrations.create!(provider: "idworks", name: "idworks", status: "connected", credentials: {})
+
+      post "/api/v1/integrations/idworks/reconcile", headers: auth_headers(operador)
+      expect(response).to have_http_status(:forbidden)
+    end
+
+    it "runs the reconciliation service end-to-end and reports the outcome" do
+      tenant.integrations.create!(
+        provider: "idworks", name: "idworks", status: "connected",
+        credentials: { base_url: base_url, email: "user@hidrabene.com", password: "secret" }
+      )
+      order_items_fixture = File.read(Rails.root.join("spec/fixtures/integrations/idworks_orders_skuview_page0.json"))
+      invoice_fixture = File.read(Rails.root.join("spec/fixtures/integrations/idworks_invoice_list.json"))
+      stub_signin
+      stub_request(:get, "#{base_url}/orders").with(query: hash_including("Page" => "0", "SkuView" => "1"))
+        .to_return(status: 200, body: order_items_fixture, headers: { "Content-Type" => "application/json" })
+      stub_request(:get, "#{base_url}/orders").with(query: hash_including("Page" => "1"))
+        .to_return(status: 200, body: [].to_json, headers: { "Content-Type" => "application/json" })
+      stub_request(:get, "#{base_url}/invoice").with(query: hash_including("Page" => "0"))
+        .to_return(status: 200, body: invoice_fixture, headers: { "Content-Type" => "application/json" })
+      stub_request(:get, "#{base_url}/invoice").with(query: hash_including("Page" => "1"))
+        .to_return(status: 200, body: [].to_json, headers: { "Content-Type" => "application/json" })
+
+      post "/api/v1/integrations/idworks/reconcile", headers: auth_headers(admin),
+        params: { from: "2026-07-20", to: "2026-07-27" }
+
+      expect(response).to have_http_status(:ok)
+      body = JSON.parse(response.body)
+      expect(body["success"]).to eq(true)
+      expect(body["items_count"]).to be > 0
+    end
+  end
 end

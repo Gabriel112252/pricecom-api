@@ -59,8 +59,9 @@ Rails.application.routes.draw do
         # declared before the dynamic ":channel/connect" below so they
         # aren't swallowed by it (":channel" matches any string, including
         # "idworks"/"pagarme").
-        post  "idworks/connect", to: "idworks#connect"
-        post  "idworks/sync",    to: "idworks#sync"
+        post  "idworks/connect",   to: "idworks#connect"
+        post  "idworks/sync",      to: "idworks#sync"
+        post  "idworks/reconcile", to: "idworks#reconcile"
         post  "pagarme/connect", to: "pagarme#connect"
         post  "pagarme/sync",    to: "pagarme#sync"
 
@@ -132,6 +133,8 @@ Rails.application.routes.draw do
       # Estoque — visão agregada produto x canal (ver StockOverviewController)
       get "stock_overview",     to: "stock_overview#index"
       get "stock_overview/:id", to: "stock_overview#show"
+
+      get "reconciliation_overview", to: "reconciliation_overview#index"
 
       # Dashboard
       get "dashboard/summary",   to: "dashboard#summary"
