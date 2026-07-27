@@ -98,6 +98,19 @@ Rails.application.routes.draw do
       # validar a taxa cobrada contra a negociada.
       resources :payment_fee_rules, only: [ :index, :create, :update, :destroy ]
 
+      # Testimonials — curadoria de depoimentos de clientes (Fase 2: só
+      # ingestão manual; importação TikTok/Shopee fica pras Fases 3/4).
+      resources :testimonials, only: [ :index, :create, :update, :destroy ] do
+        collection do
+          post :tiktok_preview
+        end
+        member do
+          post :approve
+          post :publish
+          post :reject
+        end
+      end
+
       # Stock alert rules + the alerts/events they raise — see
       # StockAlertRule/StockAlert and StockAlerts::EvaluationService.
       resources :stock_alert_rules, only: [ :index, :create, :update, :destroy ]

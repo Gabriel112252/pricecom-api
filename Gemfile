@@ -27,6 +27,10 @@ gem "roo"
 # Channel integrations (Yampi/Shopify/TikTok product sync)
 gem "faraday"
 
+# Anthropic API (Testimonials::AnthropicVisionClient — geração de quote_text a
+# partir de foto/frame de vídeo)
+gem "anthropic"
+
 # Windows does not include zoneinfo files, so bundle the tzinfo-data gem
 gem "tzinfo-data", platforms: %i[ windows jruby ]
 

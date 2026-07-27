@@ -12,8 +12,15 @@ FROM docker.io/library/ruby:$RUBY_VERSION-slim AS base
 WORKDIR /rails
 
 # Install base packages
+# ffmpeg + yt-dlp: usados por Testimonials::FrameExtractor/TiktokVideoDownloader
+# (ver GenerateQuoteTextJob/DownloadTiktokVideoJob) — instalados aqui, não só
+# em Dockerfile.sidekiq, porque o serviço de worker no Easypanel roda esta
+# mesma imagem com o CMD trocado pra `bundle exec sidekiq` (ver comentário
+# mais abaixo), não necessariamente a de Dockerfile.sidekiq.
 RUN apt-get update -qq && \
-    apt-get install --no-install-recommends -y curl libjemalloc2 libvips postgresql-client && \
+    apt-get install --no-install-recommends -y curl libjemalloc2 libvips postgresql-client ffmpeg && \
+    curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && \
+    chmod a+rx /usr/local/bin/yt-dlp && \
     rm -rf /var/lib/apt/lists /var/cache/apt/archives
 
 # Set production environment
