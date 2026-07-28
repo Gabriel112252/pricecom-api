@@ -68,6 +68,16 @@ RSpec.describe Integrations::TiktokAdapter do
       expect { adapter.authenticate }.to raise_error(Integrations::RateLimitError)
     end
 
+    it "propagates the real Retry-After header on a body-level throttling error too" do
+      stub_request(:post, /\A#{Regexp.escape(search_url)}/)
+        .to_return(status: 200, body: { code: 9999, message: "Request frequency exceeds limit" }.to_json,
+          headers: { "Content-Type" => "application/json", "Retry-After" => "12" })
+
+      expect { adapter.authenticate }.to raise_error(Integrations::RateLimitError) do |error|
+        expect(error.retry_after).to eq(12)
+      end
+    end
+
     it "raises RateLimitError on HTTP 429 too" do
       stub_request(:post, /\A#{Regexp.escape(search_url)}/)
         .to_return(status: 429, body: { code: 1, message: "Too many requests" }.to_json, headers: { "Retry-After" => "5" })

@@ -437,7 +437,7 @@ module Integrations
       end
 
       parsed = handle_response(response)
-      raise_on_body_error(parsed, path)
+      raise_on_body_error(parsed, path, response)
       parsed
     end
 
@@ -457,7 +457,7 @@ module Integrations
       end
 
       parsed = handle_response(response)
-      raise_on_body_error(parsed, path)
+      raise_on_body_error(parsed, path, response)
       parsed
     end
 
@@ -550,7 +550,7 @@ module Integrations
     # (invalid/expired token, missing scope — 105005 already seen in
     # production); scope errors get an explicit reauthorization hint so the
     # sync log tells the operator what to do.
-    def raise_on_body_error(body, path = nil)
+    def raise_on_body_error(body, path = nil, response = nil)
       code = body["code"]
       return if code.nil? || code.zero?
 
@@ -565,7 +565,10 @@ module Integrations
       elsif AUTH_ERROR_CODES.cover?(code.to_i) || AUTH_ERROR_KEYWORDS.any? { |k| downcased.include?(k) }
         raise AuthenticationError, "TiktokAdapter: credenciais rejeitadas#{where} (code #{code}: #{message})"
       elsif RATE_LIMIT_KEYWORDS.any? { |k| downcased.include?(k) }
-        raise RateLimitError, "TiktokAdapter: #{message} (code #{code})"
+        raise RateLimitError.new(
+          "TiktokAdapter: #{message} (code #{code})",
+          retry_after: response&.headers&.[]("retry-after")&.to_i
+        )
       else
         raise ApiError, "TiktokAdapter: #{message} (code #{code})"
       end

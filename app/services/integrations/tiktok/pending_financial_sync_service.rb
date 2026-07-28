@@ -115,9 +115,6 @@ module Integrations
           )
         end
 
-        if resume_order_id.present? && order_ids.empty?
-          scope = scope.where("orders.id > ?", resume_order_id)
-        end
         scope.limit(batch_size)
       end
 
@@ -262,17 +259,6 @@ module Integrations
         return if error_samples.size >= 20
 
         error_samples << { order_id: order.id, external_id: order.external_id, message: message }
-      end
-
-      def resume_order_id
-        return if order_ids.present?
-
-        IntegrationSyncLog
-          .where(tenant: tenant, action: ACTION, status: "pending")
-          .order(created_at: :desc)
-          .find do |candidate|
-            candidate.metadata.to_h["channel_credential_id"].to_s == channel_credential.id.to_s
-          end&.metadata.to_h&.fetch("last_order_id", nil).to_i
       end
 
       def tracking_column?(name)
