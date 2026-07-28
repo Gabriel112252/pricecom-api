@@ -76,6 +76,54 @@ RSpec.describe Integrations::Normalizers::YampiOrderNormalizer do
     end
   end
 
+  # Confirmado contra um pedido real de produção (tenant Hidrabene,
+  # 2026-07-28): os cinco campos UTM ficam soltos na raiz do payload, sem
+  # precisar de ?include= (diferente de promocode/coupon acima). Nenhum
+  # pedido amostrado tinha UTM preenchido — o teste "quando ausentes" cobre
+  # o comportamento real observado hoje, não só um caso hipotético.
+  describe "UTM tags (flat at the payload root, no include= needed)" do
+    it "reads all five UTM fields when populated" do
+      order = raw_order.merge(
+        "utm_source" => "instagram",
+        "utm_medium" => "story",
+        "utm_campaign" => "blackfriday2026",
+        "utm_content" => "banner1",
+        "utm_term" => "tenis-corrida"
+      )
+
+      normalized = described_class.new(order, "").normalize
+
+      expect(normalized).to include(
+        utm_source: "instagram",
+        utm_medium: "story",
+        utm_campaign: "blackfriday2026",
+        utm_content: "banner1",
+        utm_term: "tenis-corrida"
+      )
+    end
+
+    it "normalizes all five to nil when absent, matching every real sampled order today" do
+      normalized = described_class.new(raw_order, "").normalize
+
+      expect(normalized).to include(
+        utm_source: nil,
+        utm_medium: nil,
+        utm_campaign: nil,
+        utm_content: nil,
+        utm_term: nil
+      )
+    end
+
+    it "normalizes a blank string the same as an absent field" do
+      order = raw_order.merge("utm_source" => "", "utm_campaign" => nil)
+
+      normalized = described_class.new(order, "").normalize
+
+      expect(normalized[:utm_source]).to be_nil
+      expect(normalized[:utm_campaign]).to be_nil
+    end
+  end
+
   describe "webhook envelope shape (resource-wrapped, *.data nesting)" do
     let(:event_type) { "order.created" }
     let(:webhook_payload) do

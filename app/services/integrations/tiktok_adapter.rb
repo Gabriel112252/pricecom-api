@@ -31,17 +31,16 @@ module Integrations
   #   confirmed; that guess is gone now that real data exists — see
   #   TiktokReturnRefundNormalizer for what's still unconfirmed
   #   (return_status terminal values).
-  # - Analytics path (added 2026-07-28, NOT confirmed — same JS-SPA doc
-  #   limitation as Return/Refund before it): Get Shop Performance 202405
-  #   (GET /analytics/202405/shop/performance). #fetch_shop_analytics is
-  #   written but deliberately never called anywhere yet — the
-  #   granted_scopes on the Hidrabene credential don't include an analytics
-  #   scope today (confirm/request it in the Partner Center first), and the
-  #   response shape below is a best guess from the open-source SDK
-  #   github.com/hsib19/tiktok-shop-sdk, not verified against a real
-  #   payload. Test manually against a real credential once the scope is
-  #   approved, the same way #fetch_returns was confirmed, before wiring
-  #   this into any sync service.
+  # - Analytics path: Get Shop Performance 202405 (GET /analytics/202405/
+  #   shop/performance). Call CONFIRMED working in production (2026-07-28)
+  #   — including gmv_breakdowns[].type's new content-type taxonomy
+  #   (LIVE/VIDEO/PRODUCT_CARD, not the legacy Organic/Ads split) — see
+  #   #fetch_shop_analytics and Integrations::Tiktok::ShopAnalyticsSyncService.
+  #   The rest of the response shape is still the open-source SDK's guess,
+  #   not independently re-verified — see #fetch_shop_analytics for exactly
+  #   which fields are and aren't. ShopAnalyticsSyncSchedulerJob is written
+  #   but deliberately NOT wired into config/schedule.yml yet (commented
+  #   out) — run it manually via console first.
   class TiktokAdapter < BaseChannelAdapter
     include TiktokRequestSigning
 
@@ -311,30 +310,27 @@ module Integrations
     # Performance > Gross Revenue card > "Breakdown". GET, all params in
     # the query string (no body), same as #fetch_order_statement_transactions.
     #
-    # NOT confirmed against a real payload — same JS-SPA doc limitation
-    # already hit for Search Returns before that one got confirmed (see
-    # #fetch_returns). Shape reconstructed from the open-source SDK
-    # github.com/hsib19/tiktok-shop-sdk (packages/sdk/src/types/
-    # AnalyticsType.ts, GetShopPerformanceQuery/Response — module has no
-    # doc-verified confirmation, unlike Return/Refund's). DO NOT call this
-    # in a live sync path yet:
+    # CONFIRMED working against production (2026-07-28, tenant Hidrabene):
+    # the call succeeds, and gmv_breakdowns[].type returns the NEW
+    # content-type taxonomy — LIVE, VIDEO, PRODUCT_CARD — not the legacy
+    # Organic/Ads + Affiliate/Non-affiliate split (see
+    # ShopAnalyticsSyncService, which maps these three into
+    # ShopAnalyticsSnapshot#gmv_live/gmv_video/gmv_product_card). The rest
+    # of the field list below is still only the open-source SDK's guess
+    # (github.com/hsib19/tiktok-shop-sdk, packages/sdk/src/types/
+    # AnalyticsType.ts) — gmv/orders/buyers/product_impressions/
+    # product_page_views/refunds/cancellations_and_returns (what
+    # ShopAnalyticsSyncService reads) have NOT each been individually
+    # eyeballed against the raw response the way gmv_breakdowns.type was;
+    # double check the persisted ShopAnalyticsSnapshot's raw_response
+    # column against this list after the first manual run.
     #
-    # 1. The Hidrabene credential's granted_scopes today don't include any
-    #    analytics scope — this will 105xxx-error until that's requested
-    #    and approved in the Partner Center (best-guess scope key:
-    #    "seller.analytics.basic", by analogy with "seller.order.info" /
-    #    "seller.finance.info" / "seller.return_refund.basic" — NOT
-    #    confirmed, the Partner Center's own Access Scope page couldn't be
-    #    fetched to verify the literal string).
-    # 2. TikTok's own seller-facing docs describe this UI as being
-    #    MID-MIGRATION: some sellers now see a "Shop Analytics" module that
-    #    replaced the legacy Organic/Ads + Affiliate/Non-affiliate split
-    #    with a breakdown by content type (LIVE/Video/Product card)
-    #    instead. The `type` field inside gmv_breakdowns[] below is
-    #    correspondingly loosely typed (bare `string` in the reference SDK,
-    #    not an enum) — its real values for this tenant are unknown until
-    #    tested live; they could be the legacy taxonomy, the new one, or
-    #    both depending on which Seller Center version the shop is on.
+    # The analytics scope itself did need separate approval in the Partner
+    # Center beyond what was already granted for Order/Finance/Return —
+    # best-guess scope key "seller.analytics.basic" (by analogy with
+    # "seller.order.info" / "seller.finance.info" /
+    # "seller.return_refund.basic") was never independently verified as
+    # the literal string, since the call above already succeeds.
     #
     # Expected response (body["data"]["performance"] — an array, one entry
     # per requested interval): each entry has intervals: [{ start_date,

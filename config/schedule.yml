@@ -77,6 +77,18 @@ tiktok_pending_financial_sync_dispatch:
 #   class: "Integrations::Tiktok::ReturnRefundSyncSchedulerJob"
 #   queue: integrations
 
+# Get Shop Performance 202405 (analytics/202405/shop/performance — GMV por
+# formato de conteúdo, ver ShopAnalyticsSyncService). DESLIGADO DE PROPÓSITO
+# (2026-07-28): rodar manualmente 1x via console primeiro
+# (Integrations::Tiktok::ShopAnalyticsSyncService.call(channel_credential))
+# pra confirmar o restante do shape além do gmv_breakdowns[].type
+# (LIVE/VIDEO/PRODUCT_CARD, já confirmado). Dado muda pouco — 1x/dia é
+# suficiente quando isso for ligado, nada de sweep de alta frequência.
+# tiktok_shop_analytics_sync_dispatch:
+#   cron: "0 6 * * *"
+#   class: "Integrations::Tiktok::ShopAnalyticsSyncSchedulerJob"
+#   queue: integrations
+
 # idworks (ERP) has no webhooks — polling is the only option (see
 # Integrations::Idworks::OrderSyncService/ProductCostSyncService class
 # comments). Product cost changes infrequently, so a 6h full sync is

@@ -1339,4 +1339,144 @@ RSpec.describe Dashboard::BuildSummary do
       end
     end
   end
+
+  describe "tiktok_content_format_breakdown" do
+    let(:channel_tiktok) { tenant.channels.create!(name: "TikTok Shop", platform: "tiktok") }
+
+    def summary(channel_ids: nil)
+      params = { from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601 }
+      params[:channel_ids] = channel_ids if channel_ids
+      described_class.call(tenant: tenant, params: ActionController::Parameters.new(params))
+    end
+
+    def make_snapshot(period_start:, period_end:, synced_at:, gmv_total: 1000, gmv_live: 600, gmv_video: 300, gmv_product_card: 100)
+      tenant.shop_analytics_snapshots.create!(
+        channel: channel_tiktok, period_start: period_start, period_end: period_end, synced_at: synced_at,
+        gmv_total: gmv_total, gmv_live: gmv_live, gmv_video: gmv_video, gmv_product_card: gmv_product_card,
+        orders: 42, buyers: 38, product_impressions: 5000, product_page_views: 1200, cancellations_and_returns: 3,
+        refunds_amount: 50
+      )
+    end
+
+    it "is unavailable when there is no snapshot yet" do
+      channel_tiktok
+
+      expect(summary[:tiktok_content_format_breakdown]).to eq(available: false)
+    end
+
+    it "is unavailable when the tiktok channel is filtered out" do
+      make_snapshot(period_start: 30.days.ago.to_date, period_end: Date.current, synced_at: Time.current)
+
+      expect(summary(channel_ids: [ channel_a.id.to_s ])[:tiktok_content_format_breakdown]).to eq(available: false)
+    end
+
+    it "shows the GMV breakdown by content format with percentage of the snapshot's own total" do
+      make_snapshot(period_start: 30.days.ago.to_date, period_end: Date.current, synced_at: Time.current)
+
+      breakdown = summary[:tiktok_content_format_breakdown]
+
+      expect(breakdown[:available]).to eq(true)
+      expect(breakdown[:gmv_total]).to eq(1000.0)
+      live = breakdown[:formats].find { |row| row[:key] == "live" }
+      video = breakdown[:formats].find { |row| row[:key] == "video" }
+      product_card = breakdown[:formats].find { |row| row[:key] == "product_card" }
+      expect(live).to include(label: "LIVE", gmv: 600.0, pct: 60.0)
+      expect(video).to include(label: "Vídeo", gmv: 300.0, pct: 30.0)
+      expect(product_card).to include(label: "Card de produto", gmv: 100.0, pct: 10.0)
+    end
+
+    it "exposes the aggregate funnel (impressions -> page views -> orders -> cancellations)" do
+      make_snapshot(period_start: 30.days.ago.to_date, period_end: Date.current, synced_at: Time.current)
+
+      funnel = summary[:tiktok_content_format_breakdown][:funnel]
+
+      expect(funnel).to eq(
+        product_impressions: 5000, product_page_views: 1200, orders: 42, cancellations_and_returns: 3
+      )
+    end
+
+    it "uses the most recently synced snapshot, regardless of the dashboard's selected period" do
+      make_snapshot(period_start: 60.days.ago.to_date, period_end: 31.days.ago.to_date, synced_at: 2.days.ago, gmv_total: 500)
+      make_snapshot(period_start: 30.days.ago.to_date, period_end: Date.current, synced_at: Time.current, gmv_total: 1000)
+
+      breakdown = summary[:tiktok_content_format_breakdown]
+
+      expect(breakdown[:gmv_total]).to eq(1000.0)
+      expect(breakdown[:period_end]).to eq(Date.current.iso8601)
+    end
+  end
+
+  describe "yampi_utm_breakdown" do
+    def summary(channel_ids: nil)
+      params = { from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601 }
+      params[:channel_ids] = channel_ids if channel_ids
+      described_class.call(tenant: tenant, params: ActionController::Parameters.new(params))
+    end
+
+    def make_yampi_order(gross:, utm_source: nil, utm_medium: nil, utm_campaign: nil)
+      tenant.orders.create!(
+        channel: channel_a, external_id: "order-#{SecureRandom.hex(4)}", order_number: "N1", order_type: "sale",
+        gross_value: gross, ordered_at: 1.day.ago, utm_source: utm_source, utm_medium: utm_medium, utm_campaign: utm_campaign
+      )
+    end
+
+    it "is unavailable when the yampi channel is filtered out" do
+      channel_b # Shopify
+      make_yampi_order(gross: 100)
+
+      expect(summary(channel_ids: [ channel_b.id.to_s ])[:yampi_utm_breakdown]).to eq(available: false)
+    end
+
+    it "reports zero orders without dividing by zero when there are no yampi orders in the period" do
+      channel_a
+
+      expect(summary[:yampi_utm_breakdown]).to eq(available: true, total_orders: 0)
+    end
+
+    it "classifies an order with utm_medium present as ads, and absent as organic" do
+      make_yampi_order(gross: 100, utm_source: "facebook", utm_medium: "cpc", utm_campaign: "blackfriday")
+      make_yampi_order(gross: 50)
+
+      breakdown = summary[:yampi_utm_breakdown]
+
+      expect(breakdown[:total_orders]).to eq(2)
+      expect(breakdown[:ads]).to eq(orders_count: 1, revenue: 100.0, orders_pct: 50.0)
+      expect(breakdown[:organic]).to eq(orders_count: 1, revenue: 50.0, orders_pct: 50.0)
+    end
+
+    it "treats a blank utm_medium the same as absent (organic)" do
+      make_yampi_order(gross: 100, utm_medium: "")
+
+      expect(summary[:yampi_utm_breakdown][:organic]).to include(orders_count: 1)
+      expect(summary[:yampi_utm_breakdown][:ads]).to include(orders_count: 0)
+    end
+
+    it "ranks top_sources and top_campaigns by orders count, summing revenue, excluding blank values" do
+      make_yampi_order(gross: 100, utm_source: "facebook", utm_campaign: "blackfriday", utm_medium: "cpc")
+      make_yampi_order(gross: 80, utm_source: "facebook", utm_campaign: "blackfriday", utm_medium: "cpc")
+      make_yampi_order(gross: 30, utm_source: "google", utm_campaign: "search", utm_medium: "cpc")
+      make_yampi_order(gross: 20) # sem UTM nenhum, não entra nos rankings
+
+      breakdown = summary[:yampi_utm_breakdown]
+
+      expect(breakdown[:top_sources]).to eq(
+        [
+          { value: "facebook", orders_count: 2, revenue: 180.0 },
+          { value: "google", orders_count: 1, revenue: 30.0 }
+        ]
+      )
+      expect(breakdown[:top_campaigns]).to eq(
+        [
+          { value: "blackfriday", orders_count: 2, revenue: 180.0 },
+          { value: "search", orders_count: 1, revenue: 30.0 }
+        ]
+      )
+    end
+
+    it "excludes cancelled orders from the breakdown" do
+      make_yampi_order(gross: 100, utm_medium: "cpc").update!(status: "cancelado", order_type: "cancellation")
+
+      expect(summary[:yampi_utm_breakdown]).to eq(available: true, total_orders: 0)
+    end
+  end
 end

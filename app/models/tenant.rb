@@ -29,6 +29,7 @@ class Tenant < ApplicationRecord
   has_many :stock_replenishment_executions, dependent: :destroy
   has_many :testimonials, dependent: :destroy
   has_many :reconciliation_items, dependent: :destroy
+  has_many :shop_analytics_snapshots, dependent: :destroy
 
   validates :name, presence: true
   validates :slug, presence: true, uniqueness: true

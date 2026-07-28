@@ -92,7 +92,9 @@ module Dashboard
         freight_margin:           build_freight_margin(period),
         top_products_by_margin:   build_top_products_by_margin(period),
         top_products_by_revenue:  build_top_products_by_revenue(period),
-        product_turnover_summary: build_product_turnover_summary(period)
+        product_turnover_summary: build_product_turnover_summary(period),
+        tiktok_content_format_breakdown: build_tiktok_content_format_breakdown,
+        yampi_utm_breakdown:      build_yampi_utm_breakdown(period)
       }
     end
 
@@ -2146,6 +2148,110 @@ module Dashboard
     # order_items -> orders -> channels join as item_revenue_amount_sql.
     def item_discount_amount_sql
       "CASE WHEN channels.platform = 'tiktok' THEN order_items.seller_discount ELSE order_items.discount END"
+    end
+
+    # "Origem de aquisição" — funil por formato de conteúdo TikTok (aba
+    # Vendas). Vem de ShopAnalyticsSnapshot (Get Shop Performance 202405 —
+    # ver Integrations::Tiktok::ShopAnalyticsSyncService), sincronizado por
+    # um job separado, ainda sem cron ativo — não confundir com
+    # `period`/`orders_in_period`: o snapshot é uma janela rolante própria
+    # (30 dias corridos até o dia da sincronização), não recortável pelo
+    # filtro de período do dashboard, então este card ignora `period` de
+    # propósito e sempre mostra o snapshot mais recente disponível, com seu
+    # próprio period_start/period_end explícito na resposta — a UI rotula
+    # isso, não finge que é o período selecionado no topo do dashboard.
+    #
+    # O funil (impressões → page views → pedidos → cancelamentos) é
+    # AGREGADO, não quebrado por formato: a API do TikTok só expõe
+    # breakdown por formato pra GMV (e, por completo, impressões/page
+    # views/buyers — nenhum deles capturado ainda) — pedidos e
+    # cancelamentos não têm breakdown por formato nenhum na resposta
+    # documentada. Quebrar o funil por formato exigiria estender o schema
+    # de ShopAnalyticsSnapshot pra capturar product_impression_breakdowns/
+    # product_page_view_breakdowns também — não implementado ainda.
+    def build_tiktok_content_format_breakdown
+      return { available: false } unless filtered_platforms.include?("tiktok")
+
+      snapshot = tenant.shop_analytics_snapshots
+        .joins(:channel).where(channels: { platform: "tiktok" })
+        .order(synced_at: :desc).first
+      return { available: false } unless snapshot
+
+      gmv_total = snapshot.gmv_total.to_f
+
+      formats = [
+        { key: "live", label: "LIVE", gmv: snapshot.gmv_live.to_f },
+        { key: "video", label: "Vídeo", gmv: snapshot.gmv_video.to_f },
+        { key: "product_card", label: "Card de produto", gmv: snapshot.gmv_product_card.to_f }
+      ].map { |row| row.merge(pct: gmv_total.positive? ? (row[:gmv] / gmv_total * 100).round(2) : 0.0) }
+
+      {
+        available:    true,
+        period_start: snapshot.period_start.iso8601,
+        period_end:   snapshot.period_end.iso8601,
+        synced_at:    snapshot.synced_at.iso8601,
+        gmv_total:    gmv_total.round(2),
+        formats:      formats,
+        funnel: {
+          product_impressions:      snapshot.product_impressions,
+          product_page_views:       snapshot.product_page_views,
+          orders:                   snapshot.orders,
+          cancellations_and_returns: snapshot.cancellations_and_returns
+        },
+        buyers:         snapshot.buyers,
+        refunds_amount: snapshot.refunds_amount.to_f.round(2)
+      }
+    end
+
+    # "Origem de aquisição" — Yampi por UTM (aba Vendas). Heurística
+    # simplificada, documentada de propósito: utm_medium preenchido =
+    # "Anúncio", ausente = "Orgânico". Isso NÃO distingue perfeitamente
+    # anúncio pago de outras campanhas rastreadas por UTM (ex: e-mail
+    # marketing também usa utm_medium) — é um primeiro corte, não a
+    # classificação definitiva. Ver Integrations::Normalizers::
+    # YampiOrderNormalizer para a captura dos campos.
+    def build_yampi_utm_breakdown(period)
+      return { available: false } unless filtered_platforms.include?("yampi")
+
+      scope = financial_orders(orders_in_period(period)).joins(:channel).where(channels: { platform: "yampi" })
+      total_orders = scope.count
+      return { available: true, total_orders: 0 } if total_orders.zero?
+
+      ads_sql = "COALESCE(orders.utm_medium, '') <> ''"
+      ads_orders, ads_revenue, organic_orders, organic_revenue = scope.pick(
+        Arel.sql("COUNT(*) FILTER (WHERE #{ads_sql})"),
+        Arel.sql("COALESCE(SUM(orders.gross_value) FILTER (WHERE #{ads_sql}), 0)"),
+        Arel.sql("COUNT(*) FILTER (WHERE NOT (#{ads_sql}))"),
+        Arel.sql("COALESCE(SUM(orders.gross_value) FILTER (WHERE NOT (#{ads_sql})), 0)")
+      )
+
+      {
+        available:    true,
+        total_orders: total_orders,
+        ads:          utm_classification_line(ads_orders, ads_revenue, total_orders),
+        organic:      utm_classification_line(organic_orders, organic_revenue, total_orders),
+        top_sources:   utm_group_breakdown(scope, "utm_source"),
+        top_campaigns: utm_group_breakdown(scope, "utm_campaign")
+      }
+    end
+
+    def utm_classification_line(orders_count, revenue, total_orders)
+      {
+        orders_count: orders_count.to_i,
+        revenue:      revenue.to_f.round(2),
+        orders_pct:   total_orders.positive? ? (orders_count.to_f / total_orders * 100).round(2) : 0.0
+      }
+    end
+
+    def utm_group_breakdown(scope, column, limit: 10)
+      rows = scope
+        .where("COALESCE(orders.#{column}, '') <> ''")
+        .group("orders.#{column}")
+        .order(Arel.sql("COUNT(*) DESC"))
+        .limit(limit)
+        .pluck(Arel.sql("orders.#{column}"), Arel.sql("COUNT(*)"), Arel.sql("COALESCE(SUM(orders.gross_value), 0)"))
+
+      rows.map { |value, count, revenue| { value: value, orders_count: count.to_i, revenue: revenue.to_f.round(2) } }
     end
   end
 end

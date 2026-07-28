@@ -10,6 +10,7 @@ class Channel < ApplicationRecord
   has_many :integrations, dependent: :nullify
   has_many :financial_sources, dependent: :nullify
   has_many :financial_settlements, dependent: :nullify
+  has_many :shop_analytics_snapshots, dependent: :destroy
 
   PLATFORMS = %w[tiktok shopify yampi mercadolivre shopee].freeze
 

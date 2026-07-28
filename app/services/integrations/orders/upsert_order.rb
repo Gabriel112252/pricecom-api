@@ -85,6 +85,13 @@ module Integrations
           attrs[:seller_discount]   = @normalized[:discount].to_f
           attrs[:platform_discount] = @normalized[:platform_discount].to_f
         end
+        if order_has_utm_fields?
+          attrs[:utm_source]   = @normalized[:utm_source]
+          attrs[:utm_medium]   = @normalized[:utm_medium]
+          attrs[:utm_campaign] = @normalized[:utm_campaign]
+          attrs[:utm_content]  = @normalized[:utm_content]
+          attrs[:utm_term]     = @normalized[:utm_term]
+        end
 
         order.assign_attributes(attrs)
         order.save!
@@ -195,6 +202,10 @@ module Integrations
 
       def order_has_platform_discount_audit?
         @order_has_platform_discount_audit ||= Order.column_names.include?("platform_discount")
+      end
+
+      def order_has_utm_fields?
+        @order_has_utm_fields ||= Order.column_names.include?("utm_source")
       end
 
       def upsert_order_mapping(order)

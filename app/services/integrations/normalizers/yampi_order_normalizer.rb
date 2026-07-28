@@ -55,6 +55,15 @@ module Integrations
           ordered_at:     parse_date(@p["created_at"]),
           cart_token:     extract_cart_token,
           shipping_service: extract_shipping_service,
+          # Confirmed on a real production order (2026-07-28): all five UTM
+          # tags sit flat at the payload ROOT, no ?include= needed (unlike
+          # promocode/coupon). Every sampled order had them nil — no real
+          # populated example seen yet, but the shape is confirmed.
+          utm_source:     @p["utm_source"].to_s.presence,
+          utm_medium:     @p["utm_medium"].to_s.presence,
+          utm_campaign:   @p["utm_campaign"].to_s.presence,
+          utm_content:    @p["utm_content"].to_s.presence,
+          utm_term:       @p["utm_term"].to_s.presence,
           items:          extract_items
         }
       end

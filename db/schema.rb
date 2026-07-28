@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_07_28_100000) do
+ActiveRecord::Schema[7.2].define(version: 2026_07_28_120000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -614,6 +614,11 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_28_100000) do
     t.string "financial_pending_reason"
     t.decimal "affiliate_ads_commission_amount", precision: 12, scale: 2, default: "0.0", null: false
     t.decimal "affiliate_partner_commission_amount", precision: 12, scale: 2, default: "0.0", null: false
+    t.string "utm_source"
+    t.string "utm_medium"
+    t.string "utm_campaign"
+    t.string "utm_content"
+    t.string "utm_term"
     t.index "tenant_id, lower((status)::text)", name: "index_orders_on_tenant_id_and_lower_status"
     t.index ["channel_id", "financial_next_attempt_at"], name: "index_orders_on_channel_and_financial_next_attempt_at"
     t.index ["channel_id", "financial_synced_at"], name: "index_orders_on_channel_and_financial_synced_at"
@@ -705,6 +710,30 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_28_100000) do
     t.index ["tenant_id", "period_start", "period_end"], name: "idx_reconciliation_items_on_tenant_period"
     t.index ["tenant_id", "sku", "period_start", "period_end"], name: "idx_reconciliation_items_on_tenant_sku_period", unique: true
     t.index ["tenant_id"], name: "index_reconciliation_items_on_tenant_id"
+  end
+
+  create_table "shop_analytics_snapshots", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "channel_id", null: false
+    t.date "period_start", null: false
+    t.date "period_end", null: false
+    t.decimal "gmv_total", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "gmv_live", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "gmv_video", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "gmv_product_card", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "refunds_amount", precision: 12, scale: 2, default: "0.0", null: false
+    t.integer "orders", default: 0, null: false
+    t.integer "buyers", default: 0, null: false
+    t.integer "product_impressions", default: 0, null: false
+    t.integer "product_page_views", default: 0, null: false
+    t.integer "cancellations_and_returns", default: 0, null: false
+    t.jsonb "raw_response", default: {}, null: false
+    t.datetime "synced_at", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["channel_id"], name: "index_shop_analytics_snapshots_on_channel_id"
+    t.index ["tenant_id", "channel_id", "period_start", "period_end"], name: "index_shop_analytics_snapshots_on_tenant_channel_period", unique: true
+    t.index ["tenant_id"], name: "index_shop_analytics_snapshots_on_tenant_id"
   end
 
   create_table "stock_alert_rules", force: :cascade do |t|
@@ -923,6 +952,8 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_28_100000) do
   add_foreign_key "reconciliation_items", "integrations"
   add_foreign_key "reconciliation_items", "products"
   add_foreign_key "reconciliation_items", "tenants"
+  add_foreign_key "shop_analytics_snapshots", "channels"
+  add_foreign_key "shop_analytics_snapshots", "tenants"
   add_foreign_key "stock_alert_rules", "products"
   add_foreign_key "stock_alert_rules", "tenants"
   add_foreign_key "stock_alerts", "products"
