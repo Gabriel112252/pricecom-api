@@ -63,6 +63,17 @@ tiktok_pending_financial_sync_dispatch:
   class: "Integrations::Tiktok::PendingFinancialSyncSchedulerJob"
   queue: integrations
 
+# Motivo/status de devolução (Search Returns 202309 — Return and Refund
+# API, separada da Order API e do Finance API já usados pelos crons acima).
+# Cadência mais lenta que os polls de pedido: uma devolução muda de estado
+# em dias, não minutos, e a janela padrão (ReturnRefundSyncService::
+# DEFAULT_WINDOW_DAYS) já sobrepõe execuções o suficiente pra não perder
+# transição de status entre uma varredura e outra.
+tiktok_return_refund_sync_dispatch:
+  cron: "*/30 * * * *"
+  class: "Integrations::Tiktok::ReturnRefundSyncSchedulerJob"
+  queue: integrations
+
 # idworks (ERP) has no webhooks — polling is the only option (see
 # Integrations::Idworks::OrderSyncService/ProductCostSyncService class
 # comments). Product cost changes infrequently, so a 6h full sync is

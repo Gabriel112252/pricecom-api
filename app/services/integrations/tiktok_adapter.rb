@@ -22,6 +22,12 @@ module Integrations
   #   {product_id}/inventory/update) and Get Warehouse List 202309
   #   (GET /logistics/202309/warehouses) — see #update_stock/
   #   #resolve_warehouse_id.
+  # - Return/refund path (added 2026-07-28, NOT confirmed from Partner
+  #   Center — that page is a JS-rendered SPA that couldn't be fetched
+  #   directly): Search Returns 202309 (POST /return_refund/202309/
+  #   returns/search), shape reconstructed from the open-source SDK
+  #   github.com/hsib19/tiktok-shop-sdk — see #fetch_returns and
+  #   ReturnRefundNormalizer for the caveat and exact field list.
   class TiktokAdapter < BaseChannelAdapter
     include TiktokRequestSigning
 
@@ -36,6 +42,7 @@ module Integrations
     FINANCIAL_STATEMENTS_PATH = "/finance/202309/statements".freeze
     STATEMENT_TRANSACTIONS_PATH = "/finance/202501/statements".freeze
     ORDER_STATEMENT_TRANSACTIONS_PATH = "/finance/202501/orders".freeze
+    RETURN_SEARCH_PATH = "/return_refund/202309/returns/search".freeze
     SHOP_SCOPED_PATHS = [
       PRODUCT_SEARCH_PATH,
       PRODUCT_ACTIVATE_PATH,
@@ -44,7 +51,8 @@ module Integrations
       WAREHOUSE_LIST_PATH,
       ORDER_SEARCH_PATH,
       ORDER_DETAIL_PATH,
-      FINANCIAL_STATEMENTS_PATH
+      FINANCIAL_STATEMENTS_PATH,
+      RETURN_SEARCH_PATH
     ].freeze
     # The inventory-update path has a dynamic {product_id} segment, so it
     # can't live in SHOP_SCOPED_PATHS (an exact-match list) — matched by
@@ -250,6 +258,35 @@ module Integrations
 
       body = get(ORDER_DETAIL_PATH, query_params: { ids: ids.join(",") })
       body.dig("data", "orders") || []
+    end
+
+    # Search Returns 202309 (return_refund/202309/returns/search) — same
+    # body/query split as Get Order List: return_ids/order_ids/
+    # buyer_user_ids/return_types/return_status/create_time_ge.../
+    # update_time_ge... filters go in the JSON body, page_size/page_token/
+    # sort_* in the query string. Returns the response's "data" hash:
+    # { "return_orders" => [...], "next_page_token" => ..., "total_count" => ... }.
+    #
+    # NÃO verificado contra partner.tiktokshop.com/docv2 diretamente — a
+    # página é uma SPA renderizada via JS que não foi possível buscar (só o
+    # cabeçalho vem sem JS). O shape usado aqui (return_orders[], cada um com
+    # order_id/return_id/return_type/return_status/return_reason(_text)/
+    # create_time/update_time/refund_amount{currency,refund_total,...}/
+    # partial_refund{currency,amount}) foi reconstruído a partir do SDK
+    # open-source github.com/hsib19/tiktok-shop-sdk (packages/sdk/src/types/
+    # ReturnRefundModule.ts, módulo "Return & Refund" marcado como
+    # implementado), não da doc oficial — validar contra sandbox real antes
+    # de confiar nos nomes de campo em produção. Ver ReturnRefundNormalizer.
+    def fetch_returns(filters: {}, page_token: nil, page_size: PAGE_SIZE, sort_field: "create_time")
+      query_params = {
+        page_size:  page_size,
+        page_token: page_token.presence,
+        sort_field: sort_field,
+        sort_order: "ASC"
+      }.compact
+
+      body = post(RETURN_SEARCH_PATH, filters.compact, query_params: query_params)
+      body["data"] || {}
     end
 
     # Finance API 202501. Returns the complete statement-transactions

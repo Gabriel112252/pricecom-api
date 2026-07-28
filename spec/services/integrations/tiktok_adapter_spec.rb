@@ -198,6 +198,55 @@ RSpec.describe Integrations::TiktokAdapter do
     end
   end
 
+  describe "#fetch_returns" do
+    let(:returns_url) { "https://open-api.tiktokglobalshop.com/return_refund/202309/returns/search" }
+    let(:returns_body) do
+      {
+        code: 0,
+        message: "Success",
+        data: {
+          return_orders: [ { order_id: "1", return_id: "ret-1", return_status: "RETURN_OR_REFUND_REQUEST_SUCCESS" } ],
+          next_page_token: "tok-2",
+          total_count: 1
+        }
+      }.to_json
+    end
+
+    it "sends pagination in the query, filters in the JSON body, and shop_cipher scoped like the other search endpoints" do
+      captured_request = nil
+
+      stub_request(:post, /\A#{Regexp.escape(returns_url)}/)
+        .with { |request| captured_request = request }
+        .to_return(status: 200, body: returns_body, headers: { "Content-Type" => "application/json" })
+
+      data = adapter.fetch_returns(
+        filters: { create_time_ge: 1_623_812_664, create_time_lt: 1_623_899_064 },
+        page_token: nil
+      )
+
+      query = Rack::Utils.parse_query(captured_request.uri.query)
+      expect(query).to include("page_size" => "100", "sort_field" => "create_time", "sort_order" => "ASC")
+      expect(query).to include("shop_cipher" => "GCP_cipher")
+      expect(query).not_to include("page_token")
+      expect(JSON.parse(captured_request.body)).to eq(
+        "create_time_ge" => 1_623_812_664, "create_time_lt" => 1_623_899_064
+      )
+      expect(data["return_orders"].size).to eq(1)
+      expect(data["next_page_token"]).to eq("tok-2")
+    end
+
+    it "raises AuthenticationError with a scope hint on permission errors" do
+      stub_request(:post, /\A#{Regexp.escape(returns_url)}/)
+        .to_return(
+          status: 200,
+          body: { code: 105_005, message: "No permission to call this api" }.to_json,
+          headers: { "Content-Type" => "application/json" }
+        )
+
+      expect { adapter.fetch_returns }.to raise_error(Integrations::AuthenticationError, /escopo/)
+    end
+  end
+
   describe "#fetch_order_details" do
     let(:detail_url) { "https://open-api.tiktokglobalshop.com/order/202309/orders" }
     let(:detail_body) do

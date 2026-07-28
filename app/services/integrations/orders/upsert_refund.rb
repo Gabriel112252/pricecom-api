@@ -66,9 +66,9 @@ module Integrations
           integration: @integration,
           amount:      resolve_refund_amount,
           reason:      @normalized[:refund_reason],
-          status:      "processed",
+          status:      @normalized[:status].presence || "processed",
           refunded_at: @normalized[:ordered_at] || Time.current,
-          metadata:    (refund.metadata || {}).merge(
+          metadata:    (refund.metadata || {}).merge(@normalized[:metadata].to_h).merge(
             "order_number" => @normalized[:order_number],
             "provider"     => @provider
           )

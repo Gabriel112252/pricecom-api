@@ -268,4 +268,63 @@ RSpec.describe Integrations::Tiktok::StatementFinancialBackfillService do
       expect(statement_log_for("s-pending").status).to eq("success")
     end
   end
+
+  describe "refund-type statement transactions" do
+    let(:refund_transaction) do
+      {
+        "id" => "refund-txn-1",
+        "type" => "REFUND",
+        "order_id" => "order-1",
+        "settlement_amount" => "-30",
+        "revenue_amount" => "-30"
+      }
+    end
+
+    it "creates an OrderRefund from a refund-type transaction instead of only flagging a fallback" do
+      order = tenant.orders.create!(
+        channel: channel, external_id: "order-1", order_number: "N-1", status: "COMPLETED",
+        financial_synced_at: 1.hour.ago
+      )
+      allow(adapter).to receive(:fetch_statement_transactions).and_return([ refund_transaction ])
+
+      result = described_class.call(credential, date_from: "2026-07-01", date_to: "2026-07-01", run_id: "run-refund")
+
+      expect(result.success?).to eq(true)
+      refund = order.reload.order_refunds.sole
+      expect(refund.amount).to eq(BigDecimal("30"))
+      expect(refund.reason).to eq("tiktok_finance_statement")
+      expect(refund.status).to eq("processed")
+      expect(refund.refunded_at).to be_present
+      expect(refund.metadata["transaction_id"]).to eq("refund-txn-1")
+      expect(refund.metadata["financial_breakdown"]).to eq(refund_transaction)
+      expect(order.refund_amount).to eq(BigDecimal("30"))
+    end
+
+    it "is idempotent across separate statements referencing the same order" do
+      order = tenant.orders.create!(
+        channel: channel, external_id: "order-1", order_number: "N-1", status: "COMPLETED",
+        financial_synced_at: 1.hour.ago
+      )
+      statement_2 = { "id" => "statement-2", "statement_time" => 1_751_068_800, "payment_status" => "PAID" }
+
+      allow(adapter).to receive(:fetch_financial_statements).and_return([ statement ], [ statement_2 ])
+      allow(adapter).to receive(:fetch_statement_transactions).and_return([ refund_transaction ])
+
+      described_class.call(credential, date_from: "2026-07-01", date_to: "2026-07-01", run_id: "run-a")
+      described_class.call(credential, date_from: "2026-07-01", date_to: "2026-07-01", run_id: "run-b")
+
+      expect(order.reload.order_refunds.count).to eq(1)
+      expect(order.order_refunds.sole.amount).to eq(BigDecimal("30"))
+    end
+
+    it "does not create a refund when the order is not found locally" do
+      channel
+      allow(adapter).to receive(:fetch_statement_transactions).and_return([ refund_transaction ])
+
+      result = described_class.call(credential, date_from: "2026-07-01", date_to: "2026-07-01", run_id: "run-missing")
+
+      expect(result.success?).to eq(true)
+      expect(OrderRefund.count).to eq(0)
+    end
+  end
 end

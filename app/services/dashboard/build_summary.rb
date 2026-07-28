@@ -489,9 +489,16 @@ module Dashboard
       }
     end
 
+    # order_type não entra aqui de propósito: o normalizer de cada canal
+    # (TikTok/Yampi/Shopify) recalcula order_type a cada sync a partir do
+    # próprio status, e todo pedido cujo status vira "cancelado" ganha
+    # order_type: "cancellation" simultaneamente (mesmo write). Um filtro
+    # order_type: %w[sale refund] aqui excluiria exatamente as linhas que
+    # .canceled deveria capturar — o card "Cancelados/devolvidos" nunca
+    # encontrava nada por causa disso. status já identifica sozinho um
+    # pedido cancelado, independente do order_type que ele carrega.
     def canceled_amount_for(period)
       orders_in_period(period)
-        .where(order_type: %w[sale refund])
         .canceled
         .sum(:gross_value)
         .to_f

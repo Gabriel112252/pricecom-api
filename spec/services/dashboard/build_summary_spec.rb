@@ -169,6 +169,25 @@ RSpec.describe Dashboard::BuildSummary do
       expect(result[:kpis][:orders_count]).to eq(0)
     end
 
+    # Regressão: TiktokOrderNormalizer/YampiOrderNormalizer/ShopifyOrderNormalizer
+    # marcam order_type: "cancellation" (não "sale") assim que o status vira
+    # cancelado, e Integrations::Orders::UpsertOrder regrava order_type a cada
+    # sync — então em produção um pedido cancelado sempre chega com esse
+    # order_type, nunca "sale"/"refund" como os testes acima simulam via
+    # make_order. O card ficava sempre zerado para os três canais por causa
+    # disso; ver canceled_amount_for.
+    it "counts canceled orders even when order_type is 'cancellation', matching what the channel normalizers persist in production" do
+      make_order(channel_a, gross: 80, margin: 0, ordered_at: 1.day.ago).update!(status: "cancelled", order_type: "cancellation")
+      make_order(channel_b, gross: 20, margin: 0, ordered_at: 1.day.ago).update!(status: "cancelado", order_type: "cancellation")
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      expect(result[:revenue_breakdown][:cancellations_and_refunds]).to eq(100.0)
+      expect(result[:revenue_breakdown][:gross_revenue]).to eq(100.0)
+      expect(result[:kpis][:gross_revenue]).to eq(0.0)
+      expect(result[:kpis][:orders_count]).to eq(0)
+    end
+
     it "compares the breakdown net against the previous period" do
       make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
       make_order(channel_a, gross: 50, margin: 0, ordered_at: 10.days.ago)

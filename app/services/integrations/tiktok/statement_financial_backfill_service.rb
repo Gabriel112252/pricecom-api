@@ -136,6 +136,7 @@ module Integrations
         @synced_orders = 0
         @missing_orders = 0
         @skipped_orders = 0
+        @synced_refunds = 0
         @error_count = 0
         @rate_limit_count = 0
         @continuation_count = 0
@@ -201,6 +202,7 @@ module Integrations
         @synced_orders = metadata["synced_orders"].to_i
         @missing_orders = metadata["missing_orders"].to_i
         @skipped_orders = metadata["skipped_orders"].to_i
+        @synced_refunds = metadata["synced_refunds"].to_i
         @error_count = metadata["error_count"].to_i
         @rate_limit_count = metadata["rate_limit_count"].to_i
         @continuation_count = metadata["continuation_count"].to_i
@@ -373,8 +375,52 @@ module Integrations
           next if grouped.key?(external_id)
 
           order = channel.orders.find_by(external_id: external_id)
-          fallback_order(order, "#{parsed[:transaction_type]} sem transação de pedido completa") if order
+          next unless order
+
+          persist_refund_from_statement(statement, order, parsed) if parsed[:transaction_type] == FinancialTransactionParser::REFUND_TYPE
+          fallback_order(order, "#{parsed[:transaction_type]} sem transação de pedido completa")
         end
+      end
+
+      # A Finance API já reconhece transações tipo "refund" no statement
+      # (FinancialTransactionParser::REFUND_TYPE), mas antes desse método elas
+      # só disparavam fallback_order (re-sync do pedido) — o valor do
+      # reembolso em si nunca virava um OrderRefund. reason fica genérico
+      # ("tiktok_finance_statement") até a Return and Refund API (Tarefa 3)
+      # trazer o motivo real; UpsertRefund faz find_or_initialize_by
+      # external_id, então essa mesma linha é atualizada quando isso
+      # acontecer, sem duplicar.
+      #
+      # settlement_amount é o campo genérico de valor do statement pra
+      # qualquer transação não-ORDER (adjustment/reserve/refund — ver
+      # FinancialTransactionParser#parse_statement_payload), e chega com
+      # sinal negativo pra saídas de caixa; revenue_amount é o fallback
+      # quando settlement_amount vier zerado/ausente.
+      def persist_refund_from_statement(statement, order, parsed)
+        amount = parsed[:settlement_amount].to_f.abs
+        amount = parsed[:revenue_amount].to_f.abs if amount.zero?
+        return if amount.zero?
+
+        result = Integrations::Orders::UpsertRefund.call(
+          tenant:   tenant,
+          provider: "tiktok",
+          normalized: {
+            external_id:   order.external_id,
+            refund_amount: amount,
+            refund_reason: "tiktok_finance_statement",
+            order_number:  order.order_number,
+            ordered_at:    timestamp_for(statement["statement_time"]),
+            metadata: {
+              "transaction_id"      => parsed[:transaction_id],
+              "financial_breakdown" => parsed[:financial_breakdown]
+            }
+          }
+        )
+
+        record_error(order.external_id, "refund: #{result.error_message}") unless result.success?
+        @synced_refunds += 1 if result.success?
+      rescue => e
+        record_error(order.external_id, "refund: #{e.message}")
       end
 
       def fetch_statement_transactions(statement_log, statement_id)
@@ -604,6 +650,7 @@ module Integrations
           "synced_orders" => synced_orders,
           "missing_orders" => missing_orders,
           "skipped_orders" => skipped_orders,
+          "synced_refunds" => synced_refunds,
           "error_count" => error_count,
           "rate_limit_count" => rate_limit_count,
           "continuation_count" => continuation_count,
@@ -670,6 +717,7 @@ module Integrations
       def synced_orders = @synced_orders
       def missing_orders = @missing_orders
       def skipped_orders = @skipped_orders
+      def synced_refunds = @synced_refunds
       def error_count = @error_count
       def rate_limit_count = @rate_limit_count
       def continuation_count = @continuation_count
