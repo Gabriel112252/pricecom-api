@@ -247,6 +247,76 @@ RSpec.describe Integrations::TiktokAdapter do
     end
   end
 
+  # Método escrito para teste manual (ver comentário de #fetch_shop_analytics
+  # no adapter) — nunca chamado por nenhum job/service ainda. O shape aqui é
+  # só o que o SDK de terceiros supõe; não confirmado contra produção.
+  describe "#fetch_shop_analytics" do
+    let(:analytics_url) { "https://open-api.tiktokglobalshop.com/analytics/202405/shop/performance" }
+    let(:analytics_body) do
+      {
+        code: 0,
+        message: "Success",
+        data: {
+          performance: [
+            {
+              intervals: [
+                {
+                  start_date: "2026-07-01",
+                  end_date: "2026-07-28",
+                  gmv: { amount: "1000.00", currency: "BRL" },
+                  gmv_breakdowns: [
+                    { amount: "600.00", currency: "BRL", type: "ORGANIC" },
+                    { amount: "400.00", currency: "BRL", type: "ADS" }
+                  ]
+                }
+              ]
+            }
+          ],
+          latest_available_date: "2026-07-28"
+        }
+      }.to_json
+    end
+
+    it "sends the inclusive date range as query params, converting date_to to TikTok's exclusive end_date_lt" do
+      captured_request = nil
+
+      stub_request(:get, /\A#{Regexp.escape(analytics_url)}/)
+        .with { |request| captured_request = request }
+        .to_return(status: 200, body: analytics_body, headers: { "Content-Type" => "application/json" })
+
+      data = adapter.fetch_shop_analytics(date_from: Date.new(2026, 7, 1), date_to: Date.new(2026, 7, 28))
+
+      query = Rack::Utils.parse_query(captured_request.uri.query)
+      expect(query).to include(
+        "start_date_ge" => "2026-07-01",
+        "end_date_lt" => "2026-07-29",
+        "granularity" => "ALL",
+        "currency" => "LOCAL",
+        "with_comparison" => "false"
+      )
+      expect(query).to include("shop_cipher" => "GCP_cipher")
+      expect(data.dig("performance", 0, "intervals", 0, "gmv_breakdowns")).to eq(
+        [
+          { "amount" => "600.00", "currency" => "BRL", "type" => "ORGANIC" },
+          { "amount" => "400.00", "currency" => "BRL", "type" => "ADS" }
+        ]
+      )
+      expect(data["latest_available_date"]).to eq("2026-07-28")
+    end
+
+    it "raises AuthenticationError with a scope hint when the analytics scope isn't granted yet" do
+      stub_request(:get, /\A#{Regexp.escape(analytics_url)}/)
+        .to_return(
+          status: 200,
+          body: { code: 105_005, message: "No permission to call this api" }.to_json,
+          headers: { "Content-Type" => "application/json" }
+        )
+
+      expect { adapter.fetch_shop_analytics(date_from: Date.new(2026, 7, 1), date_to: Date.new(2026, 7, 28)) }
+        .to raise_error(Integrations::AuthenticationError, /escopo/)
+    end
+  end
+
   describe "#fetch_order_details" do
     let(:detail_url) { "https://open-api.tiktokglobalshop.com/order/202309/orders" }
     let(:detail_body) do

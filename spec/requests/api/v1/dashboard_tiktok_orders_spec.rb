@@ -99,6 +99,51 @@ RSpec.describe "Dashboard TikTok orders", type: :request do
       expect(rows.first["affiliate_commission"]).to eq(5.0)
     end
 
+    # Regressão: um pedido com comissão SÓ via anúncio pago ou SÓ via
+    # parceiro (affiliate_commission_amount zerado) ainda é um pedido com
+    # afiliado — o filtro antigo só olhava affiliate_commission_amount e
+    # perdia esses dois casos.
+    it "considers the order 'with affiliate' when only affiliate_ads_commission_amount is positive" do
+      make_order(tenant, channel_tiktok, gross: 40, ordered_at: 1.day.ago, revenue_amount: 40, settlement_amount: 40, affiliate_ads_commission_amount: 3, financial_synced_at: Time.current)
+      make_order(tenant, channel_tiktok, gross: 40, ordered_at: 1.day.ago, revenue_amount: 40, settlement_amount: 40, financial_synced_at: Time.current)
+
+      get "/api/v1/dashboard/tiktok_orders", params: { affiliate: "with" }, headers: auth_headers(operador)
+
+      rows = JSON.parse(response.body)["rows"]
+      expect(rows.size).to eq(1)
+      expect(rows.first["affiliate_commission"]).to eq(3.0)
+    end
+
+    it "considers the order 'with affiliate' when only affiliate_partner_commission_amount is positive" do
+      make_order(tenant, channel_tiktok, gross: 40, ordered_at: 1.day.ago, revenue_amount: 40, settlement_amount: 40, affiliate_partner_commission_amount: 2, financial_synced_at: Time.current)
+
+      get "/api/v1/dashboard/tiktok_orders", params: { affiliate: "with" }, headers: auth_headers(operador)
+
+      rows = JSON.parse(response.body)["rows"]
+      expect(rows.size).to eq(1)
+      expect(rows.first["affiliate_commission"]).to eq(2.0)
+    end
+
+    it "sums the three affiliate commission fields in the affiliate_commission column" do
+      make_order(
+        tenant, channel_tiktok, gross: 40, ordered_at: 1.day.ago, revenue_amount: 40, settlement_amount: 40,
+        affiliate_commission_amount: 5, affiliate_ads_commission_amount: 3, affiliate_partner_commission_amount: 2,
+        financial_synced_at: Time.current
+      )
+
+      get "/api/v1/dashboard/tiktok_orders", headers: auth_headers(operador)
+
+      expect(JSON.parse(response.body)["rows"].first["affiliate_commission"]).to eq(10.0)
+    end
+
+    it "excludes an order from 'with affiliate' when all three affiliate fields are zero" do
+      make_order(tenant, channel_tiktok, gross: 40, ordered_at: 1.day.ago, revenue_amount: 40, settlement_amount: 40, financial_synced_at: Time.current)
+
+      get "/api/v1/dashboard/tiktok_orders", params: { affiliate: "without" }, headers: auth_headers(operador)
+
+      expect(JSON.parse(response.body)["rows"].size).to eq(1)
+    end
+
     it "sorts by profit and paginates" do
       3.times do |i|
         make_order(

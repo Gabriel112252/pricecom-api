@@ -19,6 +19,8 @@ module Integrations
           :shipping_cost_amount,
           :platform_commission_amount,
           :affiliate_commission_amount,
+          :affiliate_ads_commission_amount,
+          :affiliate_partner_commission_amount,
           :item_fee_amount,
           :service_fee_amount
         ).merge(

@@ -31,6 +31,17 @@ module Integrations
   #   confirmed; that guess is gone now that real data exists — see
   #   TiktokReturnRefundNormalizer for what's still unconfirmed
   #   (return_status terminal values).
+  # - Analytics path (added 2026-07-28, NOT confirmed — same JS-SPA doc
+  #   limitation as Return/Refund before it): Get Shop Performance 202405
+  #   (GET /analytics/202405/shop/performance). #fetch_shop_analytics is
+  #   written but deliberately never called anywhere yet — the
+  #   granted_scopes on the Hidrabene credential don't include an analytics
+  #   scope today (confirm/request it in the Partner Center first), and the
+  #   response shape below is a best guess from the open-source SDK
+  #   github.com/hsib19/tiktok-shop-sdk, not verified against a real
+  #   payload. Test manually against a real credential once the scope is
+  #   approved, the same way #fetch_returns was confirmed, before wiring
+  #   this into any sync service.
   class TiktokAdapter < BaseChannelAdapter
     include TiktokRequestSigning
 
@@ -46,6 +57,7 @@ module Integrations
     STATEMENT_TRANSACTIONS_PATH = "/finance/202501/statements".freeze
     ORDER_STATEMENT_TRANSACTIONS_PATH = "/finance/202501/orders".freeze
     RETURN_SEARCH_PATH = "/return_refund/202309/returns/search".freeze
+    SHOP_PERFORMANCE_PATH = "/analytics/202405/shop/performance".freeze
     SHOP_SCOPED_PATHS = [
       PRODUCT_SEARCH_PATH,
       PRODUCT_ACTIVATE_PATH,
@@ -55,7 +67,8 @@ module Integrations
       ORDER_SEARCH_PATH,
       ORDER_DETAIL_PATH,
       FINANCIAL_STATEMENTS_PATH,
-      RETURN_SEARCH_PATH
+      RETURN_SEARCH_PATH,
+      SHOP_PERFORMANCE_PATH
     ].freeze
     # The inventory-update path has a dynamic {product_id} segment, so it
     # can't live in SHOP_SCOPED_PATHS (an exact-match list) — matched by
@@ -290,6 +303,64 @@ module Integrations
       }.compact
 
       body = post(RETURN_SEARCH_PATH, filters.compact, query_params: query_params)
+      body["data"] || {}
+    end
+
+    # Get Shop Performance 202405 (analytics/202405/shop/performance) — the
+    # API behind Seller Center > Analytics > Growth & Insights > Sales
+    # Performance > Gross Revenue card > "Breakdown". GET, all params in
+    # the query string (no body), same as #fetch_order_statement_transactions.
+    #
+    # NOT confirmed against a real payload — same JS-SPA doc limitation
+    # already hit for Search Returns before that one got confirmed (see
+    # #fetch_returns). Shape reconstructed from the open-source SDK
+    # github.com/hsib19/tiktok-shop-sdk (packages/sdk/src/types/
+    # AnalyticsType.ts, GetShopPerformanceQuery/Response — module has no
+    # doc-verified confirmation, unlike Return/Refund's). DO NOT call this
+    # in a live sync path yet:
+    #
+    # 1. The Hidrabene credential's granted_scopes today don't include any
+    #    analytics scope — this will 105xxx-error until that's requested
+    #    and approved in the Partner Center (best-guess scope key:
+    #    "seller.analytics.basic", by analogy with "seller.order.info" /
+    #    "seller.finance.info" / "seller.return_refund.basic" — NOT
+    #    confirmed, the Partner Center's own Access Scope page couldn't be
+    #    fetched to verify the literal string).
+    # 2. TikTok's own seller-facing docs describe this UI as being
+    #    MID-MIGRATION: some sellers now see a "Shop Analytics" module that
+    #    replaced the legacy Organic/Ads + Affiliate/Non-affiliate split
+    #    with a breakdown by content type (LIVE/Video/Product card)
+    #    instead. The `type` field inside gmv_breakdowns[] below is
+    #    correspondingly loosely typed (bare `string` in the reference SDK,
+    #    not an enum) — its real values for this tenant are unknown until
+    #    tested live; they could be the legacy taxonomy, the new one, or
+    #    both depending on which Seller Center version the shop is on.
+    #
+    # Expected response (body["data"]["performance"] — an array, one entry
+    # per requested interval): each entry has intervals: [{ start_date,
+    # end_date, gmv: {amount, currency}, gmv_breakdowns: [{amount,
+    # currency, type}], sku_orders, orders, avg_order_value: {amount,
+    # currency}, units_sold, buyers, buyer_breakdowns: [{amount, type}],
+    # product_impressions, product_impression_breakdowns: [...],
+    # product_page_views, product_page_view_breakdowns: [...],
+    # avg_product_page_visitors, avg_product_page_visitor_breakdowns: [...],
+    # refunds: {amount, currency}, cancellations_and_returns }], plus
+    # comparison_intervals (same shape, only present with with_comparison:
+    # true) and a top-level latest_available_date.
+    #
+    # date_to is treated as INCLUSIVE by callers (same convention as
+    # StatementFinancialBackfillService#api_to) — end_date_lt is TikTok's
+    # own EXCLUSIVE upper bound, so the next day is sent.
+    def fetch_shop_analytics(date_from:, date_to:, with_comparison: false, granularity: "ALL", currency: "LOCAL")
+      query_params = {
+        start_date_ge:   date_from.to_date.iso8601,
+        end_date_lt:     (date_to.to_date + 1.day).iso8601,
+        with_comparison: with_comparison,
+        granularity:     granularity,
+        currency:        currency
+      }.compact
+
+      body = get(SHOP_PERFORMANCE_PATH, query_params: query_params)
       body["data"] || {}
     end
 

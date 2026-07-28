@@ -424,6 +424,39 @@ RSpec.describe Dashboard::BuildSummary do
         )
       end
 
+      # Regressão: affiliate_ads_commission_amount e
+      # affiliate_partner_commission_amount eram somadas em other_fees_total
+      # (via fórmula residual, sem serem subtraídas) — perdendo a
+      # distinção. fee_and_tax_amount inclui 2.0 extra genuinamente não
+      # atribuído a nenhuma categoria nomeada, pra provar que a fórmula
+      # nova (que agora SUBTRAI os dois novos campos) chega no residual
+      # correto (2.0), não no antigo (5.0, que incluía affiliate_ads +
+      # affiliate_partner por engano).
+      it "reports affiliate_ads/affiliate_partner commission separately and excludes them from other_fees_total" do
+        make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago).update!(
+          revenue_amount: 100.0,
+          settlement_amount: 75.0,
+          fee_and_tax_amount: 25.0,
+          platform_commission_amount: 8.0,
+          affiliate_commission_amount: 4.0,
+          affiliate_ads_commission_amount: 2.0,
+          affiliate_partner_commission_amount: 1.0,
+          item_fee_amount: 5.0,
+          service_fee_amount: 3.0,
+          shipping_cost_amount: 0,
+          financial_synced_at: Time.current
+        )
+
+        financial = tiktok_summary[:financial][:tiktok_financial_breakdown]
+
+        expect(financial).to include(
+          affiliate_commission_total: 4.0,
+          affiliate_ads_commission_total: 2.0,
+          affiliate_partner_commission_total: 1.0,
+          other_fees_total: 2.0
+        )
+      end
+
       it "prioritizes populated seller and platform discount columns" do
         make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago).update!(
           discount: 7,
@@ -595,6 +628,38 @@ RSpec.describe Dashboard::BuildSummary do
         expect(platform_line).to include(amount: 8.0, orders_count: 1, percentage_of_revenue: 10.0)
         expect(affiliate_line).to include(amount: 4.0, orders_count: 1, percentage_of_revenue: 5.0)
         expect(platform_line[:key]).not_to eq(affiliate_line[:key])
+      end
+
+      it "breaks affiliate commission into three separate composition and reconciliation lines" do
+        order = make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago)
+        order.update!(
+          revenue_amount: 100.0,
+          settlement_amount: 75.0,
+          fee_and_tax_amount: 25.0,
+          platform_commission_amount: 8.0,
+          affiliate_commission_amount: 4.0,
+          affiliate_ads_commission_amount: 2.0,
+          affiliate_partner_commission_amount: 1.0,
+          item_fee_amount: 5.0,
+          service_fee_amount: 3.0,
+          shipping_cost_amount: 0,
+          financial_synced_at: Time.current
+        )
+
+        breakdown = tiktok_summary[:financial][:tiktok_financial_breakdown]
+        fee_composition = breakdown[:fee_composition]
+        reconciliation = breakdown[:reconciliation]
+
+        organic = fee_composition.find { |row| row[:key] == "affiliate_commission" }
+        ads = fee_composition.find { |row| row[:key] == "affiliate_ads_commission" }
+        partner = fee_composition.find { |row| row[:key] == "affiliate_partner_commission" }
+
+        expect(organic).to include(label: "Comissão de afiliados (orgânico)", amount: 4.0, orders_count: 1)
+        expect(ads).to include(label: "Comissão de afiliados (via anúncio)", amount: 2.0, orders_count: 1)
+        expect(partner).to include(label: "Comissão de parceiros de afiliados", amount: 1.0, orders_count: 1)
+
+        expect(reconciliation.find { |row| row[:key] == "affiliate_ads_commission" }).to include(amount: -2.0)
+        expect(reconciliation.find { |row| row[:key] == "affiliate_partner_commission" }).to include(amount: -1.0)
       end
 
       it "reports tiktok financial coverage with a pending count and a processing status" do

@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_07_27_120000) do
+ActiveRecord::Schema[7.2].define(version: 2026_07_28_100000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -612,6 +612,8 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_27_120000) do
     t.datetime "financial_last_attempt_at"
     t.datetime "financial_next_attempt_at"
     t.string "financial_pending_reason"
+    t.decimal "affiliate_ads_commission_amount", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "affiliate_partner_commission_amount", precision: 12, scale: 2, default: "0.0", null: false
     t.index "tenant_id, lower((status)::text)", name: "index_orders_on_tenant_id_and_lower_status"
     t.index ["channel_id", "financial_next_attempt_at"], name: "index_orders_on_channel_and_financial_next_attempt_at"
     t.index ["channel_id", "financial_synced_at"], name: "index_orders_on_channel_and_financial_synced_at"

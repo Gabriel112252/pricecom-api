@@ -28,6 +28,17 @@ module Integrations
         transaction_fee_amount
       ].freeze
 
+      # affiliate_commission_amount (organic creator commission),
+      # affiliate_ads_commission_amount (commission on affiliate-driven PAID
+      # ads) and affiliate_partner_commission_amount (owed to an Affiliate
+      # Partner/agency) are three distinct fee_tax_breakdown.fee keys, each
+      # with its own orders column — excluded from other_fees_amount below
+      # so folding them together doesn't lose that distinction again.
+      NON_OTHER_FEE_KEYS = %w[
+        platform_commission_amount affiliate_commission_amount affiliate_ads_commission_amount
+        affiliate_partner_commission_amount fee_per_item_sold_amount sfp_service_fee_amount
+      ].freeze
+
       def self.call(payload, origin:)
         new(payload, origin: origin).call
       end
@@ -64,8 +75,8 @@ module Integrations
 
         fields = %i[
           revenue_amount settlement_amount fee_and_tax_amount shipping_cost_amount
-          platform_commission_amount affiliate_commission_amount item_fee_amount
-          service_fee_amount other_fees_amount
+          platform_commission_amount affiliate_commission_amount affiliate_ads_commission_amount
+          affiliate_partner_commission_amount item_fee_amount service_fee_amount other_fees_amount
         ]
         result = fields.index_with { BigDecimal("0") }
         rows.each do |row|
@@ -135,13 +146,13 @@ module Integrations
         shipping_cost_amount:, fee_hashes:, processable: true)
         platform = sum_fee(fee_hashes, "platform_commission_amount")
         affiliate = sum_fee(fee_hashes, "affiliate_commission_amount")
+        affiliate_ads = sum_fee(fee_hashes, "affiliate_ads_commission_amount")
+        affiliate_partner = sum_fee(fee_hashes, "affiliate_partner_commission_amount")
         item_fee = sum_fee(fee_hashes, "fee_per_item_sold_amount")
         service_fee = sum_fee(fee_hashes, "sfp_service_fee_amount")
         other_fees = fee_hashes.sum(BigDecimal("0")) do |fee_hash|
-          fee_hash.keys.reject {
-            _1 == "platform_commission_amount" || _1 == "affiliate_commission_amount" ||
-              _1 == "fee_per_item_sold_amount" || _1 == "sfp_service_fee_amount"
-          }.sum(BigDecimal("0")) { |key| fee_amount(fee_hash[key], key, required: false) }
+          fee_hash.keys.reject { NON_OTHER_FEE_KEYS.include?(_1) }
+            .sum(BigDecimal("0")) { |key| fee_amount(fee_hash[key], key, required: false) }
         end
 
         {
@@ -155,6 +166,8 @@ module Integrations
           shipping_cost_amount: shipping_cost_amount,
           platform_commission_amount: platform,
           affiliate_commission_amount: affiliate,
+          affiliate_ads_commission_amount: affiliate_ads,
+          affiliate_partner_commission_amount: affiliate_partner,
           item_fee_amount: item_fee,
           service_fee_amount: service_fee,
           other_fees_amount: other_fees,

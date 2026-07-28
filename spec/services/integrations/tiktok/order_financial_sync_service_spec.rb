@@ -57,6 +57,8 @@ RSpec.describe Integrations::Tiktok::OrderFinancialSyncService do
     expect(order.shipping_cost_amount).to eq(BigDecimal("0"))
     expect(order.platform_commission_amount).to eq(BigDecimal("4.61"))
     expect(order.affiliate_commission_amount).to eq(BigDecimal("15.37"))
+    expect(order.affiliate_ads_commission_amount).to eq(BigDecimal("2.50"))
+    expect(order.affiliate_partner_commission_amount).to eq(BigDecimal("1.20"))
     expect(order.item_fee_amount).to eq(BigDecimal("4.00"))
     expect(order.service_fee_amount).to eq(BigDecimal("4.61"))
     expect(order.commission).to eq(BigDecimal("28.59"))

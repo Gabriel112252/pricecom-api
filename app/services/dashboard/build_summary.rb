@@ -928,35 +928,47 @@ module Dashboard
       synced_orders_count = synced_scope.count
 
       revenue_total, settlement_total, fee_total, platform_commission_total, affiliate_commission_total,
+        affiliate_ads_commission_total, affiliate_partner_commission_total,
         item_fee_total, service_fee_total, shipping_cost_total, product_cost_total,
-        platform_commission_orders, affiliate_commission_orders, item_fee_orders,
+        platform_commission_orders, affiliate_commission_orders, affiliate_ads_commission_orders,
+        affiliate_partner_commission_orders, item_fee_orders,
         service_fee_orders, shipping_cost_orders = synced_scope.pick(
           Arel.sql("COALESCE(SUM(revenue_amount), 0)"),
           Arel.sql("COALESCE(SUM(settlement_amount), 0)"),
           Arel.sql("COALESCE(SUM(fee_and_tax_amount), 0)"),
           Arel.sql("COALESCE(SUM(platform_commission_amount), 0)"),
           Arel.sql("COALESCE(SUM(affiliate_commission_amount), 0)"),
+          Arel.sql("COALESCE(SUM(affiliate_ads_commission_amount), 0)"),
+          Arel.sql("COALESCE(SUM(affiliate_partner_commission_amount), 0)"),
           Arel.sql("COALESCE(SUM(item_fee_amount), 0)"),
           Arel.sql("COALESCE(SUM(service_fee_amount), 0)"),
           Arel.sql("COALESCE(SUM(shipping_cost_amount), 0)"),
           Arel.sql("COALESCE(SUM(cost_price), 0)"),
           Arel.sql("COUNT(*) FILTER (WHERE COALESCE(platform_commission_amount, 0) > 0)"),
           Arel.sql("COUNT(*) FILTER (WHERE COALESCE(affiliate_commission_amount, 0) > 0)"),
+          Arel.sql("COUNT(*) FILTER (WHERE COALESCE(affiliate_ads_commission_amount, 0) > 0)"),
+          Arel.sql("COUNT(*) FILTER (WHERE COALESCE(affiliate_partner_commission_amount, 0) > 0)"),
           Arel.sql("COUNT(*) FILTER (WHERE COALESCE(item_fee_amount, 0) > 0)"),
           Arel.sql("COUNT(*) FILTER (WHERE COALESCE(service_fee_amount, 0) > 0)"),
           Arel.sql("COUNT(*) FILTER (WHERE COALESCE(shipping_cost_amount, 0) > 0)")
-        ) || Array.new(14, 0)
+        ) || Array.new(17, 0)
 
       revenue_f = revenue_total.to_f.round(2)
       settlement_f = settlement_total.to_f.round(2)
       fee_f = fee_total.to_f.round(2)
       platform_commission_f = platform_commission_total.to_f.round(2)
       affiliate_commission_f = affiliate_commission_total.to_f.round(2)
+      affiliate_ads_commission_f = affiliate_ads_commission_total.to_f.round(2)
+      affiliate_partner_commission_f = affiliate_partner_commission_total.to_f.round(2)
       item_fee_f = item_fee_total.to_f.round(2)
       service_fee_f = service_fee_total.to_f.round(2)
       shipping_cost_f = shipping_cost_total.to_f.round(2)
       product_cost_f = product_cost_total.to_f.round(2)
-      other_fees_f = [ fee_f - platform_commission_f - affiliate_commission_f - item_fee_f - service_fee_f, 0 ].max.round(2)
+      other_fees_f = [
+        fee_f - platform_commission_f - affiliate_commission_f - affiliate_ads_commission_f -
+          affiliate_partner_commission_f - item_fee_f - service_fee_f,
+        0
+      ].max.round(2)
       other_fees_orders = synced_scope.where(Arel.sql("(#{tiktok_other_fees_sql}) > 0")).count
 
       # Regra financeira TikTok já existente (Order#calculate_margin):
@@ -985,6 +997,8 @@ module Dashboard
         fee_and_tax_amount_total: fee_f,
         platform_commission_total: platform_commission_f,
         affiliate_commission_total: affiliate_commission_f,
+        affiliate_ads_commission_total: affiliate_ads_commission_f,
+        affiliate_partner_commission_total: affiliate_partner_commission_f,
         item_fee_total: item_fee_f,
         service_fee_total: service_fee_f,
         shipping_cost_total: shipping_cost_f,
@@ -995,7 +1009,9 @@ module Dashboard
         real_profit_available: financial_available,
         fee_composition: [
           fee_composition_line("platform_commission", "Comissão da plataforma", platform_commission_f, platform_commission_orders, revenue_f),
-          fee_composition_line("affiliate_commission", "Comissão de afiliados", affiliate_commission_f, affiliate_commission_orders, revenue_f),
+          fee_composition_line("affiliate_commission", "Comissão de afiliados (orgânico)", affiliate_commission_f, affiliate_commission_orders, revenue_f),
+          fee_composition_line("affiliate_ads_commission", "Comissão de afiliados (via anúncio)", affiliate_ads_commission_f, affiliate_ads_commission_orders, revenue_f),
+          fee_composition_line("affiliate_partner_commission", "Comissão de parceiros de afiliados", affiliate_partner_commission_f, affiliate_partner_commission_orders, revenue_f),
           fee_composition_line("item_fee", "Taxa por item", item_fee_f, item_fee_orders, revenue_f),
           fee_composition_line("service_fee", "Taxa de serviço", service_fee_f, service_fee_orders, revenue_f),
           fee_composition_line("shipping_cost", "Frete líquido", shipping_cost_f, shipping_cost_orders, revenue_f),
@@ -1004,7 +1020,9 @@ module Dashboard
         reconciliation: [
           { key: "effective_revenue", label: "Receita efetiva", amount: revenue_f },
           { key: "platform_commission", label: "Comissão da plataforma", amount: -platform_commission_f },
-          { key: "affiliate_commission", label: "Comissão de afiliados", amount: -affiliate_commission_f },
+          { key: "affiliate_commission", label: "Comissão de afiliados (orgânico)", amount: -affiliate_commission_f },
+          { key: "affiliate_ads_commission", label: "Comissão de afiliados (via anúncio)", amount: -affiliate_ads_commission_f },
+          { key: "affiliate_partner_commission", label: "Comissão de parceiros de afiliados", amount: -affiliate_partner_commission_f },
           { key: "item_fee", label: "Taxa por item", amount: -item_fee_f },
           { key: "service_fee", label: "Taxa de serviço", amount: -service_fee_f },
           { key: "other_fees", label: "Outras taxas", amount: -other_fees_f },
@@ -1213,6 +1231,8 @@ module Dashboard
       "GREATEST(COALESCE(orders.fee_and_tax_amount, 0) " \
         "- COALESCE(orders.platform_commission_amount, 0) " \
         "- COALESCE(orders.affiliate_commission_amount, 0) " \
+        "- COALESCE(orders.affiliate_ads_commission_amount, 0) " \
+        "- COALESCE(orders.affiliate_partner_commission_amount, 0) " \
         "- COALESCE(orders.item_fee_amount, 0) " \
         "- COALESCE(orders.service_fee_amount, 0), 0)"
     end
@@ -1221,6 +1241,7 @@ module Dashboard
       @tiktok_financial_fields_available ||= %w[
         financial_synced_at revenue_amount settlement_amount fee_and_tax_amount
         shipping_cost_amount platform_commission_amount affiliate_commission_amount
+        affiliate_ads_commission_amount affiliate_partner_commission_amount
         item_fee_amount service_fee_amount
       ].all? { |column| Order.column_names.include?(column) }
     end
@@ -1236,6 +1257,8 @@ module Dashboard
         fee_and_tax_amount_total: 0.0,
         platform_commission_total: 0.0,
         affiliate_commission_total: 0.0,
+        affiliate_ads_commission_total: 0.0,
+        affiliate_partner_commission_total: 0.0,
         item_fee_total: 0.0,
         service_fee_total: 0.0,
         shipping_cost_total: 0.0,

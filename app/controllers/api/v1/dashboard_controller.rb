@@ -189,8 +189,8 @@ module Api
         end
 
         case params[:affiliate]
-        when "with"    then scope = scope.where("COALESCE(orders.affiliate_commission_amount, 0) > 0")
-        when "without" then scope = scope.where("COALESCE(orders.affiliate_commission_amount, 0) = 0")
+        when "with"    then scope = scope.where("(#{tiktok_affiliate_commission_sql}) > 0")
+        when "without" then scope = scope.where("(#{tiktok_affiliate_commission_sql}) = 0")
         end
 
         scope = scope.where(Arel.sql("(#{tiktok_platform_subsidy_sql}) > 0")) if params[:subsidy] == "with"
@@ -241,6 +241,18 @@ module Api
           "ELSE 0 END"
       end
 
+      # "Tem afiliado" precisa somar os três campos de comissão (orgânico,
+      # via anúncio pago, via parceiro) — um pedido só com
+      # affiliate_ads_commission_amount/affiliate_partner_commission_amount
+      # positivo ainda é um pedido com afiliado, mesmo com
+      # affiliate_commission_amount zerado. Ver
+      # Dashboard::BuildSummary#build_tiktok_financial_breakdown para o
+      # mesmo tratamento no card de composição financeira.
+      def tiktok_affiliate_commission_sql
+        "COALESCE(orders.affiliate_commission_amount, 0) + COALESCE(orders.affiliate_ads_commission_amount, 0) " \
+          "+ COALESCE(orders.affiliate_partner_commission_amount, 0)"
+      end
+
       def tiktok_order_json(order)
         seller_discount = tiktok_order_seller_discount(order)
         platform_subsidy = tiktok_order_platform_subsidy(order)
@@ -256,7 +268,14 @@ module Api
           buyer_paid: (revenue - platform_subsidy).round(2),
           effective_revenue: revenue.round(2),
           fees_total: order.fee_and_tax_amount.to_f.round(2),
-          affiliate_commission: order.affiliate_commission_amount.to_f.round(2),
+          # Soma dos três campos (orgânico + via anúncio + via parceiro) —
+          # consistente com o filtro ?affiliate=with/without acima, que
+          # também considera qualquer um deles positivo como "tem afiliado".
+          affiliate_commission: (
+            order.affiliate_commission_amount.to_f +
+            order.affiliate_ads_commission_amount.to_f +
+            order.affiliate_partner_commission_amount.to_f
+          ).round(2),
           platform_commission: order.platform_commission_amount.to_f.round(2),
           settlement_amount: order.settlement_amount.to_f.round(2),
           product_cost: order.cost_price.to_f.round(2),
