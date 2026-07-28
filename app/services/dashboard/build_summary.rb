@@ -7,6 +7,25 @@ module Dashboard
     FINANCIAL_CONFLICT_TYPES = %w[
       nf_discount_mismatch nf_freight_mismatch settlement_amount_mismatch missing_settlement fee_rate_mismatch
     ].freeze
+
+    # TiktokOrderNormalizer#extract_items started writing correct
+    # order_items.seller_discount/platform_discount on this date (see
+    # 20260726000000_add_seller_and_platform_discount_to_order_items.rb and
+    # Integrations::Tiktok::DiscountBackfillService's class comment). The
+    # historical backfill that re-syncs pre-fix orders through the same
+    # pipeline was interrupted for good at 42,750/154,195 orders (TikTok
+    # rate limit) — order_items for the remaining ones still hold the
+    # pre-fix values (both columns default to 0, indistinguishable from "no
+    # discount" — see item_discount_split_reliable_sql for why that rules
+    # out a `seller_discount > 0 OR platform_discount > 0` check as the
+    # reliability signal). order_items rows are destroyed and fully
+    # recreated on every order re-sync (UpsertOrder#upsert_items), so
+    # order_items.created_at is a trustworthy proxy for "was this row
+    # written by the fixed normalizer" without needing a new column —
+    # anything created before this cutoff was written by the buggy one and
+    # never touched since; anything at or after it (via normal polling or
+    # via a completed run of the backfill) reflects the fix.
+    TIKTOK_ITEM_DISCOUNT_SPLIT_FIX_DEPLOYED_AT = Time.zone.parse("2026-07-26").freeze
     BRAZIL_STATES = {
       "AC" => "Acre",
       "AL" => "Alagoas",
@@ -92,6 +111,7 @@ module Dashboard
         freight_margin:           build_freight_margin(period),
         top_products_by_margin:   build_top_products_by_margin(period),
         top_products_by_revenue:  build_top_products_by_revenue(period),
+        tiktok_product_data_coverage: build_tiktok_product_data_coverage(period),
         product_turnover_summary: build_product_turnover_summary(period),
         tiktok_content_format_breakdown: build_tiktok_content_format_breakdown,
         yampi_utm_breakdown:      build_yampi_utm_breakdown(period)
@@ -1297,6 +1317,7 @@ module Dashboard
         .joins(order: :channel)
         .where(order_id: scope.select(:id), is_gift: false)
         .where("COALESCE(#{item_discount_amount_sql}, 0) > 0")
+        .where(item_discount_split_reliable_sql)
         .group("order_items.sku", "order_items.name")
         .order(Arel.sql("COALESCE(SUM(#{item_discount_amount_sql}), 0) DESC"))
         .limit(10)
@@ -1652,6 +1673,7 @@ module Dashboard
         .where(orders: { tenant_id: tenant.id, ordered_at: period_range(period) })
         .where(is_gift: false)
         .where("order_items.unit_cost IS NOT NULL AND order_items.unit_cost > 0")
+        .where(item_discount_split_reliable_sql)
         .group("products.id", "products.sku", "products.name")
         .having("SUM(#{item_revenue_amount_sql}) > 0")
         .order(Arel.sql(
@@ -1680,6 +1702,7 @@ module Dashboard
         .merge(Order.revenue_countable)
         .where(orders: { tenant_id: tenant.id, ordered_at: period_range(period) })
         .where(is_gift: false)
+        .where(item_discount_split_reliable_sql)
         .group("products.id", "products.sku", "products.name")
         .order(Arel.sql("SUM(#{item_revenue_amount_sql}) DESC"))
         .limit(10)
@@ -2148,6 +2171,51 @@ module Dashboard
     # order_items -> orders -> channels join as item_revenue_amount_sql.
     def item_discount_amount_sql
       "CASE WHEN channels.platform = 'tiktok' THEN order_items.seller_discount ELSE order_items.discount END"
+    end
+
+    # Guards item_revenue_amount_sql/item_discount_amount_sql against
+    # mixing pre- and post-fix TikTok order_items in the same SUM (see
+    # TIKTOK_ITEM_DISCOUNT_SPLIT_FIX_DEPLOYED_AT). Deliberately NOT
+    # `order_items.seller_discount > 0 OR order_items.platform_discount > 0`
+    # — that reads as "reprocessed" but a genuinely non-discounted item
+    # processed by the FIXED normalizer also has both at 0, and would be
+    # wrongly excluded from top_products_by_revenue/margin, understating
+    # real revenue for perfectly good recent orders. Non-TikTok channels
+    # never had this bug (their branch of both *_sql helpers always reads
+    # order_items.discount directly), so they're always reliable — this
+    # must never filter out Yampi/Shopify/Shopee rows. Requires the same
+    # order_items -> orders -> channels join as its siblings above.
+    def item_discount_split_reliable_sql
+      "channels.platform <> 'tiktok' OR order_items.created_at >= " \
+        "#{ActiveRecord::Base.connection.quote(TIKTOK_ITEM_DISCOUNT_SPLIT_FIX_DEPLOYED_AT)}"
+    end
+
+    # Cobertura da correção de split de desconto por item TikTok, pro aviso
+    # "Dados parciais" na aba Produtos (mesmo padrão de
+    # tiktok_coverage_partial?/TiktokCoverageBanner, mas sobre um recorte
+    # diferente: não é financial_synced_at, é order_items.created_at vs a
+    # data do deploy do fix — ver TIKTOK_ITEM_DISCOUNT_SPLIT_FIX_DEPLOYED_AT).
+    # available: false quando não há pedido TikTok nenhum no período — não
+    # há o que cobrir, então não faz sentido mostrar o aviso.
+    def build_tiktok_product_data_coverage(period)
+      base_scope = OrderItem
+        .joins(order: :channel)
+        .where(orders: { tenant_id: tenant.id, ordered_at: period_range(period) })
+        .where(channels: { platform: "tiktok" }, is_gift: false)
+
+      total_count = base_scope.count
+      return { available: false } if total_count.zero?
+
+      reliable_count = base_scope.where(item_discount_split_reliable_sql).count
+      coverage_pct = (reliable_count.to_f / total_count * 100).round(2)
+
+      {
+        available:      true,
+        coverage_pct:   coverage_pct,
+        partial:        coverage_pct < 100.0,
+        reliable_count: reliable_count,
+        total_count:    total_count
+      }
     end
 
     # "Origem de aquisição" — funil por formato de conteúdo TikTok (aba

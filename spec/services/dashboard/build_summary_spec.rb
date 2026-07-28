@@ -1182,6 +1182,20 @@ RSpec.describe Dashboard::BuildSummary do
       )
     end
 
+    # Simula uma linha de order_items de fato antiga (criada antes do fix,
+    # nunca ressincronizada — created_at é gerenciado pelo Rails no create!,
+    # então update_column é necessário pra forçar a data sem passar pelos
+    # callbacks normais).
+    def make_old_unreprocessed_item(order, unit_price:)
+      item = order.order_items.create!(
+        product: product, sku: "CAMISA-P", name: "Camisa Básica P", quantity: 1,
+        unit_price: unit_price, unit_cost: 17.23,
+        discount: 0, seller_discount: 0, platform_discount: 0
+      )
+      item.update_column(:created_at, described_class::TIKTOK_ITEM_DISCOUNT_SPLIT_FIX_DEPLOYED_AT - 1.day)
+      item
+    end
+
     it "does not double-count platform_discount in top_products_by_revenue " \
        "(unit_price is already net of both discounts; correct revenue adds platform_discount back)" do
       order = make_order(tiktok_channel, gross: 118.90, margin: 0, ordered_at: 1.day.ago)
@@ -1215,6 +1229,101 @@ RSpec.describe Dashboard::BuildSummary do
       # discount_total 42.04 (seller only, not 48.82 combined); list price
       # reconstructed as 70.08 + 42.04 + 6.78 = 118.90 => 42.04/118.90 = 35.36%.
       expect(row).to include(sku: "CAMISA-P", discount_total: 42.04, discount_pct: 35.36)
+    end
+
+    # Regressão: o backfill histórico (Integrations::Tiktok::
+    # DiscountBackfillService) parou em 42.750/154.195 pedidos por rate
+    # limit — os restantes têm order_items.seller_discount/
+    # platform_discount ainda em 0 (valor padrão pós-migration, idêntico ao
+    # de um item nunca ressincronizado). Misturar esses itens "antigos" com
+    # os já corrigidos no mesmo SUM produzia receita/margem/desconto
+    # inconsistentes pro mesmo SKU. item_discount_split_reliable_sql
+    # resolve isso via order_items.created_at (a linha é sempre destruída e
+    # recriada a cada re-sync — UpsertOrder#upsert_items), não pela
+    # presença de valor > 0 nos campos (que teria falso negativo pra item
+    # legitimamente sem desconto processado pelo normalizer já correto).
+    describe "reliability of the split (pre- vs post-fix orders)" do
+      it "excludes a pre-fix TikTok item (zeroed split, never resynced) from top_products_by_revenue/margin, instead of diluting the reprocessed one" do
+        reprocessed_order = make_order(tiktok_channel, gross: 118.90, margin: 0, ordered_at: 1.day.ago)
+        make_tiktok_item(reprocessed_order)
+
+        old_order = make_order(tiktok_channel, gross: 100.0, margin: 0, ordered_at: 1.day.ago)
+        make_old_unreprocessed_item(old_order, unit_price: 100.0)
+
+        result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+        # Só a linha reprocessada entra: 76.86, igual ao teste isolado acima.
+        # Se o item antigo entrasse, a soma ficaria 176.86 (ou pior, some
+        # revenue subtraindo um discount fantasma de 0).
+        expect(result[:top_products_by_revenue].first).to include(sku: "CAMISA-P", revenue: 76.86)
+        expect(result[:top_products_by_margin].first).to include(sku: "CAMISA-P", margin_pct: 55.17)
+      end
+
+      it "excludes a pre-fix TikTok item from coupons.by_product too" do
+        old_order = make_order(tiktok_channel, gross: 100.0, margin: 0, ordered_at: 1.day.ago)
+        make_old_unreprocessed_item(old_order, unit_price: 100.0)
+
+        result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+        expect(result[:coupons][:by_product]).to eq([])
+      end
+
+      it "does not exclude a post-fix TikTok item with a genuinely zero discount (no false negative)" do
+        order = make_order(tiktok_channel, gross: 100.0, margin: 0, ordered_at: 1.day.ago)
+        order.order_items.create!(
+          product: product, sku: "CAMISA-P", name: "Camisa Básica P", quantity: 1,
+          unit_price: 100.0, unit_cost: 17.23, discount: 0, seller_discount: 0, platform_discount: 0
+        )
+
+        result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+        expect(result[:top_products_by_revenue].first).to include(sku: "CAMISA-P", revenue: 100.0)
+      end
+
+      it "never excludes a non-TikTok item, regardless of created_at (the bug never applied to other channels)" do
+        caneca = tenant.products.create!(sku: "CANECA", name: "Caneca", cost_price: 30.0)
+        old_yampi_item = make_order(channel_a, gross: 100.0, margin: 0, ordered_at: 1.day.ago)
+          .order_items.create!(product: caneca, sku: "CANECA", name: "Caneca", quantity: 1, unit_price: 100.0, unit_cost: 30.0, discount: 0)
+        old_yampi_item.update_column(:created_at, described_class::TIKTOK_ITEM_DISCOUNT_SPLIT_FIX_DEPLOYED_AT - 1.year)
+
+        result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+        expect(result[:top_products_by_revenue].first).to include(sku: "CANECA", revenue: 100.0)
+      end
+    end
+
+    describe "tiktok_product_data_coverage" do
+      it "is unavailable when there is no TikTok order in the period" do
+        make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+
+        result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+        expect(result[:tiktok_product_data_coverage]).to eq(available: false)
+      end
+
+      it "reports 100% coverage and partial: false when every item in the period was reprocessed" do
+        order = make_order(tiktok_channel, gross: 118.90, margin: 0, ordered_at: 1.day.ago)
+        make_tiktok_item(order)
+
+        result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+        expect(result[:tiktok_product_data_coverage]).to eq(
+          available: true, coverage_pct: 100.0, partial: false, reliable_count: 1, total_count: 1
+        )
+      end
+
+      it "reports partial coverage when some TikTok items in the period are still pre-fix" do
+        reprocessed_order = make_order(tiktok_channel, gross: 118.90, margin: 0, ordered_at: 1.day.ago)
+        make_tiktok_item(reprocessed_order)
+        old_order = make_order(tiktok_channel, gross: 100.0, margin: 0, ordered_at: 1.day.ago)
+        make_old_unreprocessed_item(old_order, unit_price: 100.0)
+
+        result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+        expect(result[:tiktok_product_data_coverage]).to eq(
+          available: true, coverage_pct: 50.0, partial: true, reliable_count: 1, total_count: 2
+        )
+      end
     end
   end
 
