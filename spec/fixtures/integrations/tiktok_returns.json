@@ -1,0 +1,124 @@
+{
+  "code": 0,
+  "message": "Success",
+  "request_id": "req-returns-hidrabene-001",
+  "data": {
+    "next_page_token": "eyJvZmZzZXQiOjEwfQ==",
+    "total_count": 1866,
+    "return_orders": [
+      {
+        "return_id": "4041743519508366900",
+        "order_id": "585048935026951732",
+        "return_status": "RETURN_OR_REFUND_REQUEST_PENDING",
+        "return_type": "REFUND",
+        "return_reason": "ecom_order_delivered_refund_and_return_reason_damaged",
+        "return_reason_text": "Package arrived damaged. Example: spilled liquid, damaged box.",
+        "create_time": 1785166760,
+        "update_time": 1785166760,
+        "role": "BUYER",
+        "refund_amount": {
+          "currency": "BRL",
+          "refund_total": "157.19",
+          "refund_subtotal": "157.19",
+          "refund_shipping_fee": "0",
+          "refund_tax": "0"
+        },
+        "discount_amount": [
+          {
+            "currency": "BRL",
+            "product_seller_discount": "365.25",
+            "product_platform_discount": "17.46",
+            "shipping_fee_seller_discount": "0",
+            "shipping_fee_platform_discount": "0"
+          }
+        ],
+        "return_line_items": [
+          {
+            "return_line_item_id": "3541743519508366900",
+            "order_line_item_id": "2541743519508366900",
+            "product_name": "Produto Exemplo Hidrabene",
+            "seller_sku": "SKU-EXEMPLO-01",
+            "sku_id": "1741743519508366900",
+            "sku_name": "Padrão",
+            "refund_amount": {
+              "currency": "BRL",
+              "refund_total": "157.19",
+              "refund_subtotal": "157.19",
+              "refund_shipping_fee": "0",
+              "refund_tax": "0"
+            },
+            "product_image": {
+              "url": "https://p16-oec-va.ibyteimg.com/example.jpeg",
+              "width": 200,
+              "height": 200
+            }
+          }
+        ]
+      },
+      {
+        "return_id": "4041743519508366901",
+        "order_id": "585048935026951733",
+        "return_status": "BUYER_SHIPPED_ITEM",
+        "return_type": "RETURN_AND_REFUND",
+        "return_reason": "ecom_order_delivered_refund_and_return_reason_wrong_item",
+        "return_reason_text": "Received the wrong item.",
+        "create_time": 1785253160,
+        "update_time": 1785339560,
+        "role": "BUYER",
+        "refund_amount": {
+          "currency": "BRL",
+          "refund_total": "89.90",
+          "refund_subtotal": "89.90",
+          "refund_shipping_fee": "0",
+          "refund_tax": "0"
+        },
+        "discount_amount": [
+          {
+            "currency": "BRL",
+            "product_seller_discount": "0",
+            "product_platform_discount": "0",
+            "shipping_fee_seller_discount": "0",
+            "shipping_fee_platform_discount": "0"
+          }
+        ],
+        "return_line_items": [
+          {
+            "return_line_item_id": "3541743519508366901",
+            "order_line_item_id": "2541743519508366901",
+            "product_name": "Produto Exemplo Hidrabene 2",
+            "seller_sku": "SKU-EXEMPLO-02",
+            "sku_id": "1741743519508366901",
+            "sku_name": "Padrão",
+            "refund_amount": {
+              "currency": "BRL",
+              "refund_total": "89.90",
+              "refund_subtotal": "89.90",
+              "refund_shipping_fee": "0",
+              "refund_tax": "0"
+            },
+            "product_image": {
+              "url": "https://p16-oec-va.ibyteimg.com/example2.jpeg",
+              "width": 200,
+              "height": 200
+            }
+          }
+        ],
+        "return_method": "PLATFORM_SHIPPED",
+        "handover_method": "DROP_OFF",
+        "return_tracking_number": "BR1234567890",
+        "return_provider_name": "Correios",
+        "shipping_fee_amount": [
+          {
+            "currency": "BRL",
+            "buyer_paid_return_shipping_fee": "0",
+            "seller_paid_return_shipping_fee": "0",
+            "platform_paid_return_shipping_fee": "0"
+          }
+        ],
+        "seller_next_action_response": [
+          { "action": "SELLER_RESPOND_REFUND", "deadline": 1786549160 }
+        ]
+      }
+    ]
+  }
+}

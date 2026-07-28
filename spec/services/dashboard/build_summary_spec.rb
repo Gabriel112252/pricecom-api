@@ -1152,4 +1152,126 @@ RSpec.describe Dashboard::BuildSummary do
       expect(row).to include(sku: "CAMISA-P", discount_total: 42.04, discount_pct: 35.36)
     end
   end
+
+  describe "returns_and_refunds (aba Financeiro)" do
+    def make_item(order, sku:, name: sku, quantity: 1, unit_price: 100, is_gift: false)
+      order.order_items.create!(sku: sku, name: name, quantity: quantity, unit_price: unit_price, is_gift: is_gift)
+    end
+
+    def make_refund(order, amount:, reason: nil, refunded_at: 1.day.ago, external_id: "ext-#{SecureRandom.hex(4)}")
+      tenant.order_refunds.create!(order: order, amount: amount, reason: reason, refunded_at: refunded_at, external_id: external_id)
+    end
+
+    it "returns zeroed summary and empty rankings when there are no refunds in the period" do
+      make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      returns_and_refunds = result[:financial][:returns_and_refunds]
+      expect(returns_and_refunds[:summary]).to eq(total_refunded: 0.0, refunded_pct_of_gross: 0.0)
+      expect(returns_and_refunds[:top_returned_products]).to eq([])
+      expect(returns_and_refunds[:top_return_reasons]).to eq([])
+    end
+
+    it "sums total_refunded and computes its share of the period's gross revenue" do
+      order_a = make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+      order_b = make_order(channel_a, gross: 200, margin: 0, ordered_at: 1.day.ago)
+      make_refund(order_a, amount: 30)
+      make_refund(order_b, amount: 20)
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      # gross bruto do período = 100 + 200 = 300; reembolsado = 30 + 20 = 50 => 16.67%
+      summary = result[:financial][:returns_and_refunds][:summary]
+      expect(summary[:total_refunded]).to eq(50.0)
+      expect(summary[:refunded_pct_of_gross]).to eq(16.67)
+    end
+
+    it "includes canceled orders' gross_value in the denominator, same as the revenue breakdown card" do
+      order = make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+      make_order(channel_a, gross: 50, margin: 0, ordered_at: 1.day.ago).update!(status: "cancelado", order_type: "cancellation")
+      make_refund(order, amount: 15)
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      # gross bruto = 100 (venda válida) + 50 (cancelado) = 150; 15/150 = 10%
+      expect(result[:financial][:returns_and_refunds][:summary][:refunded_pct_of_gross]).to eq(10.0)
+    end
+
+    describe "top_returned_products" do
+      it "ranks products by refunds_count desc and splits each refund's amount evenly across the order's non-gift items" do
+        order_one_item = make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+        make_item(order_one_item, sku: "CAMISA-P", name: "Camisa P")
+        make_refund(order_one_item, amount: 40)
+
+        order_two_items = make_order(channel_a, gross: 200, margin: 0, ordered_at: 1.day.ago)
+        make_item(order_two_items, sku: "CAMISA-P", name: "Camisa P")
+        make_item(order_two_items, sku: "CALCA-M", name: "Calça M")
+        make_refund(order_two_items, amount: 60)
+
+        result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+        products = result[:financial][:returns_and_refunds][:top_returned_products]
+        camisa = products.find { |row| row[:sku] == "CAMISA-P" }
+        calca = products.find { |row| row[:sku] == "CALCA-M" }
+
+        # CAMISA-P aparece nos dois pedidos devolvidos (refunds_count = 2);
+        # valor = 40 (rateio 1/1 no pedido de 1 item) + 30 (rateio 1/2 no
+        # pedido de 2 itens) = 70.
+        expect(camisa).to include(sku: "CAMISA-P", name: "Camisa P", refunds_count: 2, refund_amount: 70.0)
+        # CALCA-M só no pedido de 2 itens: 60 * 1/2 = 30.
+        expect(calca).to include(sku: "CALCA-M", name: "Calça M", refunds_count: 1, refund_amount: 30.0)
+        expect(products.first[:sku]).to eq("CAMISA-P")
+      end
+
+      it "excludes gift items from the split and from the ranking" do
+        order = make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+        make_item(order, sku: "CAMISA-P", name: "Camisa P")
+        make_item(order, sku: "BRINDE", name: "Brinde", is_gift: true)
+        make_refund(order, amount: 50)
+
+        result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+        products = result[:financial][:returns_and_refunds][:top_returned_products]
+        expect(products.map { |row| row[:sku] }).to eq([ "CAMISA-P" ])
+        expect(products.first[:refund_amount]).to eq(50.0)
+      end
+
+      it "ignores refunds from orders outside the requested period" do
+        old_order = make_order(channel_a, gross: 100, margin: 0, ordered_at: 40.days.ago)
+        make_item(old_order, sku: "CAMISA-P")
+        make_refund(old_order, amount: 40)
+
+        result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+        expect(result[:financial][:returns_and_refunds][:top_returned_products]).to eq([])
+      end
+    end
+
+    describe "top_return_reasons" do
+      it "ranks reasons by refunds_count desc, summing the refunded amount per reason" do
+        order_a = make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+        order_b = make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+        order_c = make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+        make_refund(order_a, amount: 40, reason: "Package arrived damaged")
+        make_refund(order_b, amount: 25, reason: "Package arrived damaged")
+        make_refund(order_c, amount: 10, reason: "Received the wrong item")
+
+        result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+        reasons = result[:financial][:returns_and_refunds][:top_return_reasons]
+        expect(reasons.first).to include(reason: "Package arrived damaged", refunds_count: 2, refund_amount: 65.0)
+        expect(reasons.second).to include(reason: "Received the wrong item", refunds_count: 1, refund_amount: 10.0)
+      end
+
+      it "excludes refunds without a reason from the ranking" do
+        order = make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
+        make_refund(order, amount: 40, reason: nil)
+
+        result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+        expect(result[:financial][:returns_and_refunds][:top_return_reasons]).to eq([])
+      end
+    end
+  end
 end

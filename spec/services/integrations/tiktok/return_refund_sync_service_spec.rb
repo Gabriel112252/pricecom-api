@@ -16,7 +16,7 @@ RSpec.describe Integrations::Tiktok::ReturnRefundSyncService do
     allow(Integrations::TiktokAdapter).to receive(:new).and_return(adapter)
   end
 
-  def return_order(order_id:, return_id: "ret-#{order_id}", return_status: "RETURN_OR_REFUND_REQUEST_SUCCESS", refund_total: "50.00")
+  def return_order(order_id:, return_id: "ret-#{order_id}", return_status: "RETURN_OR_REFUND_REQUEST_PENDING", refund_total: "50.00")
     {
       "order_id" => order_id,
       "return_id" => return_id,
@@ -39,16 +39,21 @@ RSpec.describe Integrations::Tiktok::ReturnRefundSyncService do
     refund = order.reload.order_refunds.sole
     expect(refund.amount).to eq(BigDecimal("50.00"))
     expect(refund.reason).to eq("Produto com defeito")
-    expect(refund.status).to eq("processed")
+    expect(refund.status).to eq("pending")
     expect(refund.metadata["return_id"]).to eq("ret-order-1")
     expect(refund.metadata["return_type"]).to eq("REFUND")
     expect(order.refund_amount).to eq(BigDecimal("50.00"))
   end
 
-  it "keeps status pending for an in-flight return, not yet resolved" do
+  # Nenhum return_status terminal foi confirmado em produção ainda (só
+  # RETURN_OR_REFUND_REQUEST_PENDING e BUYER_SHIPPED_ITEM, ambos in-flight)
+  # — ver TiktokReturnRefundNormalizer#extract_status. Por segurança, TODO
+  # return_status hoje vira "pending" em order_refunds.status, mesmo os que
+  # o SDK de terceiros supunha serem terminais.
+  it "keeps status pending regardless of return_status, since no terminal state has been confirmed in production yet" do
     order = tenant.orders.create!(channel: channel, external_id: "order-1", order_number: "N-1", status: "DELIVERED")
     allow(adapter).to receive(:fetch_returns).and_return({
-      "return_orders" => [ return_order(order_id: "order-1", return_status: "AWAITING_BUYER_SHIP") ],
+      "return_orders" => [ return_order(order_id: "order-1", return_status: "BUYER_SHIPPED_ITEM") ],
       "next_page_token" => nil
     })
 

@@ -350,7 +350,8 @@ module Dashboard
         tiktok_financial_breakdown: tiktok_breakdown,
         tiktok_coverage: build_tiktok_coverage(tiktok_breakdown),
         tiktok_daily_series: build_tiktok_daily_series(scope, granularity),
-        consolidated: build_financial_consolidated(scope, period, current_totals, tiktok_breakdown, financial_available)
+        consolidated: build_financial_consolidated(scope, period, current_totals, tiktok_breakdown, financial_available),
+        returns_and_refunds: build_returns_and_refunds(period, current_totals)
       }
     end
 
@@ -502,6 +503,93 @@ module Dashboard
         .canceled
         .sum(:gross_value)
         .to_f
+    end
+
+    # Seção "Devoluções e Reembolsos" da aba Financeiro. Baseada em
+    # order_refunds (populada via Integrations::Orders::UpsertRefund, tanto
+    # pelo Finance API — StatementFinancialBackfillService, reason genérico
+    # "tiktok_finance_statement" — quanto pela Return and Refund API —
+    # ReturnRefundSyncService, reason = return_reason_text real). O cron
+    # dessa segunda fonte está desativado por ora (ver config/schedule.yml),
+    # então esperar volume baixo/zero é normal, não sinal de bug.
+    #
+    # orders_in_period(period) de propósito, NÃO financial_orders(period):
+    # uma devolução pode estar associada a um pedido cujo order_type virou
+    # "cancellation"/"refund" pela própria devolução (ver
+    # Integrations::Orders::UpsertRefund#update_order) — filtrar por
+    # order_type aqui reproduziria exatamente o bug do card "Cancelados/
+    # devolvidos" (ver canceled_amount_for): esconder devolução de verdade
+    # por causa do order_type que o pedido carrega.
+    def build_returns_and_refunds(period, current_totals)
+      total_refunded = tenant.order_refunds.where(order_id: orders_in_period(period).select(:id)).sum(:amount).to_f
+      gross_revenue = current_totals[:gross].to_f + canceled_amount_for(period)
+
+      {
+        summary: {
+          total_refunded: total_refunded.round(2),
+          refunded_pct_of_gross: gross_revenue.positive? ? (total_refunded / gross_revenue * 100).round(2) : 0.0
+        },
+        top_returned_products: build_top_returned_products(period),
+        top_return_reasons: build_top_return_reasons(period)
+      }
+    end
+
+    # Ranking de produtos mais devolvidos. order_refunds é por PEDIDO, não
+    # por item — não há coluna estruturada de qual SKU foi devolvido (só
+    # aparece dentro de metadata->raw->return_line_items quando a origem é
+    # a Return and Refund API, e nem sempre: refunds vindos do Finance API
+    # não têm line items nenhum). Em vez de depender de JSON aninhado
+    # inconsistente entre as duas origens, o valor de cada reembolso é
+    # rateado igualmente entre os itens não-brinde do pedido — mais robusto
+    # e sempre disponível, ao custo de não repetir exatamente o split real
+    # da TikTok quando o pedido tem mais de um item.
+    def build_top_returned_products(period, limit: 10)
+      order_ids = orders_in_period(period).select(:id)
+      item_counts_sql = OrderItem.where(is_gift: false).group(:order_id).select(:order_id, "COUNT(*) AS items_count").to_sql
+
+      rows = tenant.order_refunds
+        .joins("INNER JOIN order_items ON order_items.order_id = order_refunds.order_id AND order_items.is_gift = false")
+        .joins("INNER JOIN (#{item_counts_sql}) item_counts ON item_counts.order_id = order_refunds.order_id")
+        .where(order_id: order_ids)
+        .group("order_items.sku", "order_items.name")
+        .order(Arel.sql("COUNT(DISTINCT order_refunds.id) DESC"))
+        .limit(limit)
+        .pluck(
+          Arel.sql("order_items.sku"),
+          Arel.sql("order_items.name"),
+          Arel.sql("COUNT(DISTINCT order_refunds.id)"),
+          Arel.sql("COALESCE(SUM(order_refunds.amount / item_counts.items_count), 0)")
+        )
+
+      rows.map do |sku, name, refunds_count, amount|
+        {
+          sku:            sku,
+          name:           name.presence || sku,
+          refunds_count:  refunds_count.to_i,
+          refund_amount:  amount.to_f.round(2)
+        }
+      end
+    end
+
+    # Ranking dos motivos de devolução mais comuns. reason já vem como
+    # texto legível (return_reason_text da Return and Refund API, ou o
+    # rótulo genérico "tiktok_finance_statement" do Finance API enquanto
+    # esse motivo real não é conhecido) — ver
+    # Integrations::Normalizers::TiktokReturnRefundNormalizer.
+    def build_top_return_reasons(period, limit: 10)
+      order_ids = orders_in_period(period).select(:id)
+
+      rows = tenant.order_refunds
+        .where(order_id: order_ids)
+        .where("COALESCE(reason, '') <> ''")
+        .group(:reason)
+        .order(Arel.sql("COUNT(*) DESC"))
+        .limit(limit)
+        .pluck(:reason, Arel.sql("COUNT(*)"), Arel.sql("COALESCE(SUM(amount), 0)"))
+
+      rows.map do |reason, count, amount|
+        { reason: reason, refunds_count: count.to_i, refund_amount: amount.to_f.round(2) }
+      end
     end
 
     def build_financial_composition(current_totals, data_quality)
