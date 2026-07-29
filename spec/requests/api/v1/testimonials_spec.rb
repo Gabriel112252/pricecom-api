@@ -97,6 +97,7 @@ RSpec.describe "Testimonials", type: :request do
       file = fixture_file_upload("testimonial_photo.jpg", "image/jpeg")
       enqueued_ids = []
       allow(Testimonials::GenerateQuoteTextJob).to receive(:perform_later) { |id| enqueued_ids << id }
+      allow(Testimonials::GenerateThumbnailJob).to receive(:perform_later)
 
       post "/api/v1/testimonials", params: valid_params.merge(media: file), headers: auth_headers(admin)
 
@@ -105,6 +106,23 @@ RSpec.describe "Testimonials", type: :request do
 
     it "does not enqueue GenerateQuoteTextJob when there is no media" do
       expect(Testimonials::GenerateQuoteTextJob).not_to receive(:perform_later)
+
+      post "/api/v1/testimonials", params: valid_params, headers: auth_headers(admin)
+    end
+
+    it "enqueues GenerateThumbnailJob when media is attached" do
+      file = fixture_file_upload("testimonial_photo.jpg", "image/jpeg")
+      enqueued_ids = []
+      allow(Testimonials::GenerateQuoteTextJob).to receive(:perform_later)
+      allow(Testimonials::GenerateThumbnailJob).to receive(:perform_later) { |id| enqueued_ids << id }
+
+      post "/api/v1/testimonials", params: valid_params.merge(media: file), headers: auth_headers(admin)
+
+      expect(enqueued_ids).to eq([ tenant.testimonials.last.id ])
+    end
+
+    it "does not enqueue GenerateThumbnailJob when there is no media" do
+      expect(Testimonials::GenerateThumbnailJob).not_to receive(:perform_later)
 
       post "/api/v1/testimonials", params: valid_params, headers: auth_headers(admin)
     end

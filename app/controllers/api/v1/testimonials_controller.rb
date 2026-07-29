@@ -113,8 +113,13 @@ module Api
 
         if testimonial.save
           # Só gera algo se houver mídia (a action no model já protege isso,
-          # mas evita nem enfileirar quando não tem o que processar).
-          Testimonials::GenerateQuoteTextJob.perform_later(testimonial.id) if testimonial.media.attached?
+          # mas evita nem enfileirar quando não tem o que processar). Os dois
+          # jobs re-checam por conta própria (quote_text já preenchido,
+          # #media ser imagem) antes de fazer qualquer trabalho pesado.
+          if testimonial.media.attached?
+            Testimonials::GenerateQuoteTextJob.perform_later(testimonial.id)
+            Testimonials::GenerateThumbnailJob.perform_later(testimonial.id)
+          end
           render json: testimonial_json(testimonial), status: :created
         else
           render json: { errors: testimonial.errors.full_messages }, status: :unprocessable_entity

@@ -78,17 +78,37 @@ module Api
             rating:        testimonial.rating,
             quote_text:    testimonial.quote_text,
             media_url:     media_url(testimonial),
+            thumbnail_url: thumbnail_url(testimonial),
             source_type:   testimonial.source_type
           }
         end
 
         # Absolute URL (not the admin panel's rails_blob_path) — this is
         # consumed cross-origin by a Shopify storefront, a relative path
-        # would resolve against the STORE's own domain, not ours.
+        # would resolve against the STORE's own domain, not ours. Points at
+        # the ORIGINAL file (video or image) — only the widget's modal
+        # should load this; the carousel card must use thumbnail_url below.
         def media_url(testimonial)
           return nil unless testimonial.media.attached?
 
           Rails.application.routes.url_helpers.rails_blob_url(testimonial.media, host: public_host)
+        end
+
+        # Always an image, never a video — for image media this is just
+        # media_url (nothing extra to generate); for video media it's the
+        # frame Testimonials::GenerateThumbnailJob extracted into #thumbnail.
+        # nil (not a fallback to the raw video URL) if that job hasn't run
+        # yet — an <img> pointed at a video file wouldn't render, which is
+        # exactly the bug this field exists to avoid.
+        def thumbnail_url(testimonial)
+          return media_url(testimonial) unless video_media?(testimonial)
+          return nil unless testimonial.thumbnail.attached?
+
+          Rails.application.routes.url_helpers.rails_blob_url(testimonial.thumbnail, host: public_host)
+        end
+
+        def video_media?(testimonial)
+          testimonial.media.attached? && testimonial.media.content_type.start_with?("video/")
         end
 
         # In production this is APP_HOST (see config/environments/production.rb),

@@ -28,6 +28,14 @@ class Testimonial < ApplicationRecord
   # depoimento importado de TikTok/Shopee (ver tiktok_metadata/external_url).
   has_one_attached :media
 
+  # Sempre uma imagem (JPEG), nunca vídeo — gerado por
+  # Testimonials::GenerateThumbnailJob a partir de um frame de #media
+  # quando #media é vídeo (ver Testimonials::FrameExtractor, já usado pra
+  # gerar quote_text). Fica vazio quando #media é imagem: nesse caso o
+  # próprio media_url já serve de thumbnail, ver
+  # Api::Public::V1::TestimonialsController#thumbnail_url.
+  has_one_attached :thumbnail
+
   validates :customer_name, presence: true
   validates :source_type, presence: true, inclusion: { in: SOURCE_TYPES }
   validates :status, presence: true, inclusion: { in: STATUSES }

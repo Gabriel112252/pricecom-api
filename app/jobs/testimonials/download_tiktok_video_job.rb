@@ -7,9 +7,10 @@ module Testimonials
   # que o link é válido; o download em si é lento demais pra rodar dentro
   # da request).
   #
-  # Só dispara GenerateQuoteTextJob depois que a mídia está anexada — é por
-  # isso que o create manual (mídia já anexada na hora da request) dispara
-  # GenerateQuoteTextJob direto do controller, sem passar por este job.
+  # Só dispara GenerateQuoteTextJob/GenerateThumbnailJob depois que a mídia
+  # está anexada — é por isso que o create manual (mídia já anexada na hora
+  # da request) dispara os dois direto do controller, sem passar por este
+  # job.
   class DownloadTiktokVideoJob < ApplicationJob
     queue_as :integrations
 
@@ -30,6 +31,7 @@ module Testimonials
       testimonial.save! # força a validação de content_type (attach sozinho não roda validations do parent)
 
       Testimonials::GenerateQuoteTextJob.perform_later(testimonial.id)
+      Testimonials::GenerateThumbnailJob.perform_later(testimonial.id)
     end
 
     private

@@ -74,7 +74,7 @@ RSpec.describe "Public Testimonials API", type: :request do
       get "/api/public/v1/testimonials", params: { tenant: token }
 
       row = JSON.parse(response.body)["testimonials"].first
-      expect(row.keys.sort).to eq(%w[customer_name media_url quote_text rating source_type].sort)
+      expect(row.keys.sort).to eq(%w[customer_name media_url thumbnail_url quote_text rating source_type].sort)
     end
 
     it "includes an absolute media_url when media is attached" do
@@ -102,6 +102,49 @@ RSpec.describe "Public Testimonials API", type: :request do
 
       expect(response).to have_http_status(:ok)
       expect(JSON.parse(response.body)["testimonials"].first["quote_text"]).to be_nil
+    end
+
+    describe "thumbnail_url" do
+      it "equals media_url for image media (nothing extra to generate)" do
+        testimonial = make_published_testimonial
+        testimonial.media.attach(io: StringIO.new("fake"), filename: "foto.jpg", content_type: "image/jpeg")
+
+        get "/api/public/v1/testimonials", params: { tenant: token }
+
+        row = JSON.parse(response.body)["testimonials"].first
+        expect(row["thumbnail_url"]).to eq(row["media_url"])
+      end
+
+      it "points to the generated thumbnail attachment for video media, never the video file itself" do
+        testimonial = make_published_testimonial
+        testimonial.media.attach(io: StringIO.new("fake-mp4"), filename: "v.mp4", content_type: "video/mp4")
+        testimonial.thumbnail.attach(io: StringIO.new("fake-frame"), filename: "thumb.jpg", content_type: "image/jpeg")
+
+        get "/api/public/v1/testimonials", params: { tenant: token }
+
+        row = JSON.parse(response.body)["testimonials"].first
+        expect(row["thumbnail_url"]).to match(%r{\Ahttp://})
+        expect(row["thumbnail_url"]).not_to eq(row["media_url"])
+      end
+
+      it "is nil (not the raw video URL) for video media whose thumbnail hasn't been generated yet" do
+        testimonial = make_published_testimonial
+        testimonial.media.attach(io: StringIO.new("fake-mp4"), filename: "v.mp4", content_type: "video/mp4")
+
+        get "/api/public/v1/testimonials", params: { tenant: token }
+
+        row = JSON.parse(response.body)["testimonials"].first
+        expect(row["thumbnail_url"]).to be_nil
+        expect(row["media_url"]).to be_present
+      end
+
+      it "is nil when there is no media attached at all" do
+        make_published_testimonial
+
+        get "/api/public/v1/testimonials", params: { tenant: token }
+
+        expect(JSON.parse(response.body)["testimonials"].first["thumbnail_url"]).to be_nil
+      end
     end
 
     it "uses the configured public host, never the request's own Host header (e.g. an internal call hitting the app as localhost)" do
