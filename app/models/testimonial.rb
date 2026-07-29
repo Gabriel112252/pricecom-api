@@ -31,7 +31,6 @@ class Testimonial < ApplicationRecord
   validates :customer_name, presence: true
   validates :source_type, presence: true, inclusion: { in: SOURCE_TYPES }
   validates :status, presence: true, inclusion: { in: STATUSES }
-  validates :quote_text, presence: true, unless: :draft?
   validates :rating, inclusion: { in: 1..5 }, allow_nil: true
 
   validate :product_belongs_to_same_tenant, if: -> { product_id.present? }

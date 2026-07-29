@@ -95,6 +95,15 @@ RSpec.describe "Public Testimonials API", type: :request do
       expect(JSON.parse(response.body)["testimonials"].first["media_url"]).to be_nil
     end
 
+    it "returns quote_text null, without breaking, for a rating/media-only testimonial" do
+      make_published_testimonial(quote_text: nil)
+
+      get "/api/public/v1/testimonials", params: { tenant: token }
+
+      expect(response).to have_http_status(:ok)
+      expect(JSON.parse(response.body)["testimonials"].first["quote_text"]).to be_nil
+    end
+
     it "uses the configured public host, never the request's own Host header (e.g. an internal call hitting the app as localhost)" do
       testimonial = make_published_testimonial
       testimonial.media.attach(io: StringIO.new("fake"), filename: "foto.jpg", content_type: "image/jpeg")

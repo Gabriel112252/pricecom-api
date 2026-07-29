@@ -303,6 +303,18 @@ RSpec.describe "Testimonials", type: :request do
       expect(testimonial.published_at).to be_present
     end
 
+    it "approves and publishes a testimonial with no quote_text — rating/media-only is a valid testimonial" do
+      testimonial = tenant.testimonials.create!(valid_params.merge(source_type: "manual", status: "draft", quote_text: nil))
+
+      post "/api/v1/testimonials/#{testimonial.id}/approve", headers: auth_headers(admin)
+      expect(response).to have_http_status(:ok)
+
+      post "/api/v1/testimonials/#{testimonial.id}/publish", headers: auth_headers(admin)
+      expect(response).to have_http_status(:ok)
+      expect(testimonial.reload.status).to eq("published")
+      expect(testimonial.quote_text).to be_nil
+    end
+
     it "rejects a draft testimonial" do
       testimonial = tenant.testimonials.create!(valid_params.merge(source_type: "manual", status: "draft"))
 

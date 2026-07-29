@@ -9,6 +9,19 @@ RSpec.describe Testimonial do
     )
   end
 
+  describe "quote_text" do
+    it "is optional in every status — a testimonial can be rating/media-only" do
+      testimonial = make_testimonial(quote_text: nil, status: "draft")
+      expect(testimonial).to be_valid
+
+      testimonial.status = "approved"
+      expect(testimonial).to be_valid
+
+      testimonial.status = "published"
+      expect(testimonial).to be_valid
+    end
+  end
+
   describe "media content type" do
     it "is valid without any media attached" do
       expect(make_testimonial).to be_valid
