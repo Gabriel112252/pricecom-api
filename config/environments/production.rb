@@ -32,6 +32,16 @@ Rails.application.configure do
   # Store uploaded files on the local file system (see config/storage.yml for options).
   config.active_storage.service = :local
 
+  # Public domain used to build absolute URLs (e.g. rails_blob_url for
+  # testimonial media). Must NOT come from the incoming request — internal
+  # calls (health checks, curl from inside the container) hit the app as
+  # "localhost", which would otherwise get baked into URLs shipped to
+  # customers' browsers. Same fallback host already used for the frontend
+  # in Api::V1::TiktokOauthController#frontend_base_url.
+  app_host = ENV.fetch("APP_HOST", "https://pricecom-pricecom-api.dzxtro.easypanel.host")
+  config.action_mailer.default_url_options = { host: app_host }
+  Rails.application.routes.default_url_options[:host] = app_host
+
   # Mount Action Cable outside main process or domain.
   # config.action_cable.mount_path = nil
   # config.action_cable.url = "wss://example.com/cable"

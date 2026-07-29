@@ -39,8 +39,9 @@ module Api
 
         # Keyed on tenant + product filter so the home widget and every
         # per-product widget cache independently; media_url is baked into
-        # the cached payload (it embeds request.base_url), which is fine —
-        # this API is only ever served from one host per environment.
+        # the cached payload using public_host (never the request's own
+        # Host header), so it's stable regardless of which caller/origin
+        # populated the cache.
         def cached_testimonials
           Rails.cache.fetch(cache_key, expires_in: CACHE_EXPIRES_IN) do
             testimonials_scope.map { |testimonial| testimonial_json(testimonial) }
@@ -87,7 +88,17 @@ module Api
         def media_url(testimonial)
           return nil unless testimonial.media.attached?
 
-          Rails.application.routes.url_helpers.rails_blob_url(testimonial.media, host: request.base_url)
+          Rails.application.routes.url_helpers.rails_blob_url(testimonial.media, host: public_host)
+        end
+
+        # In production this is APP_HOST (see config/environments/production.rb),
+        # set once and never derived from the request — request.base_url would
+        # report "localhost" for internal calls (health checks, curl from
+        # inside the container), breaking media_url for the end customer.
+        # Dev/test don't set routes.default_url_options[:host], so they fall
+        # back to request.base_url as before.
+        def public_host
+          Rails.application.routes.default_url_options[:host] || request.base_url
         end
       end
     end

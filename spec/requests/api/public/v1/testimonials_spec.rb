@@ -95,6 +95,23 @@ RSpec.describe "Public Testimonials API", type: :request do
       expect(JSON.parse(response.body)["testimonials"].first["media_url"]).to be_nil
     end
 
+    it "uses the configured public host, never the request's own Host header (e.g. an internal call hitting the app as localhost)" do
+      testimonial = make_published_testimonial
+      testimonial.media.attach(io: StringIO.new("fake"), filename: "foto.jpg", content_type: "image/jpeg")
+
+      original_host = Rails.application.routes.default_url_options[:host]
+      Rails.application.routes.default_url_options[:host] = "https://pricecom-pricecom-api.dzxtro.easypanel.host"
+
+      begin
+        get "/api/public/v1/testimonials", params: { tenant: token }, headers: { "Host" => "localhost" }
+      ensure
+        Rails.application.routes.default_url_options[:host] = original_host
+      end
+
+      media_url = JSON.parse(response.body)["testimonials"].first["media_url"]
+      expect(media_url).to start_with("https://pricecom-pricecom-api.dzxtro.easypanel.host")
+    end
+
     describe "shopify_product_id filter" do
       it "returns only testimonials linked to that product" do
         other_product = tenant.products.create!(sku: "SKU-2", name: "Produto 2", cost_price: 5)
