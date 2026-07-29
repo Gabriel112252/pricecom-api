@@ -9,11 +9,17 @@ RSpec.describe "Public Testimonials API", type: :request do
   let(:token)   { tenant.testimonials_public_token }
   let(:product) { tenant.products.create!(sku: "SKU-1", name: "Produto 1", cost_price: 10) }
 
-  def make_published_testimonial(product: nil, customer_name: "Ana", rating: 5, quote_text: "Ótimo!")
+  # product: aceita um produto só (mais comum nos testes) ou products: uma
+  # lista — os dois viram testimonial.product_ids= (has_many :through
+  # testimonial_products), nunca a coluna product_id deprecada (ver
+  # Testimonial#product).
+  def make_published_testimonial(product: nil, products: nil, customer_name: "Ana", rating: 5, quote_text: "Ótimo!")
     testimonial = tenant.testimonials.create!(
       customer_name: customer_name, source_type: "manual", status: "draft",
-      product: product, rating: rating, quote_text: quote_text
+      rating: rating, quote_text: quote_text
     )
+    linked = products || (product ? [ product ] : [])
+    testimonial.product_ids = linked.map(&:id) if linked.any?
     testimonial.approve!
     testimonial.publish!
     testimonial
@@ -205,6 +211,34 @@ RSpec.describe "Public Testimonials API", type: :request do
         get "/api/public/v1/testimonials", params: { tenant: token, shopify_product_id: "808950810" }
 
         expect(JSON.parse(response.body)["testimonials"]).to eq([])
+      end
+
+      it "matches a testimonial linked to several products, on any one of them (e.g. same testimonial across quantity variations)" do
+        variation_1un = tenant.products.create!(sku: "FPS70-1", name: "Protetor FPS 70 (1un)", cost_price: 10)
+        variation_2un = tenant.products.create!(sku: "FPS70-2", name: "Protetor FPS 70 (2un)", cost_price: 18)
+        variation_3un = tenant.products.create!(sku: "FPS70-3", name: "Protetor FPS 70 (3un)", cost_price: 25)
+        link_shopify_product(variation_1un, external_product_id: "1un-parent")
+        link_shopify_product(variation_2un, external_product_id: "2un-parent")
+        link_shopify_product(variation_3un, external_product_id: "3un-parent")
+        make_published_testimonial(products: [ variation_1un, variation_2un, variation_3un ], customer_name: "Multi")
+
+        %w[1un-parent 2un-parent 3un-parent].each do |external_product_id|
+          get "/api/public/v1/testimonials", params: { tenant: token, shopify_product_id: external_product_id }
+
+          names = JSON.parse(response.body)["testimonials"].map { |t| t["customer_name"] }
+          expect(names).to eq([ "Multi" ]), "esperava aparecer pro shopify_product_id=#{external_product_id}"
+        end
+      end
+
+      it "does not duplicate a testimonial in the response when more than one of its linked products matches the filter" do
+        other_product = tenant.products.create!(sku: "SKU-2", name: "Produto 2", cost_price: 5)
+        link_shopify_product(product, external_product_id: "shared-parent")
+        link_shopify_product(other_product, external_product_id: "shared-parent")
+        make_published_testimonial(products: [ product, other_product ], customer_name: "Duas listagens, um parent")
+
+        get "/api/public/v1/testimonials", params: { tenant: token, shopify_product_id: "shared-parent" }
+
+        expect(JSON.parse(response.body)["testimonials"].size).to eq(1)
       end
     end
 

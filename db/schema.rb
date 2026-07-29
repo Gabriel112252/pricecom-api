@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_07_28_130000) do
+ActiveRecord::Schema[7.2].define(version: 2026_07_29_150000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -855,6 +855,16 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_28_130000) do
     t.index ["tv_token"], name: "index_tenants_on_tv_token", unique: true
   end
 
+  create_table "testimonial_products", force: :cascade do |t|
+    t.bigint "testimonial_id", null: false
+    t.bigint "product_id", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["product_id"], name: "index_testimonial_products_on_product_id"
+    t.index ["testimonial_id", "product_id"], name: "index_testimonial_products_on_testimonial_id_and_product_id", unique: true
+    t.index ["testimonial_id"], name: "index_testimonial_products_on_testimonial_id"
+  end
+
   create_table "testimonials", force: :cascade do |t|
     t.bigint "tenant_id", null: false
     t.bigint "product_id"
@@ -971,6 +981,8 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_28_130000) do
   add_foreign_key "stock_replenishment_executions", "tenants"
   add_foreign_key "stock_snapshots", "products"
   add_foreign_key "stock_snapshots", "tenants"
+  add_foreign_key "testimonial_products", "products"
+  add_foreign_key "testimonial_products", "testimonials"
   add_foreign_key "testimonials", "products"
   add_foreign_key "testimonials", "tenants"
   add_foreign_key "users", "tenants"

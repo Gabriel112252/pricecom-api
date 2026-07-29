@@ -65,7 +65,14 @@ module Api
             .distinct
             .pluck(:product_id)
 
-          scope.where(product_id: product_ids)
+          # Um testimonial pode estar vinculado a vários produtos (ex: mesmo
+          # depoimento aparecendo em 3 variações de quantidade de um mesmo
+          # produto) — casa se QUALQUER um deles bater com o produto da
+          # página, não só o (antigo) product_id singular.
+          scope
+            .joins(:testimonial_products)
+            .where(testimonial_products: { product_id: product_ids })
+            .distinct
         end
 
         def shopify_product_id

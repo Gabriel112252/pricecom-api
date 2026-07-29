@@ -9,6 +9,43 @@ RSpec.describe Testimonial do
     )
   end
 
+  describe "products" do
+    let(:product_a) { tenant.products.create!(sku: "SKU-A", name: "Produto A", cost_price: 10) }
+    let(:product_b) { tenant.products.create!(sku: "SKU-B", name: "Produto B", cost_price: 10) }
+
+    it "can be linked to more than one product" do
+      testimonial = tenant.testimonials.create!(customer_name: "Ana", source_type: "manual", status: "draft")
+
+      testimonial.product_ids = [ product_a.id, product_b.id ]
+
+      expect(testimonial.reload.products).to contain_exactly(product_a, product_b)
+    end
+
+    it "is valid with no product linked at all (rating/media-only testimonial)" do
+      testimonial = make_testimonial
+
+      expect(testimonial).to be_valid
+      expect(testimonial.products).to eq([])
+    end
+
+    it "rejects a product that belongs to a different tenant" do
+      other_tenant = Tenant.create!(name: "Outra Loja", slug: "outra-#{SecureRandom.hex(4)}")
+      other_product = other_tenant.products.create!(sku: "SKU-X", name: "Produto X", cost_price: 10)
+      testimonial = tenant.testimonials.create!(customer_name: "Ana", source_type: "manual", status: "draft")
+
+      expect { testimonial.product_ids = [ other_product.id ] }
+        .to raise_error(ActiveRecord::RecordInvalid, /inválido/)
+      expect(testimonial.reload.products).to eq([])
+    end
+
+    it "removing a testimonial destroys its testimonial_products rows too" do
+      testimonial = tenant.testimonials.create!(customer_name: "Ana", source_type: "manual", status: "draft")
+      testimonial.product_ids = [ product_a.id ]
+
+      expect { testimonial.destroy! }.to change(TestimonialProduct, :count).by(-1)
+    end
+  end
+
   describe "quote_text" do
     it "is optional in every status — a testimonial can be rating/media-only" do
       testimonial = make_testimonial(quote_text: nil, status: "draft")

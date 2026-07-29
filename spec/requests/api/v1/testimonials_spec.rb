@@ -14,7 +14,8 @@ RSpec.describe "Testimonials", type: :request do
 
   describe "GET /api/v1/testimonials" do
     it "lists the tenant's testimonials" do
-      tenant.testimonials.create!(valid_params.merge(source_type: "manual", status: "draft"))
+      testimonial = tenant.testimonials.create!(valid_params.except(:product_id).merge(source_type: "manual", status: "draft"))
+      testimonial.product_ids = [ product.id ]
 
       get "/api/v1/testimonials", headers: auth_headers(operador)
 
@@ -22,7 +23,7 @@ RSpec.describe "Testimonials", type: :request do
       body = JSON.parse(response.body)
       expect(body["testimonials"].size).to eq(1)
       expect(body["testimonials"].first["customer_name"]).to eq("Ana")
-      expect(body["testimonials"].first["product"]).to eq("id" => product.id, "name" => product.name, "sku" => product.sku)
+      expect(body["testimonials"].first["products"]).to eq([ { "id" => product.id, "name" => product.name, "sku" => product.sku } ])
       expect(body["meta"]["total_count"]).to eq(1)
     end
 
@@ -125,6 +126,46 @@ RSpec.describe "Testimonials", type: :request do
       expect(Testimonials::GenerateThumbnailJob).not_to receive(:perform_later)
 
       post "/api/v1/testimonials", params: valid_params, headers: auth_headers(admin)
+    end
+
+    it "links to a single product via the legacy singular product_id param (backward compat)" do
+      post "/api/v1/testimonials", params: valid_params, headers: auth_headers(admin)
+
+      expect(response).to have_http_status(:created)
+      expect(tenant.testimonials.last.product_ids).to eq([ product.id ])
+    end
+
+    it "links to multiple products via product_ids" do
+      other_product = tenant.products.create!(sku: "SKU-2", name: "Produto 2", cost_price: 5)
+
+      post "/api/v1/testimonials",
+        params: valid_params.except(:product_id).merge(product_ids: [ product.id, other_product.id ]),
+        headers: auth_headers(admin)
+
+      expect(response).to have_http_status(:created)
+      expect(tenant.testimonials.last.product_ids.sort).to eq([ product.id, other_product.id ].sort)
+      expect(JSON.parse(response.body)["products"].map { |p| p["id"] }.sort).to eq([ product.id, other_product.id ].sort)
+    end
+
+    it "creates with no product linked when neither product_id nor product_ids is sent" do
+      post "/api/v1/testimonials", params: valid_params.except(:product_id), headers: auth_headers(admin)
+
+      expect(response).to have_http_status(:created)
+      expect(tenant.testimonials.last.products).to eq([])
+    end
+
+    it "rejects a product_id belonging to a different tenant, without creating the testimonial" do
+      other_tenant = Tenant.create!(name: "Outra Loja", slug: "outra-loja-#{SecureRandom.hex(4)}")
+      other_product = other_tenant.products.create!(sku: "SKU-X", name: "Produto X", cost_price: 10)
+
+      expect {
+        post "/api/v1/testimonials",
+          params: valid_params.except(:product_id).merge(product_ids: [ other_product.id ]),
+          headers: auth_headers(admin)
+      }.not_to change(Testimonial, :count)
+
+      expect(response).to have_http_status(:unprocessable_entity)
+      expect(JSON.parse(response.body)["errors"]).to be_present
     end
 
     it "rejects invalid params" do
@@ -278,6 +319,50 @@ RSpec.describe "Testimonials", type: :request do
       put "/api/v1/testimonials/#{other_testimonial.id}", params: { quote_text: "x" }, headers: auth_headers(admin)
 
       expect(response).to have_http_status(:not_found)
+    end
+
+    it "leaves already-linked products untouched when neither product_id nor product_ids is sent" do
+      testimonial = tenant.testimonials.create!(customer_name: "Ana", source_type: "manual", status: "draft")
+      testimonial.product_ids = [ product.id ]
+
+      put "/api/v1/testimonials/#{testimonial.id}", params: { quote_text: "Editado" }, headers: auth_headers(admin)
+
+      expect(response).to have_http_status(:ok)
+      expect(testimonial.reload.product_ids).to eq([ product.id ])
+    end
+
+    it "syncs to a new set of products via product_ids (adds and removes in the same call)" do
+      other_product = tenant.products.create!(sku: "SKU-2", name: "Produto 2", cost_price: 5)
+      testimonial = tenant.testimonials.create!(customer_name: "Ana", source_type: "manual", status: "draft")
+      testimonial.product_ids = [ product.id ]
+
+      put "/api/v1/testimonials/#{testimonial.id}", params: { product_ids: [ other_product.id ] }, headers: auth_headers(admin)
+
+      expect(response).to have_http_status(:ok)
+      expect(testimonial.reload.product_ids).to eq([ other_product.id ])
+    end
+
+    it "clears all linked products when product_ids is sent empty" do
+      testimonial = tenant.testimonials.create!(customer_name: "Ana", source_type: "manual", status: "draft")
+      testimonial.product_ids = [ product.id ]
+
+      put "/api/v1/testimonials/#{testimonial.id}", params: { product_ids: [ "" ] }, headers: auth_headers(admin)
+
+      expect(response).to have_http_status(:ok)
+      expect(testimonial.reload.products).to eq([])
+    end
+
+    it "rejects syncing to a product from a different tenant, leaving existing links untouched" do
+      other_tenant = Tenant.create!(name: "Outra Loja", slug: "outra-loja-#{SecureRandom.hex(4)}")
+      other_product = other_tenant.products.create!(sku: "SKU-X", name: "Produto X", cost_price: 10)
+      testimonial = tenant.testimonials.create!(customer_name: "Ana", source_type: "manual", status: "draft")
+      testimonial.product_ids = [ product.id ]
+
+      put "/api/v1/testimonials/#{testimonial.id}", params: { product_ids: [ other_product.id ] }, headers: auth_headers(admin)
+
+      expect(response).to have_http_status(:unprocessable_entity)
+      expect(JSON.parse(response.body)["errors"]).to be_present
+      expect(testimonial.reload.product_ids).to eq([ product.id ])
     end
   end
 

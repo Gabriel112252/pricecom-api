@@ -12,7 +12,7 @@ module Api
       before_action :require_admin!, only: [ :create, :update, :destroy, :approve, :publish, :reject ]
 
       def index
-        testimonials = apply_filters(current_tenant.testimonials.includes(:product)).order(created_at: :desc)
+        testimonials = apply_filters(current_tenant.testimonials.includes(:products)).order(created_at: :desc)
 
         per   = [ [ params.fetch(:per_page, PER_PAGE_DEFAULT).to_i, 1 ].max, PER_PAGE_MAX ].min
         paged = testimonials.page(params[:page]).per(per)
@@ -54,11 +54,20 @@ module Api
       def update
         testimonial = current_tenant.testimonials.find(params[:id])
 
-        if testimonial.update(testimonial_params)
-          render json: testimonial_json(testimonial)
-        else
-          render json: { errors: testimonial.errors.full_messages }, status: :unprocessable_entity
+        # product_ids= num registro já persistido grava/apaga na tabela de
+        # junção na hora (não espera testimonial.save) — por isso vai numa
+        # transaction junto com o update dos demais campos, e qualquer
+        # RecordInvalid (ex: produto de outro tenant, ver
+        # TestimonialProduct#product_belongs_to_same_tenant) é convertido no
+        # mesmo formato de erro 422 do resto do controller, em vez de
+        # estourar como 500.
+        Testimonial.transaction do
+          testimonial.product_ids = requested_product_ids if product_ids_requested?
+          testimonial.update!(testimonial_params)
         end
+        render json: testimonial_json(testimonial)
+      rescue ActiveRecord::RecordInvalid => e
+        render json: { errors: e.record.errors.full_messages }, status: :unprocessable_entity
       end
 
       def destroy
@@ -110,6 +119,11 @@ module Api
         testimonial = current_tenant.testimonials.new(
           testimonial_params.merge(source_type: "manual", status: "draft")
         )
+        # Só empilha em memória — has_many :through aceita atribuição num
+        # registro ainda não salvo (fica no target, sem tocar o banco) e é
+        # persistido no mesmo INSERT/transaction do #save logo abaixo, sem
+        # precisar de um segundo save.
+        testimonial.product_ids = requested_product_ids if product_ids_requested?
 
         if testimonial.save
           # Só gera algo se houver mídia (a action no model já protege isso,
@@ -146,6 +160,7 @@ module Api
             tiktok_metadata: result[:data]
           )
         )
+        testimonial.product_ids = requested_product_ids if product_ids_requested?
 
         if testimonial.save
           Testimonials::DownloadTiktokVideoJob.perform_later(testimonial.id)
@@ -162,16 +177,30 @@ module Api
       end
 
       def testimonial_params
-        permitted = params.permit(:customer_name, :product_id, :rating, :quote_text, :media)
-        permitted[:product_id] = nil if permitted[:product_id].blank?
-        permitted
+        params.permit(:customer_name, :rating, :quote_text, :media)
+      end
+
+      # true só quando o cliente mandou ALGUM dos dois params nesta request
+      # — precisa distinguir "não mandou" (não mexe nos produtos já
+      # vinculados, ex: PUT só de quote_text) de "mandou vazio" (limpa todos
+      # os produtos vinculados).
+      def product_ids_requested?
+        params.key?(:product_ids) || params.key?(:product_id)
+      end
+
+      # Aceita tanto o formato novo (product_ids, array) quanto o antigo
+      # (product_id, singular — formulário/cliente que ainda não migrou),
+      # sem quebrar nenhum dos dois.
+      def requested_product_ids
+        ids = params[:product_ids].presence || params[:product_id]
+        Array(ids).reject(&:blank?)
       end
 
       def testimonial_json(testimonial)
         {
           id: testimonial.id,
           customer_name: testimonial.customer_name,
-          product: testimonial.product && { id: testimonial.product.id, name: testimonial.product.name, sku: testimonial.product.sku },
+          products: testimonial.products.map { |product| { id: product.id, name: product.name, sku: product.sku } },
           rating: testimonial.rating,
           quote_text: testimonial.quote_text,
           status: testimonial.status,

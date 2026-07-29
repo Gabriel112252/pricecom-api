@@ -22,7 +22,18 @@ class Testimonial < ApplicationRecord
   }.freeze
 
   belongs_to :tenant
+
+  # DEPRECATED: um testimonial pode estar vinculado a vários produtos agora
+  # (ver #products/#testimonial_products abaixo — ex: "Protetor Solar FPS
+  # 70" vendido como 3 produtos distintos por variação de quantidade). Esta
+  # coluna/associação não é mais lida nem escrita pelo app; mantida (não
+  # removida) só pra não exigir uma migration de rollback com perda de dado
+  # caso precise reverter. TestimonialProduct já foi backfillado a partir
+  # dela (ver db/migrate/20260729150000_create_testimonial_products.rb).
   belongs_to :product, optional: true
+
+  has_many :testimonial_products, dependent: :destroy
+  has_many :products, through: :testimonial_products
 
   # source_type: manual (curador sobe texto/mídia direto) ou cache de um
   # depoimento importado de TikTok/Shopee (ver tiktok_metadata/external_url).
@@ -41,13 +52,12 @@ class Testimonial < ApplicationRecord
   validates :status, presence: true, inclusion: { in: STATUSES }
   validates :rating, inclusion: { in: 1..5 }, allow_nil: true
 
-  validate :product_belongs_to_same_tenant, if: -> { product_id.present? }
   validate :status_transition_must_be_allowed, if: -> { persisted? && status_changed? }
   validate :media_content_type_must_be_allowed, if: -> { media.attached? }
 
   scope :by_status, ->(status) { where(status: status) }
   scope :by_source_type, ->(source_type) { where(source_type: source_type) }
-  scope :for_product, ->(product_id) { where(product_id: product_id) }
+  scope :for_product, ->(product_id) { joins(:testimonial_products).where(testimonial_products: { product_id: product_id }) }
 
   def draft?
     status == "draft"
@@ -78,10 +88,6 @@ class Testimonial < ApplicationRecord
   end
 
   private
-
-  def product_belongs_to_same_tenant
-    errors.add(:product, "inválido") if product.nil? || product.tenant_id != tenant_id
-  end
 
   def status_transition_must_be_allowed
     allowed = TRANSITIONS.fetch(status_was, [])
