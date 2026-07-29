@@ -5,6 +5,7 @@ gem "rails", "~> 7.2"
 gem "pg", "~> 1.1"
 gem "puma", "~> 6.0"
 gem "rack-cors"
+gem "rack-attack"
 
 # Auth
 gem "bcrypt", "~> 3.1.7"

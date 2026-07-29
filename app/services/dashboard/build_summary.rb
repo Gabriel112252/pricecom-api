@@ -184,13 +184,33 @@ module Dashboard
       ((current - previous) / previous.to_f * 100).round(2)
     end
 
-    # Regra central de "receita efetiva" da Visão Geral: pedido TikTok com
-    # demonstrativo sincronizado usa revenue_amount (já líquido de desconto
-    # do vendedor + subsídio da plataforma); pedido TikTok ainda pendente
-    # (backfill em andamento) NÃO entra no valor financeiro — fica de fora
-    # do SUM (NULL), mas continua contável operacionalmente em COUNT(*). Os
-    # demais canais preservam a fórmula histórica (gross_value - discount -
-    # refund_amount), sem nenhuma mudança de comportamento pra Yampi.
+    # Fórmula de receita TikTok em dois estágios: pedido com demonstrativo
+    # sincronizado usa revenue_amount (confirmado, já líquido de desconto do
+    # vendedor + subsídio da plataforma); pedido ainda pendente (backfill em
+    # andamento) usa uma ESTIMATIVA — gross_value - seller_discount — em vez
+    # de ficar de fora do valor. seller_discount já vem do normalizer de
+    # pedido (Get Order Detail, imediato), não do fechamento do statement,
+    # então a estimativa está disponível desde a criação do pedido. Nunca é
+    # exata: não reflete taxas/comissões/ajustes que só o fechamento revela
+    # (ver tiktok_revenue_confirmed_sql para separar os dois casos na UI).
+    def tiktok_revenue_sql
+      "CASE WHEN orders.financial_synced_at IS NOT NULL THEN orders.revenue_amount " \
+        "ELSE GREATEST(COALESCE(orders.gross_value, 0) - COALESCE(orders.seller_discount, 0), 0) END"
+    end
+
+    # Predicado companheiro de tiktok_revenue_sql: true quando o valor acima
+    # é o revenue_amount confirmado pelo fechamento, false quando é a
+    # estimativa. Usado tanto em COUNT(*) FILTER quanto pra decidir, por
+    # pedido, se a UI mostra o badge "estimado".
+    def tiktok_revenue_confirmed_sql
+      "orders.financial_synced_at IS NOT NULL"
+    end
+
+    # Regra central de "receita efetiva" da Visão Geral: canal TikTok usa
+    # tiktok_revenue_sql (confirmado quando sincronizado, estimado quando
+    # pendente — nunca fica de fora do SUM). Os demais canais preservam a
+    # fórmula histórica (gross_value - discount - refund_amount), sem
+    # nenhuma mudança de comportamento pra Yampi.
     #
     # Centralizado aqui de propósito: todo widget monetário da Visão Geral
     # (kpis, revenue_breakdown, revenue_timeline, sales_by_channel,
@@ -199,18 +219,20 @@ module Dashboard
     # channels.platform).
     def effective_revenue_sql
       "CASE " \
-        "WHEN channels.platform = 'tiktok' AND orders.financial_synced_at IS NOT NULL THEN orders.revenue_amount " \
-        "WHEN channels.platform = 'tiktok' THEN NULL " \
+        "WHEN channels.platform = 'tiktok' THEN (#{tiktok_revenue_sql}) " \
         "ELSE COALESCE(orders.gross_value, 0) - COALESCE(orders.discount, 0) - COALESCE(orders.refund_amount, 0) " \
       "END"
     end
 
-    # Predicado companheiro de effective_revenue_sql: true quando o pedido
-    # entra no valor financeiro acima, false quando é TikTok ainda pendente.
-    # Usado em COUNT(*) FILTER pra contar "pedidos com financeiro
-    # disponível" sem duplicar a condição em outra sintaxe.
+    # Predicado companheiro de effective_revenue_sql: true quando o valor é
+    # CONFIRMADO (não-TikTok, sempre; TikTok só quando sincronizado), false
+    # quando é uma estimativa TikTok ainda pendente. Desde que
+    # effective_revenue_sql passou a estimar em vez de excluir, isto deixou
+    # de servir como divisor de ticket médio (todo pedido agora contribui
+    # com algum valor) — usar só como contador informativo de cobertura
+    # (financial_orders_count e afins).
     def financial_revenue_available_sql
-      "NOT (channels.platform = 'tiktok' AND orders.financial_synced_at IS NULL)"
+      "channels.platform <> 'tiktok' OR (#{tiktok_revenue_confirmed_sql})"
     end
 
     # Uma única query agregada por trás de effective_revenue e da contagem
@@ -245,8 +267,8 @@ module Dashboard
     end
 
     def tiktok_delta_partial_note(current_totals, prev_totals)
-      "Comparação parcial: cobertura TikTok atual #{tiktok_coverage_pct(current_totals)}%, " \
-        "anterior #{tiktok_coverage_pct(prev_totals)}%."
+      "Inclui estimativa para pedido(s) TikTok ainda sem financeiro fechado — cobertura atual " \
+        "#{tiktok_coverage_pct(current_totals)}%, anterior #{tiktok_coverage_pct(prev_totals)}%."
     end
 
     def period_totals(scope, period)
@@ -296,7 +318,11 @@ module Dashboard
         tiktok_orders_count:        effective[:tiktok_orders_count],
         tiktok_synced_orders_count: effective[:tiktok_synced_orders_count],
         tiktok_pending_orders_count: effective[:tiktok_pending_orders_count],
-        effective_average_ticket:  effective[:financial_orders_count].positive? ? (effective[:effective_revenue] / effective[:financial_orders_count]).round(2) : nil
+        # Divide pelo COUNT total, não por financial_orders_count: desde que
+        # effective_revenue passou a estimar pedido TikTok pendente (em vez
+        # de excluir), todo pedido contribui com algum valor — dividir só
+        # pelos confirmados inflaria o ticket médio.
+        effective_average_ticket:  count.positive? ? (effective[:effective_revenue] / count).round(2) : nil
       }
     end
 
@@ -321,10 +347,14 @@ module Dashboard
     def build_revenue(scope, rows, granularity, current_totals, prev_totals)
       by_day = build_revenue_timeline(rows, granularity)
 
+      # effective_revenue_sql, não a fórmula bruta gross-discount-refund:
+      # ChannelBreakdown (Vendas) precisa da mesma "receita efetiva" que o
+      # resto do dashboard usa pra TikTok (confirmada ou estimada), senão
+      # diverge silenciosamente do card equivalente da Visão Geral.
       by_channel = scope
         .joins(:channel)
         .group("channels.name")
-        .sum(Arel.sql("COALESCE(gross_value, 0) - COALESCE(discount, 0) - COALESCE(refund_amount, 0)"))
+        .sum(Arel.sql(effective_revenue_sql))
         .transform_values { |v| v.to_f.round(2) }
 
       {
@@ -684,7 +714,9 @@ module Dashboard
           orders_count: orders_count_i,
           financial_orders_count: financial_orders_count_i,
           tiktok_pending_orders_count: tiktok_pending_count.to_i,
-          average_ticket: financial_orders_count_i.positive? ? (effective_revenue_f / financial_orders_count_i).round(2) : nil
+          # Divide pelo total do bucket, não pelos confirmados — mesma razão
+          # de period_totals#effective_average_ticket acima.
+          average_ticket: orders_count_i.positive? ? (effective_revenue_f / orders_count_i).round(2) : nil
         }
       end
     end
@@ -729,7 +761,9 @@ module Dashboard
           refunds: refund_f.round(2),
           orders_count: count_i,
           financial_orders_count: financial_orders_count_i,
-          average_ticket: financial_orders_count_i.positive? ? (effective_revenue_f / financial_orders_count_i).round(2) : nil,
+          # Divide pelo total do canal, não pelos confirmados — mesma razão
+          # de period_totals#effective_average_ticket acima.
+          average_ticket: count_i.positive? ? (effective_revenue_f / count_i).round(2) : nil,
           share_percentage: total_effective_revenue.positive? ? (effective_revenue_f / total_effective_revenue * 100).round(2) : 0,
           tiktok_coverage_percentage: tiktok_coverage
         }
@@ -948,6 +982,8 @@ module Dashboard
       synced_scope = tiktok_financial_synced_scope(tiktok_scope)
       orders_count = tiktok_scope.count
       synced_orders_count = synced_scope.count
+      pending_orders_count = orders_count - synced_orders_count
+      has_synced_orders = synced_orders_count.positive?
 
       revenue_total, settlement_total, fee_total, platform_commission_total, affiliate_commission_total,
         affiliate_ads_commission_total, affiliate_partner_commission_total,
@@ -975,7 +1011,12 @@ module Dashboard
           Arel.sql("COUNT(*) FILTER (WHERE COALESCE(shipping_cost_amount, 0) > 0)")
         ) || Array.new(17, 0)
 
-      revenue_f = revenue_total.to_f.round(2)
+      # revenue_confirmed_f alimenta só o que É Grupo C (margem real,
+      # reconciliação, % de cada taxa sobre a receita) — sempre a soma
+      # SÓ dos pedidos sincronizados, sem estimativa nenhuma, exatamente
+      # como antes. revenue_blended_f (abaixo) é o Grupo B exposto como
+      # revenue_amount_total — nunca usar um no lugar do outro.
+      revenue_confirmed_f = revenue_total.to_f.round(2)
       settlement_f = settlement_total.to_f.round(2)
       fee_f = fee_total.to_f.round(2)
       platform_commission_f = platform_commission_total.to_f.round(2)
@@ -993,30 +1034,50 @@ module Dashboard
       ].max.round(2)
       other_fees_orders = synced_scope.where(Arel.sql("(#{tiktok_other_fees_sql}) > 0")).count
 
+      # Grupo B: receita confirmada (sincronizada) + estimada (pendente),
+      # somada sobre TODO tiktok_scope — mesma fórmula de tiktok_revenue_sql,
+      # reaproveitada aqui pra "Receita efetiva"/"Pago pelos clientes"
+      # (Consolidado e subaba TikTok Shop) nunca ficarem de fora enquanto o
+      # backfill roda. A diferença pra revenue_confirmed_f é exatamente a
+      # parcela ainda não confirmada — sem query extra.
+      revenue_blended_f = tiktok_scope.sum(Arel.sql(tiktok_revenue_sql)).round(2)
+      pending_estimated_revenue = (revenue_blended_f - revenue_confirmed_f).round(2)
+
       # Regra financeira TikTok já existente (Order#calculate_margin):
       # lucro real = settlement_amount - custo do produto; margem real =
       # lucro real / revenue_amount. Recalculado aqui via SUM agregado (não
       # via média de orders.margin_pct por pedido, que é clampado e não
       # pondera por valor) para bater exatamente com a soma dos pedidos.
       real_profit = (settlement_f - product_cost_f).round(2)
-      real_margin_pct = revenue_f.positive? ? (real_profit / revenue_f * 100).round(2) : nil
+      real_margin_pct = revenue_confirmed_f.positive? ? (real_profit / revenue_confirmed_f * 100).round(2) : nil
 
       # Outros ajustes: diferença entre o que a composição de taxas explica
       # (receita - taxas - frete) e o settlement_amount realmente recebido.
       # Nunca escondido dentro de outra categoria — ver gadget de
       # reconciliação. Cobre estornos parciais, chargebacks e ajustes que a
       # TikTok não detalha nos campos de taxa.
-      explained_settlement = (revenue_f - fee_f - shipping_cost_f).round(2)
+      explained_settlement = (revenue_confirmed_f - fee_f - shipping_cost_f).round(2)
       other_adjustments = (settlement_f - explained_settlement).round(2)
+
+      # has_synced_orders separa "confirmado zero" (pelo menos 1 pedido
+      # fechou e o valor real é zero — ex.: estorno total) de "ainda sem
+      # nenhuma confirmação" (nenhum pedido do período fechou o
+      # demonstrativo ainda). Sem essa distinção, um período com só pedido
+      # pendente mostrava settlement/lucro "R$0,00" como se fosse um
+      # resultado real, em vez de "aguardando fechamento".
+      has_synced_orders = synced_orders_count.positive?
+      real_profit_available = financial_available && has_synced_orders
 
       {
         available: filtered_platforms.include?("tiktok"),
         orders_count: orders_count,
         synced_orders_count: synced_orders_count,
+        pending_orders_count: pending_orders_count,
+        pending_estimated_revenue: pending_estimated_revenue,
         coverage_percentage: orders_count.positive? ? (synced_orders_count.to_f / orders_count * 100).round(2) : 0,
-        revenue_amount_total: revenue_f,
-        settlement_amount_total: settlement_f,
-        fee_and_tax_amount_total: fee_f,
+        revenue_amount_total: revenue_blended_f,
+        settlement_amount_total: has_synced_orders ? settlement_f : nil,
+        fee_and_tax_amount_total: has_synced_orders ? fee_f : nil,
         platform_commission_total: platform_commission_f,
         affiliate_commission_total: affiliate_commission_f,
         affiliate_ads_commission_total: affiliate_ads_commission_f,
@@ -1026,21 +1087,21 @@ module Dashboard
         shipping_cost_total: shipping_cost_f,
         other_fees_total: other_fees_f,
         product_cost_total: product_cost_f,
-        real_profit_total: financial_available ? real_profit : nil,
-        real_margin_pct: financial_available ? real_margin_pct : nil,
-        real_profit_available: financial_available,
+        real_profit_total: real_profit_available ? real_profit : nil,
+        real_margin_pct: real_profit_available ? real_margin_pct : nil,
+        real_profit_available: real_profit_available,
         fee_composition: [
-          fee_composition_line("platform_commission", "Comissão da plataforma", platform_commission_f, platform_commission_orders, revenue_f),
-          fee_composition_line("affiliate_commission", "Comissão de afiliados (orgânico)", affiliate_commission_f, affiliate_commission_orders, revenue_f),
-          fee_composition_line("affiliate_ads_commission", "Comissão de afiliados (via anúncio)", affiliate_ads_commission_f, affiliate_ads_commission_orders, revenue_f),
-          fee_composition_line("affiliate_partner_commission", "Comissão de parceiros de afiliados", affiliate_partner_commission_f, affiliate_partner_commission_orders, revenue_f),
-          fee_composition_line("item_fee", "Taxa por item", item_fee_f, item_fee_orders, revenue_f),
-          fee_composition_line("service_fee", "Taxa de serviço", service_fee_f, service_fee_orders, revenue_f),
-          fee_composition_line("shipping_cost", "Frete líquido", shipping_cost_f, shipping_cost_orders, revenue_f),
-          fee_composition_line("other_fees", "Outras taxas", other_fees_f, other_fees_orders, revenue_f)
+          fee_composition_line("platform_commission", "Comissão da plataforma", platform_commission_f, platform_commission_orders, revenue_confirmed_f),
+          fee_composition_line("affiliate_commission", "Comissão de afiliados (orgânico)", affiliate_commission_f, affiliate_commission_orders, revenue_confirmed_f),
+          fee_composition_line("affiliate_ads_commission", "Comissão de afiliados (via anúncio)", affiliate_ads_commission_f, affiliate_ads_commission_orders, revenue_confirmed_f),
+          fee_composition_line("affiliate_partner_commission", "Comissão de parceiros de afiliados", affiliate_partner_commission_f, affiliate_partner_commission_orders, revenue_confirmed_f),
+          fee_composition_line("item_fee", "Taxa por item", item_fee_f, item_fee_orders, revenue_confirmed_f),
+          fee_composition_line("service_fee", "Taxa de serviço", service_fee_f, service_fee_orders, revenue_confirmed_f),
+          fee_composition_line("shipping_cost", "Frete líquido", shipping_cost_f, shipping_cost_orders, revenue_confirmed_f),
+          fee_composition_line("other_fees", "Outras taxas", other_fees_f, other_fees_orders, revenue_confirmed_f)
         ],
         reconciliation: [
-          { key: "effective_revenue", label: "Receita efetiva", amount: revenue_f },
+          { key: "effective_revenue", label: "Receita efetiva", amount: revenue_confirmed_f },
           { key: "platform_commission", label: "Comissão da plataforma", amount: -platform_commission_f },
           { key: "affiliate_commission", label: "Comissão de afiliados (orgânico)", amount: -affiliate_commission_f },
           { key: "affiliate_ads_commission", label: "Comissão de afiliados (via anúncio)", amount: -affiliate_ads_commission_f },
@@ -1072,13 +1133,17 @@ module Dashboard
     # query adicional. status é só um rótulo derivado da cobertura, nunca
     # consulta o estado de um job/cron.
     def build_tiktok_coverage(breakdown)
-      pending = breakdown[:orders_count] - breakdown[:synced_orders_count]
+      pending = breakdown[:pending_orders_count] || (breakdown[:orders_count] - breakdown[:synced_orders_count])
 
       {
         available: breakdown[:available],
         orders_count: breakdown[:orders_count],
         synced_orders_count: breakdown[:synced_orders_count],
         pending_orders_count: pending,
+        # Parcela de revenue_amount_total que ainda é estimativa (não
+        # confirmada pelo fechamento) — TiktokCoverageBanner usa isso pra
+        # explicar "R$ X ainda não confirmados" em vez de só um %.
+        pending_estimated_revenue: breakdown[:pending_estimated_revenue] || 0.0,
         coverage_percentage: breakdown[:coverage_percentage],
         status: tiktok_coverage_status(breakdown[:coverage_percentage], pending)
       }
@@ -1144,10 +1209,15 @@ module Dashboard
       tiktok_cost = tiktok_breakdown[:product_cost_total]
       tiktok_profit = tiktok_breakdown[:real_profit_total]
 
-      effective_revenue = (yampi_totals[:net] + tiktok_revenue).round(2)
-      received_amount = (yampi_receivables[:received] + tiktok_received).round(2)
+      # settlement/fees/real_profit do lado TikTok agora podem vir nil
+      # (nenhum pedido sincronizado ainda — ver build_tiktok_financial_breakdown).
+      # .to_f trata isso como 0 na soma consolidada, igual ao tratamento já
+      # existente pra tiktok_profit logo abaixo — o aviso de "aguardando
+      # fechamento" fica por conta do TiktokCoverageBanner, não desse total.
+      effective_revenue = (yampi_totals[:net] + tiktok_revenue.to_f).round(2)
+      received_amount = (yampi_receivables[:received] + tiktok_received.to_f).round(2)
       product_cost_total = (yampi_totals[:product_cost] + tiktok_cost).round(2)
-      fees_total = (yampi_totals[:gateway_fees] + tiktok_fees).round(2)
+      fees_total = (yampi_totals[:gateway_fees] + tiktok_fees.to_f).round(2)
       real_profit = financial_available ? (yampi_totals[:result] + tiktok_profit.to_f).round(2) : nil
       real_margin_pct = financial_available && effective_revenue.positive? ? (real_profit / effective_revenue * 100).round(2) : nil
 
@@ -1216,17 +1286,24 @@ module Dashboard
       orders_count.positive? ? (synced_count.to_f / orders_count * 100).round(2) : 0
     end
 
+    # Grupo B: receita confirmada+estimada (tiktok_revenue_sql) sobre TODO o
+    # scope, não só synced_scope — mesma razão de revenue_blended_f em
+    # build_tiktok_financial_breakdown. platform_subsidy já é calculado
+    # sobre o scope inteiro (tiktok_platform_subsidy_sql tem seu próprio
+    # fallback pra pedido pendente), então os dois termos vêm da mesma
+    # população.
     def tiktok_buyer_paid_product_total(scope)
-      synced_scope = tiktok_financial_synced_scope(scope)
-      effective_revenue = synced_scope.sum(:revenue_amount).to_f
-      platform_subsidy = synced_scope.sum(Arel.sql(tiktok_platform_subsidy_sql)).to_f
+      return 0.0 unless tiktok_financial_fields_available?
+
+      effective_revenue = scope.sum(Arel.sql(tiktok_revenue_sql)).to_f
+      platform_subsidy = scope.sum(Arel.sql(tiktok_platform_subsidy_sql)).to_f
       (effective_revenue - platform_subsidy).round(2)
     end
 
     def tiktok_effective_revenue_total(scope)
       return 0.0 unless tiktok_financial_fields_available?
 
-      tiktok_financial_synced_scope(scope).sum(:revenue_amount).to_f.round(2)
+      scope.sum(Arel.sql(tiktok_revenue_sql)).to_f.round(2)
     end
 
     def tiktok_seller_discount_sql
@@ -1273,6 +1350,8 @@ module Dashboard
         available: false,
         orders_count: 0,
         synced_orders_count: 0,
+        pending_orders_count: 0,
+        pending_estimated_revenue: 0.0,
         coverage_percentage: 0.0,
         revenue_amount_total: 0.0,
         settlement_amount_total: 0.0,
@@ -1544,12 +1623,13 @@ module Dashboard
     end
 
     def build_aov_by_channel(scope)
+      # effective_revenue_sql — mesma razão do by_channel acima.
       rows = scope
         .joins(:channel)
         .group("channels.name")
         .pluck(
           Arel.sql("channels.name"),
-          Arel.sql("COALESCE(AVG(COALESCE(gross_value, 0) - COALESCE(discount, 0) - COALESCE(refund_amount, 0)), 0)")
+          Arel.sql("COALESCE(AVG(#{effective_revenue_sql}), 0)")
         )
 
       rows.each_with_object({}) { |(name, avg), hash| hash[name] = avg.to_f.round(2) }
@@ -1560,10 +1640,13 @@ module Dashboard
     end
 
     def build_revenue_channel_series(scope, granularity)
+      # effective_revenue_sql — mesma razão do by_channel acima
+      # (RevenueByHourChart não pode divergir da fórmula usada em todo o
+      # resto do dashboard).
       build_channel_bucket_series(
         scope,
         granularity,
-        "COALESCE(SUM(COALESCE(gross_value, 0) - COALESCE(discount, 0) - COALESCE(refund_amount, 0)), 0)",
+        "COALESCE(SUM(#{effective_revenue_sql}), 0)",
         :gross
       ) { |v| v.to_f.round(2) }
     end

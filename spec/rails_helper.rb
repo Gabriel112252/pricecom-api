@@ -77,4 +77,11 @@ RSpec.configure do |config|
   config.filter_rails_from_backtrace!
   # arbitrary gems may also be filtered via:
   # config.filter_gems_from_backtrace("gem name")
+
+  # Rack::Attack's throttle counters live in a single process-wide
+  # MemoryStore (config/initializers/rack_attack.rb), independent of
+  # config.cache_store — without clearing it between request specs, any
+  # test that hits a throttled path (e.g. /api/public/*) accumulates count
+  # across examples and can trip a 429 in a later, unrelated test.
+  config.before(:each, type: :request) { Rack::Attack.cache.store.clear }
 end

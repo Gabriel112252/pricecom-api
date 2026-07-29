@@ -253,10 +253,21 @@ module Api
           "+ COALESCE(orders.affiliate_partner_commission_amount, 0)"
       end
 
+      # Grupo B por pedido: confirmado (revenue_amount) quando o
+      # demonstrativo já fechou, estimado (gross_value - seller_discount,
+      # mesma fórmula de Dashboard::BuildSummary#tiktok_revenue_sql) enquanto
+      # está pendente — nunca 0.0 literal só porque o sync ainda não rodou.
+      def tiktok_order_effective_revenue(order)
+        return order.revenue_amount.to_f if order.financial_synced_at.present?
+
+        [ order.gross_value.to_f - order.seller_discount.to_f, 0 ].max
+      end
+
       def tiktok_order_json(order)
         seller_discount = tiktok_order_seller_discount(order)
         platform_subsidy = tiktok_order_platform_subsidy(order)
-        revenue = order.revenue_amount.to_f
+        revenue = tiktok_order_effective_revenue(order)
+        confirmed = order.financial_synced_at.present?
 
         {
           id: order.id,
@@ -267,22 +278,28 @@ module Api
           platform_subsidy: platform_subsidy.round(2),
           buyer_paid: (revenue - platform_subsidy).round(2),
           effective_revenue: revenue.round(2),
-          fees_total: order.fee_and_tax_amount.to_f.round(2),
+          # true quando effective_revenue acima é o revenue_amount
+          # confirmado pelo fechamento; false quando é a estimativa —
+          # usado pelo frontend pra colorir/marcar a célula sem ambiguidade.
+          revenue_confirmed: confirmed,
+          # Grupo C: só existem depois do fechamento — nil (não 0.0), pra
+          # não parecer um resultado real enquanto o pedido está pendente.
+          fees_total: confirmed ? order.fee_and_tax_amount.to_f.round(2) : nil,
           # Soma dos três campos (orgânico + via anúncio + via parceiro) —
           # consistente com o filtro ?affiliate=with/without acima, que
           # também considera qualquer um deles positivo como "tem afiliado".
-          affiliate_commission: (
+          affiliate_commission: confirmed ? (
             order.affiliate_commission_amount.to_f +
             order.affiliate_ads_commission_amount.to_f +
             order.affiliate_partner_commission_amount.to_f
-          ).round(2),
-          platform_commission: order.platform_commission_amount.to_f.round(2),
-          settlement_amount: order.settlement_amount.to_f.round(2),
+          ).round(2) : nil,
+          platform_commission: confirmed ? order.platform_commission_amount.to_f.round(2) : nil,
+          settlement_amount: confirmed ? order.settlement_amount.to_f.round(2) : nil,
           product_cost: order.cost_price.to_f.round(2),
-          profit: order.financial_synced_at.present? ? order.margin&.to_f&.round(2) : nil,
+          profit: confirmed ? order.margin&.to_f&.round(2) : nil,
           # revenue_amount zerado (estorno total) não deve virar "0%" — a
           # regra de negócio pede "—", não um número que pareça definitivo.
-          margin_pct: (order.financial_synced_at.present? && revenue.nonzero?) ? order.margin_pct&.to_f : nil,
+          margin_pct: (confirmed && revenue.nonzero?) ? order.margin_pct&.to_f : nil,
           financial_status: tiktok_order_financial_status(order)
         }
       end

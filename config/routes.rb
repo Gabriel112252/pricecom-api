@@ -112,6 +112,12 @@ Rails.application.routes.draw do
         end
       end
 
+      # Testimonials public widget token (admin only) — regenerating
+      # invalidates the previous link, same shape as tv_token above.
+      get    "testimonials_public_token", to: "testimonials_public_tokens#show"
+      post   "testimonials_public_token", to: "testimonials_public_tokens#create"
+      delete "testimonials_public_token", to: "testimonials_public_tokens#destroy"
+
       # Stock alert rules + the alerts/events they raise — see
       # StockAlertRule/StockAlert and StockAlerts::EvaluationService.
       resources :stock_alert_rules, only: [ :index, :create, :update, :destroy ]
@@ -163,6 +169,17 @@ Rails.application.routes.draw do
 
       # Public TV Mode dashboard — sem sessão de usuário, autenticado via token na URL
       get "tv/:token/summary", to: "tv#summary"
+    end
+
+    # Public, unauthenticated, cross-origin API for storefront widgets (e.g.
+    # Shopify JS client-side). Separate namespace from api/v1 on purpose —
+    # keeps "meant to be called from outside our own frontend, by anyone
+    # who has the tenant's public token" visually and structurally distinct
+    # from the JWT-authenticated admin API.
+    namespace :public do
+      namespace :v1 do
+        resources :testimonials, only: [ :index ]
+      end
     end
   end
 end

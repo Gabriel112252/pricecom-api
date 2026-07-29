@@ -89,6 +89,40 @@ RSpec.describe Dashboard::BuildSummary do
     end
   end
 
+  describe "Vendas — mesma fórmula de receita entre canais (sem divergência silenciosa)" do
+    let(:channel_tiktok) { tenant.channels.create!(name: "TikTok Shop", platform: "tiktok") }
+
+    it "uses the same confirmed-or-estimated TikTok formula in by_channel, by_channel_series and aov_by_channel" do
+      make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago).update!(seller_discount: 10) # pendente, estimado 90
+
+      result = described_class.call(
+        tenant: tenant,
+        params: ActionController::Parameters.new(
+          from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601, channel_ids: [ channel_tiktok.id.to_s ]
+        )
+      )
+
+      expect(result[:revenue][:by_channel]["TikTok Shop"]).to eq(90.0)
+      expect(result[:revenue][:by_channel_series].sum { |row| row[:gross] }).to eq(90.0)
+      expect(result[:orders][:aov_by_channel]["TikTok Shop"]).to eq(90.0)
+    end
+
+    it "uses the confirmed revenue_amount, not the estimate, once the order is synced" do
+      synced = make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago)
+      synced.update!(seller_discount: 10, revenue_amount: 82, financial_synced_at: Time.current)
+
+      result = described_class.call(
+        tenant: tenant,
+        params: ActionController::Parameters.new(
+          from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601, channel_ids: [ channel_tiktok.id.to_s ]
+        )
+      )
+
+      expect(result[:revenue][:by_channel]["TikTok Shop"]).to eq(82.0)
+      expect(result[:orders][:aov_by_channel]["TikTok Shop"]).to eq(82.0)
+    end
+  end
+
   describe "executive financial payload" do
     it "exposes executive KPIs with net revenue, discounts and financial coverage" do
       order = make_order(channel_a, gross: 100, margin: 0, ordered_at: 1.day.ago)
@@ -473,7 +507,7 @@ RSpec.describe Dashboard::BuildSummary do
         expect(discount).to include(seller_discount_total: 3.0, platform_subsidy_total: 4.0)
       end
 
-      it "does not let an unsynchronized order reduce buyer paid product total" do
+      it "estimates a pending order's contribution to buyer paid product total, ignoring any stale revenue_amount left on it" do
         make_order(channel_tiktok, gross: 36.46, margin: 0, ordered_at: 1.day.ago).update!(
           discount: 18.52,
           seller_discount: 0,
@@ -483,6 +517,10 @@ RSpec.describe Dashboard::BuildSummary do
           fee_and_tax_amount: 12.07,
           financial_synced_at: Time.current
         )
+        # financial_synced_at: nil e revenue_amount: 80 propositalmente
+        # divergente do que a estimativa (gross - seller_discount = 100 - 0)
+        # daria — prova que o valor confirmado obsoleto não vaza mesmo
+        # quando a coluna já tem algo gravado.
         make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago).update!(
           discount: 20,
           platform_discount: 20,
@@ -492,7 +530,9 @@ RSpec.describe Dashboard::BuildSummary do
 
         discount = tiktok_summary[:coupons][:discount_breakdown_tiktok]
 
-        expect(discount[:buyer_paid_product_total]).to eq(17.94)
+        # order1 confirmado (29.90) + order2 estimado (100 - seller_discount 0) = 129.90
+        # platform_subsidy: order1 11.96 (fallback) + order2 20 (coluna direta) = 31.96
+        expect(discount[:buyer_paid_product_total]).to eq(97.94) # 129.90 - 31.96
         expect(discount[:platform_subsidy_total]).to eq(31.96)
       end
 
@@ -584,6 +624,43 @@ RSpec.describe Dashboard::BuildSummary do
         expect(financial[:real_margin_pct]).to be_nil
         expect(financial[:revenue_amount_total]).to eq(0.0)
         expect(financial[:settlement_amount_total]).to eq(0.0)
+      end
+
+      it "blends confirmed and estimated revenue in revenue_amount_total without letting the estimate leak into real_margin_pct" do
+        synced = make_order(channel_tiktok, gross: 36.46, margin: 0, ordered_at: 1.day.ago)
+        synced.update!(revenue_amount: 29.90, settlement_amount: 17.83, fee_and_tax_amount: 12.07, cost_price: 5.83, financial_synced_at: Time.current)
+        product = tenant.products.create!(sku: "SKU-TK", name: "Produto TikTok", cost_price: 5.83)
+        synced.order_items.create!(product: product, sku: product.sku, name: product.name, quantity: 1, unit_price: 29.90, unit_cost: 5.83)
+        pending = make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago) # pendente, estimado 42
+        pending.update!(seller_discount: 8)
+        # order_items com custo conhecido, senão data_quality marca o pedido
+        # como "sem custo completo" e financial_available cai pra false —
+        # eixo de qualidade diferente do que este teste quer exercitar.
+        pending.order_items.create!(product: product, sku: product.sku, name: product.name, quantity: 1, unit_price: 42, unit_cost: 5)
+
+        financial = tiktok_summary[:financial][:tiktok_financial_breakdown]
+
+        # revenue_amount_total é o Grupo B (confirmado + estimado): 29.90 + 42.
+        expect(financial[:revenue_amount_total]).to eq(71.90)
+        expect(financial[:pending_orders_count]).to eq(1)
+        expect(financial[:pending_estimated_revenue]).to eq(42.0)
+        # real_margin_pct é Grupo C — continua só sobre o confirmado (29.90),
+        # nunca dividido pelo blended (71.90), senão a margem cairia à toa.
+        expect(financial[:real_margin_pct]).to eq(40.13)
+      end
+
+      it "returns settlement/fees/real profit as nil, not a misleading zero, when no order in the period has synced yet" do
+        make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago).update!(seller_discount: 5) # só pendente
+
+        financial = tiktok_summary[:financial][:tiktok_financial_breakdown]
+
+        expect(financial[:settlement_amount_total]).to be_nil
+        expect(financial[:fee_and_tax_amount_total]).to be_nil
+        expect(financial[:real_profit_total]).to be_nil
+        expect(financial[:real_margin_pct]).to be_nil
+        expect(financial[:real_profit_available]).to eq(false)
+        # revenue_amount_total continua a estimativa (Grupo B), não nil.
+        expect(financial[:revenue_amount_total]).to eq(45.0)
       end
 
       it "exposes an explicit 'other adjustments' reconciliation line instead of folding discrepancies into another category" do
@@ -735,15 +812,15 @@ RSpec.describe Dashboard::BuildSummary do
         expect(result[:kpis][:net_revenue]).to eq(85.0)
       end
 
-      it "excludes a pending TikTok order from revenue but keeps it in the operational order count" do
-        make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago) # sem financial_synced_at
+      it "estimates a pending TikTok order's revenue from gross_value - seller_discount instead of excluding it" do
+        make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago).update!(seller_discount: 12) # pendente
         synced = make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago)
         synced.update!(revenue_amount: 45, financial_synced_at: Time.current)
 
         result = overview_summary(channel_ids: [ channel_tiktok.id.to_s ])
 
         expect(result[:kpis][:orders_count]).to eq(2)
-        expect(result[:kpis][:net_revenue]).to eq(45.0)
+        expect(result[:kpis][:net_revenue]).to eq(133.0) # 45 confirmado + (100 - 12) estimado
         expect(result[:kpis][:financial_orders_count]).to eq(1)
         expect(result[:kpis][:tiktok_pending_orders_count]).to eq(1)
       end
@@ -756,20 +833,18 @@ RSpec.describe Dashboard::BuildSummary do
         expect(result[:kpis][:net_revenue]).to eq(170.0)
       end
 
-      it "computes financial average ticket only over orders with revenue available, not the full TikTok order count" do
-        make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago) # pendente
+      it "computes average ticket over ALL tiktok orders, blending confirmed and estimated revenue" do
+        make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago).update!(seller_discount: 20) # pendente, estimado 80
         synced = make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago)
         synced.update!(revenue_amount: 40, financial_synced_at: Time.current)
 
         result = overview_summary(channel_ids: [ channel_tiktok.id.to_s ])
 
-        expect(result[:kpis][:average_ticket]).to eq(40.0)
+        expect(result[:kpis][:average_ticket]).to eq(60.0) # (80 estimado + 40 confirmado) / 2
         expect(result[:kpis][:average_ticket_available]).to eq(true)
       end
 
-      it "returns average_ticket as nil, not a false zero, when no order has revenue available" do
-        make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago) # só pendente
-
+      it "returns average_ticket as nil and net_revenue as zero when there are no orders at all in the period" do
         result = overview_summary(channel_ids: [ channel_tiktok.id.to_s ])
 
         expect(result[:kpis][:average_ticket]).to be_nil
@@ -777,8 +852,8 @@ RSpec.describe Dashboard::BuildSummary do
         expect(result[:kpis][:net_revenue]).to eq(0.0)
       end
 
-      it "separates total orders from financial orders in the daily timeline" do
-        make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago) # pendente
+      it "separates total orders from financial orders in the daily timeline, with net revenue including the pending order's estimate" do
+        make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago).update!(seller_discount: 10) # pendente, estimado 90
         synced = make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago)
         synced.update!(revenue_amount: 45, financial_synced_at: Time.current)
 
@@ -788,11 +863,12 @@ RSpec.describe Dashboard::BuildSummary do
         expect(day[:orders_count]).to eq(2)
         expect(day[:financial_orders_count]).to eq(1)
         expect(day[:tiktok_pending_orders_count]).to eq(1)
-        expect(day[:net]).to eq(45.0)
+        expect(day[:net]).to eq(135.0) # 45 confirmado + 90 estimado
+        expect(day[:average_ticket]).to eq(67.5) # 135 / 2 pedidos
       end
 
-      it "uses real TikTok revenue in sales by channel and flags coverage" do
-        make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago) # pendente
+      it "blends confirmed and estimated TikTok revenue in sales by channel and flags coverage" do
+        make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago).update!(seller_discount: 10) # pendente, estimado 90
         synced = make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago)
         synced.update!(revenue_amount: 45, financial_synced_at: Time.current)
         make_order(channel_a, gross: 30, margin: 0, ordered_at: 1.day.ago)
@@ -800,13 +876,13 @@ RSpec.describe Dashboard::BuildSummary do
         result = overview_summary
         tiktok_row = result[:sales_by_channel].find { |row| row[:channel] == "TikTok Shop" }
 
-        expect(tiktok_row[:net_revenue]).to eq(45.0)
+        expect(tiktok_row[:net_revenue]).to eq(135.0)
         expect(tiktok_row[:orders_count]).to eq(2)
         expect(tiktok_row[:tiktok_coverage_percentage]).to eq(50.0)
       end
 
-      it "keeps operational order count per state but excludes pending TikTok revenue from the state total" do
-        make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago).update!(state: "SP") # pendente
+      it "keeps operational order count per state and includes an estimated value for the pending TikTok order, flagged as partial coverage" do
+        make_order(channel_tiktok, gross: 100, margin: 0, ordered_at: 1.day.ago).update!(state: "SP", seller_discount: 10) # pendente, estimado 90
         synced = make_order(channel_tiktok, gross: 50, margin: 0, ordered_at: 1.day.ago)
         synced.update!(state: "SP", revenue_amount: 45, financial_synced_at: Time.current)
 
@@ -814,7 +890,7 @@ RSpec.describe Dashboard::BuildSummary do
         sp = result[:regional_sales][:states].find { |row| row[:state] == "SP" }
 
         expect(sp[:orders_count]).to eq(2)
-        expect(sp[:net_revenue]).to eq(45.0)
+        expect(sp[:net_revenue]).to eq(135.0)
         expect(sp[:tiktok_pending_orders_count]).to eq(1)
         expect(sp[:financial_coverage_partial]).to eq(true)
       end
@@ -838,7 +914,7 @@ RSpec.describe Dashboard::BuildSummary do
         result = overview_summary(channel_ids: [ channel_tiktok.id.to_s ])
 
         expect(result[:kpis][:net_revenue_delta_partial]).to eq(true)
-        expect(result[:kpis][:net_revenue_delta_note]).to include("Comparação parcial")
+        expect(result[:kpis][:net_revenue_delta_note]).to include("Inclui estimativa")
       end
 
       it "exposes current and previous period TikTok coverage" do

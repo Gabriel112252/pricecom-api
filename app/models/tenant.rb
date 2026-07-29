@@ -44,4 +44,17 @@ class Tenant < ApplicationRecord
   def revoke_tv_token!
     update!(tv_token: nil)
   end
+
+  # Same reasoning as tv_token above — the only thing standing between the
+  # public /api/public/v1/testimonials route and this tenant's testimonials.
+  # Deliberately NOT slug: slug is a plain readable identifier, not a
+  # secret, and would let anyone enumerate other tenants' published
+  # testimonials by guessing slugs.
+  def regenerate_testimonials_public_token!
+    update!(testimonials_public_token: SecureRandom.urlsafe_base64(32))
+  end
+
+  def revoke_testimonials_public_token!
+    update!(testimonials_public_token: nil)
+  end
 end

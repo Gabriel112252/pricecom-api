@@ -32,6 +32,35 @@ RSpec.describe "Dashboard TikTok orders", type: :request do
       expect(rows.first["effective_revenue"]).to eq(45.0)
     end
 
+    it "estimates effective_revenue from gross_value - seller_discount for a pending order, flagged as not confirmed" do
+      make_order(tenant, channel_tiktok, gross: 100, ordered_at: 1.day.ago, seller_discount: 12)
+
+      get "/api/v1/dashboard/tiktok_orders", headers: auth_headers(operador)
+
+      row = JSON.parse(response.body)["rows"].first
+      expect(row["effective_revenue"]).to eq(88.0)
+      expect(row["revenue_confirmed"]).to eq(false)
+      expect(row["settlement_amount"]).to be_nil
+      expect(row["fees_total"]).to be_nil
+      expect(row["affiliate_commission"]).to be_nil
+      expect(row["platform_commission"]).to be_nil
+    end
+
+    it "uses the confirmed revenue_amount and fills in Group C fields once the order is synced" do
+      make_order(
+        tenant, channel_tiktok, gross: 100, ordered_at: 1.day.ago, seller_discount: 12,
+        revenue_amount: 85, settlement_amount: 70, fee_and_tax_amount: 15, financial_synced_at: Time.current
+      )
+
+      get "/api/v1/dashboard/tiktok_orders", headers: auth_headers(operador)
+
+      row = JSON.parse(response.body)["rows"].first
+      expect(row["effective_revenue"]).to eq(85.0)
+      expect(row["revenue_confirmed"]).to eq(true)
+      expect(row["settlement_amount"]).to eq(70.0)
+      expect(row["fees_total"]).to eq(15.0)
+    end
+
     it "labels a fully zeroed synced refund order as refunded and shows margin as nil instead of a misleading zero" do
       make_order(
         tenant, channel_tiktok, gross: 40, ordered_at: 1.day.ago, order_type: "refund",
