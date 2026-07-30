@@ -8,7 +8,6 @@ module Api
     class TestimonialsController < ApplicationController
       PER_PAGE_DEFAULT = 25
       PER_PAGE_MAX     = 100
-      BULK_IMPORT_UPLOAD_DIR = Rails.root.join("tmp", "testimonial_bulk_imports")
 
       before_action :require_admin!, only: [
         :create, :update, :destroy, :approve, :publish, :reject, :bulk_import, :bulk_import_status
@@ -112,11 +111,14 @@ module Api
         end
 
         file = params[:file]
-        filename = "#{SecureRandom.hex(8)}_#{file.original_filename}"
-        FileUtils.mkdir_p(BULK_IMPORT_UPLOAD_DIR)
-        File.binwrite(BULK_IMPORT_UPLOAD_DIR.join(filename), file.read)
+        bulk_import = current_tenant.testimonial_bulk_imports.create!(
+          filename: file.original_filename, status: "pending"
+        )
+        # zip_file, não um path em tmp/ — quem processa (Sidekiq) roda num
+        # container separado deste, sem acesso ao filesystem local que
+        # recebeu o upload. Ver TestimonialBulkImport#zip_file.
+        bulk_import.zip_file.attach(io: file, filename: file.original_filename)
 
-        bulk_import = current_tenant.testimonial_bulk_imports.create!(filename: filename, status: "pending")
         Testimonials::ProcessBulkImportJob.perform_later(bulk_import.id)
 
         render json: bulk_import_json(bulk_import), status: :created
