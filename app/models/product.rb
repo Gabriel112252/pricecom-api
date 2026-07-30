@@ -15,7 +15,15 @@ class Product < ApplicationRecord
   has_many :stock_alerts, dependent: :destroy
   has_many :stock_movements, dependent: :destroy
   has_many :stock_replenishment_executions, dependent: :destroy
+  # testimonials/dependent: :nullify é o vínculo antigo (deprecado,
+  # belongs_to :product singular em Testimonial — mantido só pra não exigir
+  # rollback com perda de dado, ver Testimonial#product). O vínculo atual
+  # (múltiplos produtos) é testimonial_products; sem dependent: :destroy
+  # aqui, apagar um produto ainda vinculado a algum testimonial estoura
+  # ActiveRecord::InvalidForeignKey (fk_rails_..._on_testimonial_products)
+  # — a linha da junção some, o Testimonial em si não é afetado.
   has_many :testimonials, dependent: :nullify
+  has_many :testimonial_products, dependent: :destroy
 
   validates :sku, presence: true, uniqueness: { scope: :tenant_id }
   validates :name, presence: true

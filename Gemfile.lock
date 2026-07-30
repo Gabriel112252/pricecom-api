@@ -401,6 +401,7 @@ DEPENDENCIES
   roo
   rspec-rails
   rubocop-rails-omakase
+  rubyzip
   sidekiq (~> 7.3)
   sidekiq-cron
   tzinfo-data

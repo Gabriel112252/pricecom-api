@@ -104,6 +104,8 @@ Rails.application.routes.draw do
       resources :testimonials, only: [ :index, :create, :update, :destroy ] do
         collection do
           post :tiktok_preview
+          post :bulk_import
+          get  "bulk_import/:id", action: :bulk_import_status
         end
         member do
           post :approve

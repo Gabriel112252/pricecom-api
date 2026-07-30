@@ -27,4 +27,11 @@ RSpec.describe TestimonialProduct do
     expect(link).not_to be_valid
     expect(link.errors[:product]).to be_present
   end
+
+  it "destroying the product removes the link but leaves the testimonial itself intact" do
+    TestimonialProduct.create!(testimonial: testimonial, product: product)
+
+    expect { product.destroy! }.to change(TestimonialProduct, :count).by(-1)
+    expect(Testimonial.exists?(testimonial.id)).to be true
+  end
 end

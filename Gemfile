@@ -25,6 +25,11 @@ gem "kaminari"
 gem "active_model_serializers"
 gem "roo"
 
+# ZIP extraction (Testimonials::BulkImportService) — já vinha transitivo via
+# roo, mas nosso código chama Zip::File direto, então fica explícito aqui em
+# vez de depender de uma dependência transitiva de outra gem.
+gem "rubyzip", require: "zip"
+
 # Channel integrations (Yampi/Shopify/TikTok product sync)
 gem "faraday"
 

@@ -8,8 +8,11 @@ module Api
     class TestimonialsController < ApplicationController
       PER_PAGE_DEFAULT = 25
       PER_PAGE_MAX     = 100
+      BULK_IMPORT_UPLOAD_DIR = Rails.root.join("tmp", "testimonial_bulk_imports")
 
-      before_action :require_admin!, only: [ :create, :update, :destroy, :approve, :publish, :reject ]
+      before_action :require_admin!, only: [
+        :create, :update, :destroy, :approve, :publish, :reject, :bulk_import, :bulk_import_status
+      ]
 
       def index
         testimonials = apply_filters(current_tenant.testimonials.includes(:products)).order(created_at: :desc)
@@ -94,6 +97,38 @@ module Api
       # escopo desta fase).
       def reject
         transition(:rejected) { |testimonial| testimonial.reject! }
+      end
+
+      # POST /api/v1/testimonials/bulk_import — cadastro em massa a partir
+      # de um ZIP (CSV + imagens, ver Testimonials::BulkImportService).
+      # Responde de imediato com o id do import; o processamento roda em
+      # background (pode ser centenas de linhas/imagens) — o cliente
+      # consulta o progresso/relatório em #bulk_import_status. Todo
+      # testimonial criado por aqui nasce "draft", igual à ingestão manual
+      # — nunca published automaticamente, nem em lote.
+      def bulk_import
+        unless params[:file]
+          return render json: { error: "Arquivo não enviado" }, status: :unprocessable_entity
+        end
+
+        file = params[:file]
+        filename = "#{SecureRandom.hex(8)}_#{file.original_filename}"
+        FileUtils.mkdir_p(BULK_IMPORT_UPLOAD_DIR)
+        File.binwrite(BULK_IMPORT_UPLOAD_DIR.join(filename), file.read)
+
+        bulk_import = current_tenant.testimonial_bulk_imports.create!(filename: filename, status: "pending")
+        Testimonials::ProcessBulkImportJob.perform_later(bulk_import.id)
+
+        render json: bulk_import_json(bulk_import), status: :created
+      end
+
+      # GET /api/v1/testimonials/bulk_import/:id — polling de progresso;
+      # errors traz o relatório linha a linha assim que status vira "done"
+      # (ou o motivo em errors[0][:error] se o ZIP/CSV inteiro não pôde
+      # nem começar a ser processado e status vira "failed").
+      def bulk_import_status
+        bulk_import = current_tenant.testimonial_bulk_imports.find(params[:id])
+        render json: bulk_import_json(bulk_import)
       end
 
       private
@@ -218,6 +253,18 @@ module Api
         return nil unless testimonial.media.attached?
 
         Rails.application.routes.url_helpers.rails_blob_path(testimonial.media, only_path: true)
+      end
+
+      def bulk_import_json(bulk_import)
+        {
+          id: bulk_import.id,
+          status: bulk_import.status,
+          total_rows: bulk_import.total_rows,
+          processed_rows: bulk_import.processed_rows,
+          error_rows: bulk_import.error_rows,
+          errors: bulk_import.errors_log,
+          finished_at: bulk_import.finished_at
+        }
       end
 
       def pagination_meta(paged)
