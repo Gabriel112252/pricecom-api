@@ -72,6 +72,10 @@ module Integrations
           commission:       0,
           operational_cost: 0
         }
+        # Only Yampi's normalizer returns this key today — guard on
+        # presence so a re-sync from a normalizer that doesn't (TikTok)
+        # never overwrites an already-captured email with nil.
+        attrs[:customer_email] = @normalized[:customer_email].presence if @normalized[:customer_email].present?
         attrs[:coupon_code] = @normalized[:coupon_code].presence if order_has_coupons?
         attrs[:coupon_discount] = @normalized[:coupon_discount].to_f if order_has_coupons?
         attrs[:cart_token] = @normalized[:cart_token].presence if order_has_cart_token?

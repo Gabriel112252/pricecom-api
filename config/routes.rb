@@ -149,6 +149,7 @@ Rails.application.routes.draw do
       get "dashboard/financial", to: "dashboard#financial"
       get "dashboard/freight_orders", to: "dashboard#freight_orders"
       get "dashboard/tiktok_orders", to: "dashboard#tiktok_orders"
+      get "dashboard/customers", to: "dashboard#customers"
 
       # TV Mode token (admin only) — regenerating invalidates the previous link
       get    "tv_token", to: "tv_tokens#show"

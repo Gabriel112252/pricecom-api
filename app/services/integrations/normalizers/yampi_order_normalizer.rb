@@ -28,6 +28,7 @@ module Integrations
           status:         extract_status,
           payment_method: @p["payment_method"].to_s,
           customer_name:  extract_customer_name,
+          customer_email: extract_customer_email,
           customer_tag:   extract_customer_tag,
           state:          extract_state,
           order_type:     extract_order_type,
@@ -121,6 +122,13 @@ module Integrations
       def extract_customer_tag
         tags = Array(unwrap_data(@p["customer"])["tags"] || @p["tags"])
         tags.any? { |t| t.to_s.downcase.include?("recorr") } ? "recorrente" : "novo"
+      end
+
+      # Same shape yampi_cart_normalizer.rb already reads for carts —
+      # customer.email is present on the Orders API / webhook order payload
+      # too, just not persisted for orders until this field was added.
+      def extract_customer_email
+        unwrap_data(@p["customer"])["email"].to_s.strip.downcase.presence
       end
 
       def extract_state

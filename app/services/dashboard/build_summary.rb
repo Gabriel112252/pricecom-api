@@ -1618,7 +1618,8 @@ module Dashboard
         aov:                     current_totals[:aov].round(2),
         aov_vs_previous_pct:     pct_change(current_totals[:aov], prev_totals[:aov]),
         by_channel_series:       build_order_channel_series(scope, granularity),
-        aov_by_channel:          build_aov_by_channel(scope)
+        aov_by_channel:          build_aov_by_channel(scope),
+        aov_by_channel_series:   build_aov_channel_series(scope, granularity)
       }
     end
 
@@ -1633,6 +1634,34 @@ module Dashboard
         )
 
       rows.each_with_object({}) { |(name, avg), hash| hash[name] = avg.to_f.round(2) }
+    end
+
+    # Ticket médio por dia, por canal — mesma fórmula/escopo de
+    # build_aov_by_channel (effective_revenue_sql / COUNT), bucketizado por
+    # date_trunc como build_channel_bucket_series. Não dá pra reaproveitar
+    # build_channel_bucket_series direto: aov é uma RAZÃO de dois agregados
+    # (soma / contagem) calculada por linha, não um valor único plucado.
+    # Um dia sem pedido de um canal simplesmente não aparece na série — o
+    # frontend decide se quebra a linha ou preenche o buraco.
+    def build_aov_channel_series(scope, granularity)
+      trunc = granularity == "hour" ? "hour" : "day"
+      rows = scope
+        .joins(:channel)
+        .group(Arel.sql("date_trunc('#{trunc}', ordered_at)"), "channels.name")
+        .pluck(
+          Arel.sql("date_trunc('#{trunc}', ordered_at)"),
+          Arel.sql("channels.name"),
+          Arel.sql("COALESCE(SUM(#{effective_revenue_sql}), 0)"),
+          Arel.sql("COUNT(*)")
+        )
+
+      rows.map do |bucket, channel_name, revenue, count|
+        {
+          date:    format_bucket(bucket, granularity),
+          channel: channel_name,
+          aov:     count.to_i.positive? ? (revenue.to_f / count.to_i).round(2) : nil
+        }
+      end.sort_by { |row| row[:date] }
     end
 
     def build_order_channel_series(scope, granularity)

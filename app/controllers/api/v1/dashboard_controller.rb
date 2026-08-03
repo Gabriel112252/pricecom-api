@@ -99,6 +99,10 @@ module Api
         }
       end
 
+      def customers
+        render json: Dashboard::BuildCustomers.call(tenant: current_tenant, params: params)
+      end
+
       def financial
         settlements = apply_financial_filters(current_tenant.financial_settlements)
         items       = FinancialSettlementItem.where(

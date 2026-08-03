@@ -87,6 +87,27 @@ RSpec.describe Dashboard::BuildSummary do
 
       expect(result[:orders][:aov_by_channel]).to eq({ "Yampi" => 140.0, "Shopify" => 500.0 })
     end
+
+    it "computes average ticket per day, per channel" do
+      make_order(channel_a, gross: 300, margin: 0, ordered_at: 3.days.ago) # 3rd order on channel_a's day, own bucket
+      make_order(channel_b, gross: 500, margin: 0, ordered_at: 1.day.ago)
+      make_order(channel_b, gross: 300, margin: 0, ordered_at: 1.day.ago) # same day+channel as the one above -> averaged together
+
+      result = described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601))
+
+      series = result[:orders][:aov_by_channel_series]
+      today = 1.day.ago.to_date.iso8601
+      three_days_ago = 3.days.ago.to_date.iso8601
+
+      # channel_a's original 2 orders (100 and 200-20refund=180 net) live on "1 day ago" per the outer `before` block
+      channel_a_today = series.find { |row| row[:channel] == "Yampi" && row[:date] == today }
+      channel_a_3days = series.find { |row| row[:channel] == "Yampi" && row[:date] == three_days_ago }
+      channel_b_today = series.find { |row| row[:channel] == "Shopify" && row[:date] == today }
+
+      expect(channel_a_today[:aov]).to eq(140.0) # (100 + 180) / 2, same as the aggregate aov_by_channel above
+      expect(channel_a_3days[:aov]).to eq(300.0)
+      expect(channel_b_today[:aov]).to eq(400.0) # (500 + 300) / 2
+    end
   end
 
   describe "Vendas — mesma fórmula de receita entre canais (sem divergência silenciosa)" do

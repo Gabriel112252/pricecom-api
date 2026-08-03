@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_07_30_120000) do
+ActiveRecord::Schema[7.2].define(version: 2026_08_03_120000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -619,11 +619,13 @@ ActiveRecord::Schema[7.2].define(version: 2026_07_30_120000) do
     t.string "utm_campaign"
     t.string "utm_content"
     t.string "utm_term"
+    t.string "customer_email"
     t.index "tenant_id, lower((status)::text)", name: "index_orders_on_tenant_id_and_lower_status"
     t.index ["channel_id", "financial_next_attempt_at"], name: "index_orders_on_channel_and_financial_next_attempt_at"
     t.index ["channel_id", "financial_synced_at"], name: "index_orders_on_channel_and_financial_synced_at"
     t.index ["channel_id"], name: "index_orders_on_channel_id"
     t.index ["tenant_id", "cart_token"], name: "index_orders_on_tenant_id_and_cart_token"
+    t.index ["tenant_id", "channel_id", "customer_email"], name: "index_orders_on_tenant_channel_customer_email"
     t.index ["tenant_id", "coupon_code"], name: "index_orders_on_tenant_id_and_coupon_code"
     t.index ["tenant_id", "external_id"], name: "index_orders_on_tenant_id_and_external_id"
     t.index ["tenant_id", "order_type"], name: "index_orders_on_tenant_id_and_order_type"
