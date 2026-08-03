@@ -286,5 +286,53 @@ RSpec.describe Integrations::YampiAdapter do
 
       expect { adapter.fetch_orders(since: 30.days.ago) }.to raise_error(Integrations::RateLimitError)
     end
+
+    describe "date-range bisection on the 10000-record pagination ceiling" do
+      let(:json_headers) { { "Content-Type" => "application/json" } }
+      let(:ceiling_error_body) { { message: "Maximum limit is 10000", status_code: 400 }.to_json }
+
+      def paged_response(ids)
+        { "data" => ids.map { |id| { "id" => id, "number" => "N#{id}" } },
+          "meta" => { "pagination" => { "current_page" => 1, "total_pages" => 1 } } }.to_json
+      end
+
+      it "splits the date range in half and retries when the API rejects it with the 10000 ceiling error" do
+        stub_request(:get, orders_url)
+          .with(query: hash_including("date" => "created_at:2026-06-01|2026-06-10"))
+          .to_return(status: 400, body: ceiling_error_body, headers: json_headers)
+
+        stub_request(:get, orders_url)
+          .with(query: hash_including("date" => "created_at:2026-06-01|2026-06-05"))
+          .to_return(status: 200, body: paged_response([ 1 ]), headers: json_headers)
+
+        stub_request(:get, orders_url)
+          .with(query: hash_including("date" => "created_at:2026-06-06|2026-06-10"))
+          .to_return(status: 200, body: paged_response([ 2 ]), headers: json_headers)
+
+        orders = adapter.fetch_orders(since: Time.zone.parse("2026-06-01"), until_date: Time.zone.parse("2026-06-10"))
+
+        expect(orders.map { |o| o["id"] }).to contain_exactly(1, 2)
+        expect(a_request(:get, orders_url).with(query: hash_including("date" => "created_at:2026-06-01|2026-06-10")))
+          .to have_been_made.once
+      end
+
+      it "propagates the error when even a single day still exceeds the ceiling" do
+        stub_request(:get, orders_url)
+          .with(query: hash_including("date" => "created_at:2026-06-01|2026-06-01"))
+          .to_return(status: 400, body: ceiling_error_body, headers: json_headers)
+
+        expect { adapter.fetch_orders(since: Time.zone.parse("2026-06-01"), until_date: Time.zone.parse("2026-06-01")) }
+          .to raise_error(Integrations::ApiError, /Maximum limit is 10000/)
+      end
+
+      it "re-raises a non-pagination 400 without attempting to bisect" do
+        stub_request(:get, orders_url)
+          .with(query: hash_including("date" => "created_at:2026-06-01|2026-06-10"))
+          .to_return(status: 400, body: { message: "Invalid date format" }.to_json, headers: json_headers)
+
+        expect { adapter.fetch_orders(since: Time.zone.parse("2026-06-01"), until_date: Time.zone.parse("2026-06-10")) }
+          .to raise_error(Integrations::ApiError, /Invalid date format/)
+      end
+    end
   end
 end

@@ -149,26 +149,7 @@ module Integrations
     # Each raw order hash is shaped exactly as
     # Integrations::Normalizers::YampiOrderNormalizer expects.
     def fetch_orders(since:, until_date: Time.current)
-      date_filter = "created_at:#{since.to_date.iso8601}|#{until_date.to_date.iso8601}"
-      orders = []
-      page = 1
-
-      loop do
-        body = with_rate_limit_retry do
-          response = fetch_orders_page(page: page, date_filter: date_filter)
-          handle_order_page_response(response)
-        end
-        page_orders = body["data"] || []
-        orders.concat(page_orders)
-
-        pagination = body.dig("meta", "pagination") || {}
-        total_pages = pagination["total_pages"].to_i
-        break if total_pages <= page || page_orders.empty?
-
-        page += 1
-      end
-
-      orders
+      fetch_orders_for_range(since.to_date, until_date.to_date)
     end
 
     def fetch_orders_page(page:, date_filter:, limit: ORDERS_LIMIT, skip_cache: true)
@@ -392,8 +373,57 @@ module Integrations
         )
       else
         raise ApiError,
-              "#{self.class.name}: resposta inesperada (HTTP #{response.status}) — #{response.body}"
+              "#{self.class.name}: resposta inesperada (HTTP #{response.status}) — params=#{response.params.inspect} — #{response.body}"
       end
+    end
+
+    # Yampi's Orders API rejects offset-style pagination once page*limit
+    # crosses some internal ceiling (HTTP 400 "Maximum limit is 10000") —
+    # confirmed in production running Integrations::Yampi::BackfillOrdersService
+    # against a 53-day Hidrabene window (2026-08-04). Regular incremental
+    # polling (OrdersPollingService, ~30-day rolling window) has never asked
+    # for a date range wide enough to hit this; BackfillOrdersService can,
+    # since its `days:` window may span a tenant's whole order history.
+    #
+    # Rather than guessing a safe fixed chunk size up front — which would
+    # also needlessly fragment every ordinary small-window call — the
+    # requested range is only split in half, recursively, the moment the
+    # API actually rejects it. A range that still doesn't fit after
+    # bisecting splits again; a from == to (single day) range that still
+    # hits the ceiling means that one day alone has more orders than
+    # Yampi's API can page through, and the error is left to propagate
+    # rather than looping forever.
+    ORDERS_PAGINATION_LIMIT_ERROR = /maximum limit is \d+/i
+
+    def fetch_orders_for_range(from_date, to_date)
+      fetch_all_order_pages("created_at:#{from_date.iso8601}|#{to_date.iso8601}")
+    rescue ApiError => e
+      raise unless from_date < to_date && e.message.match?(ORDERS_PAGINATION_LIMIT_ERROR)
+
+      midpoint = from_date + ((to_date - from_date).to_i / 2).days
+      fetch_orders_for_range(from_date, midpoint) + fetch_orders_for_range(midpoint + 1.day, to_date)
+    end
+
+    def fetch_all_order_pages(date_filter)
+      orders = []
+      page = 1
+
+      loop do
+        body = with_rate_limit_retry do
+          response = fetch_orders_page(page: page, date_filter: date_filter)
+          handle_order_page_response(response)
+        end
+        page_orders = body["data"] || []
+        orders.concat(page_orders)
+
+        pagination = body.dig("meta", "pagination") || {}
+        total_pages = pagination["total_pages"].to_i
+        break if total_pages <= page || page_orders.empty?
+
+        page += 1
+      end
+
+      orders
     end
 
     # No leading slash: Faraday resolves a leading-slash path as absolute
