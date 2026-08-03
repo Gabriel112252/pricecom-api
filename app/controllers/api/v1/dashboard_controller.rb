@@ -529,6 +529,7 @@ module Api
           gateway_options: build_receivable_gateway_options,
           cash_flow: build_receivable_cash_flow(receivables),
           by_payment_method: build_receivable_by_payment_method(receivables),
+          sales_by_payment_method: build_receivable_sales_by_payment_method(receivables),
           installment_distribution: build_receivable_installment_distribution(receivables),
           fee_summary: build_receivable_fee_summary(receivables),
           status_options: receivables.reorder(nil).distinct.pluck(Arel.sql("financial_receivables.status")).compact.sort,
@@ -648,6 +649,31 @@ module Api
             pending_installments_count: pending.to_i
           }
         end
+      end
+
+      # "Recebíveis por forma de pagamento" (acima) conta linhas de
+      # financial_receivables — e o Pagar.me quebra uma venda parcelada em N
+      # recebíveis (um por parcela), enquanto Pix/boleto geram 1 só. Isso
+      # infla cartão em qualquer comparação por linha/valor somado. Este
+      # gadget conta vendas distintas (charge_id) em vez de parcelas, pros
+      # mesmos filtros já aplicados na tela — reflete quantas vendas
+      # realmente aconteceram por forma de pagamento, não quantos recebíveis
+      # caem na janela de payment_date.
+      def build_receivable_sales_by_payment_method(receivables)
+        rows = receivables
+          .where.not(charge_id: nil)
+          .group(:payment_method)
+          .pluck(:payment_method, Arel.sql("COUNT(DISTINCT financial_receivables.charge_id)"))
+
+        total = rows.sum { |_, count| count }
+
+        rows.map do |method, count|
+          {
+            payment_method: method.presence || "unknown",
+            sales_count: count.to_i,
+            share_pct: total.positive? ? (count.to_f / total * 100).round(2) : 0.0
+          }
+        end.sort_by { |row| -row[:sales_count] }
       end
 
       def build_receivable_fee_summary(receivables)
