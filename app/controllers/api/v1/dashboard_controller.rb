@@ -12,6 +12,7 @@ module Api
 
       PER_PAGE_DEFAULT = 25
       PER_PAGE_MAX = 100
+      SALES_BY_PAYMENT_METHOD_WINDOW_DAYS = 30
 
       FREIGHT_ORDER_SORTS = {
         "freight_margin" => "(COALESCE(orders.freight, 0) - orders.real_freight_cost)",
@@ -529,7 +530,7 @@ module Api
           gateway_options: build_receivable_gateway_options,
           cash_flow: build_receivable_cash_flow(receivables),
           by_payment_method: build_receivable_by_payment_method(receivables),
-          sales_by_payment_method: build_receivable_sales_by_payment_method(receivables),
+          sales_by_payment_method: build_receivable_sales_by_payment_method,
           installment_distribution: build_receivable_installment_distribution(receivables),
           fee_summary: build_receivable_fee_summary(receivables),
           status_options: receivables.reorder(nil).distinct.pluck(Arel.sql("financial_receivables.status")).compact.sort,
@@ -651,20 +652,37 @@ module Api
         end
       end
 
-      # "Recebíveis por forma de pagamento" (acima) conta linhas de
-      # financial_receivables — e o Pagar.me quebra uma venda parcelada em N
-      # recebíveis (um por parcela), enquanto Pix/boleto geram 1 só. Isso
-      # infla cartão em qualquer comparação por linha/valor somado. Este
-      # gadget conta vendas distintas (charge_id) em vez de parcelas, pros
-      # mesmos filtros já aplicados na tela — reflete quantas vendas
-      # realmente aconteceram por forma de pagamento, não quantos recebíveis
-      # caem na janela de payment_date.
-      def build_receivable_sales_by_payment_method(receivables)
-        rows = receivables
+      # "Recebíveis por forma de pagamento" (e a primeira versão deste
+      # gadget) filtravam por `payment_date` — quando o dinheiro cai — e só
+      # contavam linhas de financial_receivables sem desduplicar parcela.
+      # Isso não é só sobre parcelamento: cartão de crédito no Brasil
+      # liquida ~D+30 pela Pagar.me mesmo à vista (sem parcelar); Pix
+      # liquida no mesmo dia. Numa janela de payment_date "próximos 30
+      # dias" (o filtro padrão da tela), isso acumula ~30 dias de vendas de
+      # cartão PASSADAS — cada uma com seu D+30 caindo agora — contra só o
+      # Pix vendido bem perto de hoje, cujo payment_date já passou pra
+      # qualquer venda mais antiga. Confirmado comparando com o dashboard da
+      # própria Pagar.me (cobranças de hoje: ~68% Pix / ~32% cartão) contra
+      # o que esta tela mostrava usando payment_date (~98% cartão).
+      #
+      # Por isso este gadget NÃO reaproveita o filtro de payment_date da
+      # tela (que responde "o que vai liquidar em breve", não "quantas
+      # vendas por forma de pagamento") — usa `date_created` (quando a
+      # cobrança foi criada na Pagar.me) numa janela fixa de 30 dias
+      # corridos, e conta charge_id distinto (não linha de recebível) pra
+      # não contar parcela como venda separada.
+      def build_receivable_sales_by_payment_method
+        scope = current_tenant.financial_receivables
+          .joins(:financial_source)
+          .where(financial_sources: { provider: "pagarme" })
+          .where("financial_receivables.date_created >= ?", SALES_BY_PAYMENT_METHOD_WINDOW_DAYS.days.ago)
           .where.not(charge_id: nil)
-          .group(:payment_method)
-          .pluck(:payment_method, Arel.sql("COUNT(DISTINCT financial_receivables.charge_id)"))
 
+        if params[:financial_source_id].present? && params[:financial_source_id] != "all"
+          scope = scope.where(financial_source_id: params[:financial_source_id])
+        end
+
+        rows = scope.group(:payment_method).pluck(:payment_method, Arel.sql("COUNT(DISTINCT financial_receivables.charge_id)"))
         total = rows.sum { |_, count| count }
 
         rows.map do |method, count|

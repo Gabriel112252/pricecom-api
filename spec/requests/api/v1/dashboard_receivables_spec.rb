@@ -11,7 +11,8 @@ RSpec.describe "Dashboard receivables", type: :request do
     { "Authorization" => "Bearer #{JsonWebToken.encode(user_id: user.id)}" }
   end
 
-  def make_receivable(payment_method:, charge_id:, payable_id: SecureRandom.hex(6), amount: 100, status: "paid")
+  def make_receivable(payment_method:, charge_id:, payable_id: SecureRandom.hex(6), amount: 100, status: "paid",
+    payment_date: Date.current, date_created: Time.current)
     tenant.financial_receivables.create!(
       financial_source: financial_source,
       payable_id: payable_id,
@@ -22,7 +23,8 @@ RSpec.describe "Dashboard receivables", type: :request do
       fee_amount: 0,
       anticipation_fee_amount: 0,
       net_amount: amount,
-      payment_date: Date.current
+      payment_date: payment_date,
+      date_created: date_created
     )
   end
 
@@ -64,6 +66,44 @@ RSpec.describe "Dashboard receivables", type: :request do
 
     it "excludes receivables without a charge_id from the sales count" do
       make_receivable(payment_method: "boleto", charge_id: nil)
+
+      get "/api/v1/dashboard/financial", headers: auth_headers(operador)
+
+      dashboard = JSON.parse(response.body)["receivables_dashboard"]
+      expect(dashboard["sales_by_payment_method"]).to eq([])
+    end
+
+    # The actual bug: credit card settles ~D+30 in Brazil even à vista (no
+    # installments), while Pix settles same-day. A forward-looking
+    # payment_date window (today..+30 days, this screen's default filter)
+    # accumulates a month of PAST credit card sales landing now, while Pix
+    # only shows whatever sold right around today — making card look
+    # dominant regardless of actual sales mix. sales_by_payment_method must
+    # use date_created (when the charge happened) instead, so it isn't
+    # fooled by the settlement lag.
+    it "ignores payment_date entirely and counts by date_created instead" do
+      # payment_date far in the future (old card sale settling ~D+30 from
+      # now) — still counts, because it happened recently (date_created).
+      make_receivable(payment_method: "credit_card", charge_id: SecureRandom.hex(6),
+        payment_date: 25.days.from_now.to_date, date_created: 5.days.ago)
+      # payment_date today (a pix sale settling instantly) — also counts.
+      make_receivable(payment_method: "pix", charge_id: SecureRandom.hex(6),
+        payment_date: Date.current, date_created: 1.day.ago)
+
+      get "/api/v1/dashboard/financial",
+        params: { payment_date_from: Date.current.iso8601, payment_date_to: 30.days.from_now.to_date.iso8601 },
+        headers: auth_headers(operador)
+
+      dashboard = JSON.parse(response.body)["receivables_dashboard"]
+      by_sale = dashboard["sales_by_payment_method"].index_by { |row| row["payment_method"] }
+
+      expect(by_sale["credit_card"]["sales_count"]).to eq(1)
+      expect(by_sale["pix"]["sales_count"]).to eq(1)
+    end
+
+    it "excludes a sale older than the 30-day window even if its payment_date is still upcoming" do
+      make_receivable(payment_method: "credit_card", charge_id: SecureRandom.hex(6),
+        payment_date: 5.days.from_now.to_date, date_created: 45.days.ago)
 
       get "/api/v1/dashboard/financial", headers: auth_headers(operador)
 
