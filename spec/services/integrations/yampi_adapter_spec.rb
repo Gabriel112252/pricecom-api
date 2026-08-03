@@ -255,10 +255,101 @@ RSpec.describe Integrations::YampiAdapter do
 
       stub_request(:get, orders_url).with(query: hash_including("page" => "1")).to_return(status: 200, body: page1.to_json, headers: json_headers)
       stub_request(:get, orders_url).with(query: hash_including("page" => "2")).to_return(status: 200, body: page2.to_json, headers: json_headers)
+      allow(adapter).to receive(:sleep)
 
       orders = adapter.fetch_orders(since: 30.days.ago)
 
       expect(orders.map { |o| o["id"] }).to include(1000001, 1000002, 1000003)
+    end
+
+    it "sleeps between pages to stay under Yampi's 120 req/min orders limit" do
+      page1 = JSON.parse(orders_fixture)
+      page1["meta"]["pagination"] = page1["meta"]["pagination"].merge("current_page" => 1, "total_pages" => 2)
+      page2 = { "data" => [ { "id" => 1000003, "number" => 555003 } ],
+                "meta" => { "pagination" => { "current_page" => 2, "total_pages" => 2 } } }
+      json_headers = { "Content-Type" => "application/json" }
+
+      stub_request(:get, orders_url).with(query: hash_including("page" => "1")).to_return(status: 200, body: page1.to_json, headers: json_headers)
+      stub_request(:get, orders_url).with(query: hash_including("page" => "2")).to_return(status: 200, body: page2.to_json, headers: json_headers)
+
+      expect(adapter).to receive(:sleep).with(described_class::ORDERS_PAGE_SLEEP_SECONDS).once
+
+      adapter.fetch_orders(since: 30.days.ago)
+    end
+
+    it "does not sleep after the last page (single-page result)" do
+      stub_request(:get, orders_url).with(query: hash_including("page" => "1"))
+        .to_return(status: 200, body: orders_fixture, headers: { "Content-Type" => "application/json" })
+
+      expect(adapter).not_to receive(:sleep)
+
+      adapter.fetch_orders(since: 30.days.ago)
+    end
+
+    it "yields each page's orders to the given block as soon as it's fetched, before fetching the next page" do
+      page1 = JSON.parse(orders_fixture)
+      page1["meta"]["pagination"] = page1["meta"]["pagination"].merge("current_page" => 1, "total_pages" => 2)
+      page2 = { "data" => [ { "id" => 1000003, "number" => 555003 } ],
+                "meta" => { "pagination" => { "current_page" => 2, "total_pages" => 2 } } }
+      json_headers = { "Content-Type" => "application/json" }
+
+      stub_request(:get, orders_url).with(query: hash_including("page" => "1")).to_return(status: 200, body: page1.to_json, headers: json_headers)
+      stub_request(:get, orders_url).with(query: hash_including("page" => "2")).to_return(status: 200, body: page2.to_json, headers: json_headers)
+      allow(adapter).to receive(:sleep)
+
+      yielded_pages = []
+      orders = adapter.fetch_orders(since: 30.days.ago) { |page_orders| yielded_pages << page_orders.map { |o| o["id"] } }
+
+      expect(yielded_pages).to eq([ [ 1000001, 1000002 ], [ 1000003 ] ])
+      expect(orders.map { |o| o["id"] }).to eq([ 1000001, 1000002, 1000003 ])
+    end
+
+    it "also yields the page number, so a caller can checkpoint how far it got" do
+      stub_request(:get, orders_url).with(query: hash_including("page" => "1"))
+        .to_return(status: 200, body: orders_fixture, headers: { "Content-Type" => "application/json" })
+
+      yielded = []
+      adapter.fetch_orders(since: 30.days.ago) { |page_orders, page| yielded << [ page, page_orders.size ] }
+
+      expect(yielded).to eq([ [ 1, 2 ] ])
+    end
+
+    it "resumes from start_page instead of re-requesting earlier pages" do
+      page2 = { "data" => [ { "id" => 1000003, "number" => 555003 } ],
+                "meta" => { "pagination" => { "current_page" => 2, "total_pages" => 2 } } }
+
+      stub_request(:get, orders_url).with(query: hash_including("page" => "2"))
+        .to_return(status: 200, body: page2.to_json, headers: { "Content-Type" => "application/json" })
+      page1_request = stub_request(:get, orders_url).with(query: hash_including("page" => "1"))
+
+      orders = adapter.fetch_orders(since: 30.days.ago, start_page: 2)
+
+      expect(orders.map { |o| o["id"] }).to eq([ 1000003 ])
+      expect(page1_request).not_to have_been_requested
+    end
+
+    it "still yields pages fetched successfully before a bisection split, without waiting for the whole range" do
+      json_headers = { "Content-Type" => "application/json" }
+      ceiling_error_body = { message: "Maximum limit is 10000", status_code: 400 }.to_json
+
+      stub_request(:get, orders_url)
+        .with(query: hash_including("date" => "created_at:2026-06-01|2026-06-10"))
+        .to_return(status: 400, body: ceiling_error_body, headers: json_headers)
+
+      stub_request(:get, orders_url)
+        .with(query: hash_including("date" => "created_at:2026-06-01|2026-06-05"))
+        .to_return(status: 200, body: { "data" => [ { "id" => 1 } ], "meta" => { "pagination" => { "current_page" => 1, "total_pages" => 1 } } }.to_json, headers: json_headers)
+
+      stub_request(:get, orders_url)
+        .with(query: hash_including("date" => "created_at:2026-06-06|2026-06-10"))
+        .to_return(status: 200, body: { "data" => [ { "id" => 2 } ], "meta" => { "pagination" => { "current_page" => 1, "total_pages" => 1 } } }.to_json, headers: json_headers)
+
+      yielded_ids = []
+      adapter.fetch_orders(since: Time.zone.parse("2026-06-01"), until_date: Time.zone.parse("2026-06-10")) do |page_orders|
+        yielded_ids.concat(page_orders.map { |o| o["id"] })
+      end
+
+      expect(yielded_ids).to contain_exactly(1, 2)
     end
 
     it "retries transparently on a 429 and succeeds once the rate limit clears" do

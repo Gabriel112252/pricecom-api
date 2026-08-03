@@ -19,6 +19,25 @@ module Integrations
     ORDERS_LIMIT = 100
     CARTS_LIMIT = 100
 
+    # Throttle preventivo entre páginas de #fetch_orders (usado por
+    # Integrations::Yampi::BackfillOrdersService e
+    # CartConversionBackfillService). Yampi documenta 120 req/min em
+    # GET /{alias}/orders (confirmado 2026-08-04); sem nenhum espaçamento
+    # aqui, um backfill de histórico inteiro pode disparar páginas bem mais
+    # rápido que isso e tomar 429 no meio do processo. Integrations::
+    # Yampi::RateLimiter já resolve isso pro polling incremental
+    # (OrdersPollingService), mas depende de Redis e de orçamento
+    # compartilhado entre processos — inadequado pra este método, que
+    # também é chamado fora de qualquer contexto de job/Sidekiq. Mesmo
+    # padrão já usado do lado TikTok pra este exato problema (ver
+    # PendingFinancialSyncService::PENDING_SYNC_SLEEP_SECONDS): um sleep
+    # fixo configurável, sem coordenação entre processos. 600ms = ~100
+    # req/min, com margem de segurança sobre o teto real de 120. Não
+    # protege contra OrdersPollingService rodando ao mesmo tempo pro mesmo
+    # tenant e consumindo parte do mesmo orçamento — with_rate_limit_retry
+    # (reativo, já existente) cobre esse resíduo via retry com backoff.
+    ORDERS_PAGE_SLEEP_SECONDS = Integer(ENV.fetch("YAMPI_BACKFILL_SLEEP_MS", "600")) / 1000.0
+
     OrderPage = Struct.new(:status, :body, :headers, :duration_ms, :params, keyword_init: true) do
       def data
         body.is_a?(Hash) && body["data"].is_a?(Array) ? body["data"] : []
@@ -148,8 +167,28 @@ module Integrations
     #
     # Each raw order hash is shaped exactly as
     # Integrations::Normalizers::YampiOrderNormalizer expects.
-    def fetch_orders(since:, until_date: Time.current)
-      fetch_orders_for_range(since.to_date, until_date.to_date)
+    #
+    # Accepts an optional block, yielded (page_orders, page_number) once per
+    # PAGE as soon as it's fetched — added so
+    # Integrations::Yampi::BackfillOrdersService can persist orders
+    # incrementally instead of waiting for the entire (potentially
+    # multi-thousand-order) window to finish fetching before writing
+    # anything to the database. Still returns the full accumulated array
+    # either way, so callers that don't need incremental processing
+    # (Integrations::Yampi::CartConversionBackfillService) work unchanged.
+    #
+    # `start_page:` lets a caller resume a previously interrupted fetch
+    # without re-requesting pages already known to have succeeded — ONLY
+    # meaningful when `since`/`until_date` are exactly the same values used
+    # on the original attempt (a resumed caller must persist and reuse the
+    # original absolute window, not recompute a relative one, or "page N"
+    # silently stops meaning the same thing). It only applies to the
+    # top-level range: if the request ends up bisected (see
+    # fetch_orders_for_range below), each half always starts at page 1 —
+    # "page N of the original, unsplit range" has no equivalent inside a
+    # narrower date sub-range.
+    def fetch_orders(since:, until_date: Time.current, start_page: 1, &block)
+      fetch_orders_for_range(since.to_date, until_date.to_date, start_page: start_page, &block)
     end
 
     def fetch_orders_page(page:, date_filter:, limit: ORDERS_LIMIT, skip_cache: true)
@@ -395,18 +434,20 @@ module Integrations
     # rather than looping forever.
     ORDERS_PAGINATION_LIMIT_ERROR = /maximum limit is \d+/i
 
-    def fetch_orders_for_range(from_date, to_date)
-      fetch_all_order_pages("created_at:#{from_date.iso8601}|#{to_date.iso8601}")
+    def fetch_orders_for_range(from_date, to_date, start_page: 1, &block)
+      fetch_all_order_pages("created_at:#{from_date.iso8601}|#{to_date.iso8601}", start_page: start_page, &block)
     rescue ApiError => e
       raise unless from_date < to_date && e.message.match?(ORDERS_PAGINATION_LIMIT_ERROR)
 
+      # start_page is deliberately NOT forwarded here — see fetch_orders'
+      # doc comment above.
       midpoint = from_date + ((to_date - from_date).to_i / 2).days
-      fetch_orders_for_range(from_date, midpoint) + fetch_orders_for_range(midpoint + 1.day, to_date)
+      fetch_orders_for_range(from_date, midpoint, &block) + fetch_orders_for_range(midpoint + 1.day, to_date, &block)
     end
 
-    def fetch_all_order_pages(date_filter)
+    def fetch_all_order_pages(date_filter, start_page: 1)
       orders = []
-      page = 1
+      page = start_page
 
       loop do
         body = with_rate_limit_retry do
@@ -414,6 +455,7 @@ module Integrations
           handle_order_page_response(response)
         end
         page_orders = body["data"] || []
+        yield page_orders, page if block_given?
         orders.concat(page_orders)
 
         pagination = body.dig("meta", "pagination") || {}
@@ -421,6 +463,7 @@ module Integrations
         break if total_pages <= page || page_orders.empty?
 
         page += 1
+        sleep(ORDERS_PAGE_SLEEP_SECONDS) if ORDERS_PAGE_SLEEP_SECONDS.positive?
       end
 
       orders
