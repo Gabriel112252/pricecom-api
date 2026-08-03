@@ -406,6 +406,33 @@ RSpec.describe Integrations::TiktokAdapter do
           expect(error.message).not_to include("tok789", "secret456", "GCP_cipher")
         }
     end
+
+    it "retries transparently on a 429 and succeeds once the rate limit clears" do
+      call_count = 0
+      stub_request(:get, /\A#{Regexp.escape(statement_url)}/).to_return do
+        call_count += 1
+        if call_count == 1
+          { status: 429, body: { message: "Too Many Requests" }.to_json, headers: { "Retry-After" => "0" } }
+        else
+          { status: 200, body: statement_fixture, headers: { "Content-Type" => "application/json" } }
+        end
+      end
+      allow(adapter).to receive(:sleep)
+
+      result = adapter.fetch_order_statement_transactions("584933315891857248")
+
+      expect(call_count).to eq(2)
+      expect(result).to eq(JSON.parse(statement_fixture))
+    end
+
+    it "gives up and raises after exceeding the retry budget" do
+      stub_request(:get, /\A#{Regexp.escape(statement_url)}/)
+        .to_return(status: 429, body: { message: "Too Many Requests" }.to_json, headers: { "Retry-After" => "0" })
+      allow(adapter).to receive(:sleep)
+
+      expect { adapter.fetch_order_statement_transactions("584933315891857248") }
+        .to raise_error(Integrations::RateLimitError)
+    end
   end
 
   describe "#fetch_financial_statements" do

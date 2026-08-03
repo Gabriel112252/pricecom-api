@@ -376,7 +376,11 @@ module Integrations
       end
 
       path = "#{ORDER_STATEMENT_TRANSACTIONS_PATH}/#{normalized_order_id}/statement_transactions"
-      get(path, query_params: { shop_cipher: shop_cipher })
+      # Segunda camada de proteção reativa — o throttle preventivo já fica no
+      # loop de PendingFinancialSyncService#call; isto cobre o caso de um
+      # rate limit acontecer mesmo assim (ex.: outro processo batendo na
+      # mesma credencial ao mesmo tempo).
+      with_rate_limit_retry { get(path, query_params: { shop_cipher: shop_cipher }) }
     end
 
     # Get Statements 202309. The API only exposes data after 2023-07-01 and

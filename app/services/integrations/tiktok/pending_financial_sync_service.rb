@@ -4,6 +4,10 @@ module Integrations
       ACTION = "tiktok_pending_financial_sync".freeze
       DEFAULT_BATCH_SIZE = Integer(ENV.fetch("TIKTOK_PENDING_FINANCIAL_BATCH_SIZE", "100"))
       DEFAULT_WINDOW_DAYS = Integer(ENV.fetch("TIKTOK_PENDING_FINANCIAL_WINDOW_DAYS", "90"))
+      # Throttle preventivo entre chamadas de statement_transactions — sem
+      # isso, um batch_size alto bate no rate limit da Finance API do TikTok
+      # quase sempre (nenhum delay existia antes entre pedidos do mesmo run).
+      PENDING_SYNC_SLEEP_SECONDS = Integer(ENV.fetch("TIKTOK_PENDING_FINANCIAL_SYNC_SLEEP_MS", "250")) / 1000.0
       RECENT_DAYS = 14
       RECENT_BASE_DELAY = 15.minutes
       OLD_BASE_DELAY = 2.hours
@@ -58,13 +62,20 @@ module Integrations
         pending_orders.find_each(batch_size: batch_size) do |order|
           process_order(order)
           persist_checkpoint(order)
-          break if processed_count >= batch_size || authentication_failed?
+          break if processed_count >= batch_size || authentication_failed? || rate_limit_hit?
+          sleep(PENDING_SYNC_SLEEP_SECONDS) if PENDING_SYNC_SLEEP_SECONDS.positive?
         end
         finish_log(error_count.positive? ? "error" : "success")
         result(error_count.positive? ? :error : :success, log.error_message)
       rescue Integrations::AuthenticationError => e
         finish_log("error", e.message)
         result(:error, e.message)
+      # Rede de segurança: no caminho normal, RateLimitError é tratado dentro
+      # de process_order (não propaga mais até aqui) — isso só dispara se um
+      # rate limit acontecer fora do processamento de um pedido específico
+      # (ex.: no start_log/checkpoint). O retry_on genérico do job cobre esse
+      # caso residual; o caminho comum de recuperação é o
+      # schedule_pending_continuation do job, via pending_count > 0.
       rescue Integrations::RateLimitError
         finish_log("pending", "rate limited")
         raise
@@ -91,6 +102,7 @@ module Integrations
         @error_samples = []
         @lock_acquired = false
         @authentication_failed = false
+        @rate_limit_hit = false
       end
 
       def pending_orders
@@ -152,7 +164,11 @@ module Integrations
           next_at: next_at
         )
         @pending_count += 1
-        raise
+        # Não relança: o rate limit encerra o batch (ver rate_limit_hit? no
+        # find_each de #call) e deixa o job reagendar a continuação via
+        # schedule_pending_continuation, em vez de matar o job inteiro e
+        # depender do retry_on genérico do ActiveJob.
+        @rate_limit_hit = true
       rescue Faraday::Error, Integrations::ApiError => e
         @processed_count += 1
         @error_count += 1
@@ -276,6 +292,7 @@ module Integrations
       def order_ids = @order_ids
       def lock_acquired = @lock_acquired
       def authentication_failed? = @authentication_failed
+      def rate_limit_hit? = @rate_limit_hit
       def result(outcome, error_message = nil)
         Result.new(outcome: outcome, error_message: error_message, metadata: metadata_snapshot)
       end

@@ -16,6 +16,10 @@ RSpec.describe Integrations::Tiktok::PendingFinancialSyncService do
   before do
     allow(Integrations::TiktokAdapter).to receive(:new).and_return(adapter)
     allow(Integrations::Tiktok::FinancialSyncLock).to receive(:new).and_return(lock)
+    # Nenhum teste deste arquivo depende do delay real entre pedidos —
+    # sem isso, specs com mais de um pedido pausariam de verdade por
+    # PENDING_SYNC_SLEEP_SECONDS a cada execução.
+    allow_any_instance_of(described_class).to receive(:sleep)
   end
 
   it "keeps an order pending when the statement is not available" do
@@ -69,5 +73,33 @@ RSpec.describe Integrations::Tiktok::PendingFinancialSyncService do
     expect(Integrations::Tiktok::OrderFinancialSyncService).to have_received(:call).once
     expect(result.metadata["synced_count"]).to eq(1)
     expect(order.reload.financial_synced_at).to be_present
+  end
+
+  it "stops the batch on a rate limit without raising, and reschedules only the affected order" do
+    order1 = tenant.orders.create!(channel: channel, external_id: "order-1", status: "COMPLETED", ordered_at: 1.day.ago)
+    order2 = tenant.orders.create!(channel: channel, external_id: "order-2", status: "COMPLETED", ordered_at: 1.day.ago)
+    allow(Integrations::Tiktok::OrderFinancialSyncService).to receive(:call)
+      .and_raise(Integrations::RateLimitError.new("rate limited", retry_after: 30))
+
+    result = described_class.call(credential, order_ids: [ order1.id, order2.id ], batch_size: 10)
+
+    expect(result.success?).to eq(true)
+    expect(result.metadata["pending_count"]).to eq(1)
+    expect(Integrations::Tiktok::OrderFinancialSyncService).to have_received(:call).once
+    expect(order1.reload.financial_pending_reason).to eq("rate_limited")
+    expect(order1.financial_next_attempt_at).to be_present
+    expect(order2.reload.financial_pending_reason).to be_nil
+  end
+
+  it "throttles between successful orders to avoid tripping the Finance API rate limit" do
+    order1 = tenant.orders.create!(channel: channel, external_id: "order-1", status: "COMPLETED", ordered_at: 1.day.ago)
+    order2 = tenant.orders.create!(channel: channel, external_id: "order-2", status: "COMPLETED", ordered_at: 1.day.ago)
+    allow(Integrations::Tiktok::OrderFinancialSyncService).to receive(:call) do |order:, **|
+      order.update!(financial_synced_at: Time.current)
+      order
+    end
+    expect_any_instance_of(described_class).to receive(:sleep).with(described_class::PENDING_SYNC_SLEEP_SECONDS).once
+
+    described_class.call(credential, order_ids: [ order1.id, order2.id ], batch_size: 2)
   end
 end

@@ -7,7 +7,12 @@ module Integrations
 
       retry_on Integrations::Tiktok::FinancialSyncLock::LockLostError, wait: 1.minute, attempts: 5
       retry_on Integrations::Tiktok::FinancialSyncLock::LockBusyError, wait: 2.minutes, attempts: 10
-      retry_on Integrations::RateLimitError, wait: 1.minute, attempts: 5
+      # Rede de segurança mínima: no caminho normal, RateLimitError não
+      # escapa mais de PendingFinancialSyncService#call — quem reagenda a
+      # continuação do batch é schedule_pending_continuation, abaixo, via
+      # pending_count > 0 e o next_retry_at calculado a partir do
+      # retry_after real do TikTok.
+      retry_on Integrations::RateLimitError, wait: 1.minute, attempts: 2
       retry_on Faraday::Error, wait: 30.seconds, attempts: 3
       retry_on ActiveRecord::Deadlocked, wait: 5.seconds, attempts: 3
 
