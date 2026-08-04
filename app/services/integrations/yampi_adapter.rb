@@ -191,6 +191,15 @@ module Integrations
       fetch_orders_for_range(since.to_date, until_date.to_date, start_page: start_page, &block)
     end
 
+    # Sem parâmetro de ordenação: investigado 2026-08-04 (docs.yampi.com.br/
+    # api-reference/pedidos/pedido/listar-pedidos) — a doc pública não lista
+    # NENHUM sort/order pro GET /orders, só filtros, page/limit e include.
+    # Paginação por offset sem sort estável fica exposta à ordem default
+    # (não documentada/garantida) da API, o que causa deriva de página real
+    # quando a janela do fetch inclui um dia ainda recebendo pedidos novos
+    # (confirmado em produção — ver o comentário sobre default_window_end em
+    # Integrations::Yampi::BackfillOrdersService, que mitiga isso excluindo
+    # o dia corrente da janela por padrão, já que não há sort pra fixar aqui).
     def fetch_orders_page(page:, date_filter:, limit: ORDERS_LIMIT, skip_cache: true)
       # promocode: mesma relação já pedida no fetch de carrinhos — sem ela a
       # API não embarca o cupom e o normalizer nunca vê coupon_code.

@@ -1,5 +1,7 @@
 module Dashboard
-  # Aba "Clientes" — taxa de recompra + receita novos/recorrentes + RFM.
+  # Aba "Clientes" — 4 indicadores de recompra: taxa de recompra por
+  # cliente (com evolução temporal), % de pedidos que são recompra, tempo
+  # até recompra (histograma) e produtos mais recomprados (2 rankings).
   # v1 só suporta o canal Yampi: é o único canal com customer_email
   # persistido (ver YampiOrderNormalizer#extract_customer_email e a
   # migration 20260803120000). TikTok Shop não tem identificador de
@@ -8,6 +10,16 @@ module Dashboard
   # uma chave de cliente, e por isso não serve pra agrupar.
   class BuildCustomers
     SUPPORTED_CHANNELS = %w[yampi].freeze
+    GAP_BUCKET_RANGES = [
+      ["0-15", 0...15],
+      ["15-30", 15...30],
+      ["30-60", 30...60],
+      ["60-90", 60...90],
+      ["90-180", 90...180],
+      ["180+", 180...Float::INFINITY]
+    ].freeze
+    PRODUCT_RANKING_LIMIT = 12
+    MIN_CUSTOMERS_FOR_PRODUCT_PCT_RANKING = 20
 
     def self.call(tenant:, params:)
       new(tenant: tenant, params: params).call
@@ -33,9 +45,10 @@ module Dashboard
         unsupported_reason: nil,
         period:       { from: period[:from].iso8601, to: period[:to].iso8601 },
         granularity:  granularity,
-        repeat_purchase_rate:     build_repeat_purchase_rate(full_scope, period, prev_period),
-        revenue_by_customer_type: build_revenue_by_customer_type(full_scope, period, granularity),
-        rfm_segments:             build_rfm_segments(full_scope)
+        repeat_purchase_rate:     build_repeat_purchase_rate(full_scope, period, prev_period, granularity),
+        repeat_order_share:       build_repeat_order_share(full_scope, period, granularity),
+        repurchase_gap_histogram: build_repurchase_gap_histogram(full_scope),
+        repeat_product_rankings:  build_repeat_product_rankings(channel)
       }
     end
 
@@ -51,8 +64,13 @@ module Dashboard
         period: nil,
         granularity: nil,
         repeat_purchase_rate: nil,
-        revenue_by_customer_type: nil,
-        rfm_segments: []
+        repeat_order_share: nil,
+        repurchase_gap_histogram: nil,
+        repeat_product_rankings: {
+          by_volume: [],
+          by_customer_pct: [],
+          min_customers_threshold: MIN_CUSTOMERS_FOR_PRODUCT_PCT_RANKING
+        }
       }
     end
 
@@ -108,16 +126,9 @@ module Dashboard
       scope.where(order_type: %w[sale refund]).not_canceled.revenue_countable
     end
 
-    # Mirrors Dashboard::BuildSummary#effective_revenue_sql's non-TikTok
-    # branch — este service só atende canais não-TikTok (SUPPORTED_CHANNELS),
-    # então o CASE por plataforma daquele helper nunca se aplicaria aqui.
-    def effective_revenue_sql
-      "(COALESCE(orders.gross_value, 0) - COALESCE(orders.discount, 0) - COALESCE(orders.refund_amount, 0))"
-    end
+    # ---- 1) Taxa de recompra (por cliente) ----
 
-    # ---- 1) Taxa de recompra ----
-
-    def build_repeat_purchase_rate(scope, period, prev_period)
+    def build_repeat_purchase_rate(scope, period, prev_period, granularity)
       current  = repeat_purchase_rate_for(scope, period)
       previous = repeat_purchase_rate_for(scope, prev_period)
 
@@ -126,7 +137,8 @@ module Dashboard
         vs_previous_pct:     pct_change(current[:rate], previous[:rate]),
         total_customers:     current[:total_customers],
         repeat_customers:    current[:repeat_customers],
-        orders_without_customer_email_count: current[:orders_without_email]
+        orders_without_customer_email_count: current[:orders_without_email],
+        timeline: repeat_purchase_timeline_for(scope, period, granularity)
       }
     end
 
@@ -143,122 +155,186 @@ module Dashboard
       { rate: rate, total_customers: total, repeat_customers: repeat, orders_without_email: orders_without_email }
     end
 
-    # ---- 2) Receita: clientes novos vs recorrentes ----
-
-    # "Novo" = pedido em que ordered_at cai no mesmo dia da primeira compra
-    # VÁLIDA do cliente em TODO o histórico do canal (não só dentro do
-    # período) — ver nota do spec: recompra (item 1) e "primeira compra"
-    # (aqui) são cálculos diferentes de propósito.
-    def build_revenue_by_customer_type(scope, period, granularity)
-      first_order_at = scope.where.not(customer_email: nil).group(:customer_email).minimum(:ordered_at)
-
-      buckets = bucket_keys_for(period, granularity).index_with do
-        { new_customer_revenue: 0.0, returning_customer_revenue: 0.0, unknown_customer_revenue: 0.0 }
-      end
-
+    # Mesma fórmula de repeat_purchase_rate_for (clientes com 2+ pedidos /
+    # clientes com 1+ pedido), aplicada por bucket em vez de uma vez só
+    # pro período inteiro — dá o gráfico de evolução do indicador 1.
+    def repeat_purchase_timeline_for(scope, period, granularity)
       rows = scope
         .where(ordered_at: period[:from].beginning_of_day..period[:to].end_of_day)
-        .pluck(:customer_email, :ordered_at, Arel.sql(effective_revenue_sql))
+        .where.not(customer_email: nil)
+        .pluck(:customer_email, :ordered_at)
 
-      orders_without_email = 0
-
-      rows.each do |email, ordered_at, revenue|
+      per_bucket = Hash.new { |h, k| h[k] = Hash.new(0) }
+      rows.each do |email, ordered_at|
         bucket_start = granularity == "hour" ? ordered_at.beginning_of_hour : ordered_at.beginning_of_day
-        key = format_bucket(bucket_start, granularity)
-        bucket = (buckets[key] ||= { new_customer_revenue: 0.0, returning_customer_revenue: 0.0, unknown_customer_revenue: 0.0 })
+        per_bucket[format_bucket(bucket_start, granularity)][email] += 1
+      end
 
-        if email.blank?
-          orders_without_email += 1
-          bucket[:unknown_customer_revenue] += revenue.to_f
-        elsif first_order_at[email]&.to_date == ordered_at.to_date
-          bucket[:new_customer_revenue] += revenue.to_f
-        else
-          bucket[:returning_customer_revenue] += revenue.to_f
+      bucket_keys_for(period, granularity).map do |key|
+        counts = per_bucket[key] || {}
+        total  = counts.size
+        repeat = counts.count { |_email, n| n >= 2 }
+        {
+          bucket: key,
+          value_pct: total.positive? ? (repeat.to_f / total * 100).round(2) : nil,
+          total_customers: total,
+          repeat_customers: repeat
+        }
+      end
+    end
+
+    # ---- 2) % de pedidos que são recompra (por pedido, histórico completo) ----
+
+    # Diferente do indicador 1: aqui a base é o PEDIDO, não o cliente. Um
+    # pedido é "recompra" se o cliente já tinha algum pedido válido anterior
+    # em TODO o histórico do canal — não só dentro do período selecionado —
+    # por isso first_order_at é calculado sobre `scope` sem bound de
+    # período (mesma ideia que a extinta build_revenue_by_customer_type já
+    # usava pra achar a "primeira compra" do cliente).
+    def build_repeat_order_share(scope, period, granularity)
+      first_order_at = scope.where.not(customer_email: nil).group(:customer_email).minimum(:ordered_at)
+
+      period_scope = scope.where(ordered_at: period[:from].beginning_of_day..period[:to].end_of_day)
+      rows = period_scope.where.not(customer_email: nil).pluck(:customer_email, :ordered_at)
+      orders_without_email = period_scope.where(customer_email: nil).count
+
+      per_bucket = Hash.new { |h, k| h[k] = { total: 0, repeat: 0 } }
+      total_period = 0
+      repeat_period = 0
+
+      rows.each do |email, ordered_at|
+        bucket_start = granularity == "hour" ? ordered_at.beginning_of_hour : ordered_at.beginning_of_day
+        bucket = per_bucket[format_bucket(bucket_start, granularity)]
+        bucket[:total] += 1
+        total_period += 1
+        if first_order_at[email] && ordered_at > first_order_at[email]
+          bucket[:repeat] += 1
+          repeat_period += 1
         end
       end
 
+      timeline = bucket_keys_for(period, granularity).map do |key|
+        c = per_bucket[key] || { total: 0, repeat: 0 }
+        {
+          bucket: key,
+          value_pct: c[:total].positive? ? (c[:repeat].to_f / c[:total] * 100).round(2) : nil,
+          total_orders: c[:total],
+          repeat_orders: c[:repeat]
+        }
+      end
+
       {
-        timeline: buckets.map { |date, values|
-          {
-            date: date,
-            new_customer_revenue:       values[:new_customer_revenue].round(2),
-            returning_customer_revenue: values[:returning_customer_revenue].round(2),
-            unknown_customer_revenue:   values[:unknown_customer_revenue].round(2)
-          }
-        },
-        orders_without_customer_email_count: orders_without_email
+        value_pct: total_period.positive? ? (repeat_period.to_f / total_period * 100).round(2) : nil,
+        total_orders: total_period,
+        repeat_orders: repeat_period,
+        orders_without_customer_email_count: orders_without_email,
+        timeline: timeline
       }
     end
 
-    # ---- 3) Segmentação RFM ----
-    # Frequência/Monetário sobre o HISTÓRICO COMPLETO do cliente (não só o
-    # período selecionado) — decisão do spec pra não penalizar cliente
-    # antigo com poucas compras recentes. Recência entra via a ORDEM do
-    # último pedido (NTILE), não via contagem de dias — equivalente para
-    # fins de quintil e mais simples de expressar em SQL.
-    RFM_SEGMENT_RULES = [
-      ->(r, f, m) { r >= 4 && f >= 4 && m >= 4 ? "Campeões" : nil },
-      ->(r, f, m) { f >= 4 && r >= 3 ? "Fiéis" : nil },
-      ->(r, f, m) { r >= 4 && f <= 2 ? "Novos" : nil },
-      ->(r, f, m) { r <= 2 && (f >= 4 || m >= 4) ? "Em risco" : nil },
-      ->(r, f, m) { r <= 2 && f <= 2 ? "Perdidos" : nil }
-    ].freeze
+    # ---- 3) Tempo até recompra (histograma, histórico completo) ----
 
-    def classify_rfm_segment(r, f, m)
-      RFM_SEGMENT_RULES.each do |rule|
-        segment = rule.call(r, f, m)
-        return segment if segment
+    # Pra cada cliente com 2+ pedidos válidos na vida, cada intervalo
+    # consecutivo (1º→2º, 2º→3º, ...) vira um ponto de dado independente —
+    # cliente com N pedidos contribui N-1 gaps. Ranges meio-abertos
+    # [lo, hi) pra um gap de exatamente 15.0/30.0/etc não cair em dois
+    # buckets ao mesmo tempo.
+    def build_repurchase_gap_histogram(scope)
+      orders_by_customer = scope
+        .where.not(customer_email: nil)
+        .order(:customer_email, :ordered_at)
+        .pluck(:customer_email, :ordered_at)
+        .group_by(&:first)
+
+      gaps = orders_by_customer.each_value.flat_map do |rows|
+        rows.map(&:last).each_cons(2).map { |a, b| (b - a) / 1.day.to_f }
       end
-      "Outros"
+
+      counts = GAP_BUCKET_RANGES.to_h { |label, _range| [label, 0] }
+      gaps.each do |gap|
+        label, = GAP_BUCKET_RANGES.find { |_label, range| range.cover?(gap) }
+        counts[label] += 1 if label
+      end
+
+      {
+        buckets: counts.map { |range, count| { range: range, customers_count: count } },
+        median_days: median(gaps),
+        sample_size: gaps.size
+      }
     end
 
-    def build_rfm_segments(scope)
-      customer_agg = scope
-        .where.not(customer_email: nil)
-        .group(:customer_email)
-        .select(
-          :customer_email,
-          Arel.sql("MAX(orders.ordered_at) AS last_ordered_at"),
-          Arel.sql("COUNT(*) AS frequency"),
-          Arel.sql("COALESCE(SUM(#{effective_revenue_sql}), 0) AS monetary")
+    def median(values)
+      return nil if values.empty?
+
+      sorted = values.sort
+      mid = sorted.size / 2
+      (sorted.size.odd? ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2.0).round(1)
+    end
+
+    # ---- 4) Produtos mais recomprados (2 rankings, histórico completo) ----
+
+    # Mesmo padrão de join usado por Dashboard::BuildSummary#build_top_products_by_*
+    # (OrderItem.joins(:product, order: :channel)), mas com o filtro mais
+    # estrito de valid_orders (order_type sale/refund + not_canceled +
+    # revenue_countable) em vez do filtro mais frouxo que aquele service usa
+    # — importante pra ficar consistente com o resto desta aba.
+    def valid_order_items(channel)
+      OrderItem
+        .joins(:product, order: :channel)
+        .where(orders: { tenant_id: tenant.id })
+        .where(channels: { platform: channel })
+        .merge(valid_orders(Order.all))
+        .where(is_gift: false)
+    end
+
+    # Um row por par (cliente, produto) de todo o histórico, com quantos
+    # pedidos distintos aquele cliente fez daquele produto.
+    def customer_product_pair_counts(channel)
+      rows = valid_order_items(channel)
+        .where.not(orders: { customer_email: nil })
+        .group("orders.customer_email", "products.id", "products.sku", "products.name")
+        .pluck(
+          Arel.sql("orders.customer_email"),
+          Arel.sql("products.id"),
+          Arel.sql("products.sku"),
+          Arel.sql("products.name"),
+          Arel.sql("COUNT(DISTINCT order_items.order_id)")
         )
 
-      sql = <<~SQL
-        WITH customer_agg AS (#{customer_agg.to_sql})
-        SELECT
-          customer_email,
-          frequency,
-          monetary,
-          NTILE(5) OVER (ORDER BY last_ordered_at ASC) AS r_score,
-          NTILE(5) OVER (ORDER BY frequency ASC)        AS f_score,
-          NTILE(5) OVER (ORDER BY monetary ASC)         AS m_score
-        FROM customer_agg
-      SQL
-
-      rows = ActiveRecord::Base.connection.exec_query(sql)
-      return [] if rows.empty?
-
-      segments = Hash.new { |h, k| h[k] = { customers_count: 0, total_revenue: 0.0, total_frequency: 0 } }
-
-      rows.each do |row|
-        segment = classify_rfm_segment(row["r_score"].to_i, row["f_score"].to_i, row["m_score"].to_i)
-        agg = segments[segment]
-        agg[:customers_count]  += 1
-        agg[:total_revenue]    += row["monetary"].to_f
-        agg[:total_frequency]  += row["frequency"].to_i
+      rows.map do |email, product_id, sku, name, order_count|
+        { customer_email: email, product_id: product_id, sku: sku, name: name, order_count: order_count.to_i }
       end
+    end
 
-      total_customers = rows.count.to_f
+    def build_repeat_product_rankings(channel)
+      pairs = customer_product_pair_counts(channel)
+      by_product = pairs.group_by { |row| row[:product_id] }
 
-      segments.map do |name, agg|
+      by_volume = by_product.filter_map { |_product_id, rows|
+        repeat_count = rows.sum { |row| [row[:order_count] - 1, 0].max }
+        next nil if repeat_count.zero?
+
+        { sku: rows.first[:sku], name: rows.first[:name], repeat_purchase_count: repeat_count }
+      }.sort_by { |row| -row[:repeat_purchase_count] }.first(PRODUCT_RANKING_LIMIT)
+
+      by_customer_pct = by_product.filter_map { |_product_id, rows|
+        total = rows.size
+        next nil if total < MIN_CUSTOMERS_FOR_PRODUCT_PCT_RANKING
+
+        repeat = rows.count { |row| row[:order_count] >= 2 }
         {
-          segment:          name,
-          customers_count:  agg[:customers_count],
-          pct_of_base:      total_customers.positive? ? (agg[:customers_count] / total_customers * 100).round(2) : 0.0,
-          total_revenue:    agg[:total_revenue].round(2),
-          avg_order_value:  agg[:total_frequency].positive? ? (agg[:total_revenue] / agg[:total_frequency]).round(2) : 0.0
+          sku: rows.first[:sku],
+          name: rows.first[:name],
+          repeat_customers_pct: (repeat.to_f / total * 100).round(2),
+          customers_count: total
         }
-      end.sort_by { |s| -s[:total_revenue] }
+      }.sort_by { |row| -row[:repeat_customers_pct] }.first(PRODUCT_RANKING_LIMIT)
+
+      {
+        by_volume: by_volume,
+        by_customer_pct: by_customer_pct,
+        min_customers_threshold: MIN_CUSTOMERS_FOR_PRODUCT_PCT_RANKING
+      }
     end
   end
 end

@@ -156,11 +156,24 @@ module Integrations
           @resume_from_page  = meta["last_completed_page"].to_i + 1
           @window_start      = Date.parse(meta["window_start"])
           @window_end        = Date.parse(meta["window_end"])
+          # @seen_external_ids (dedupe de sobreposição de página DENTRO de
+          # uma execução — ver process_orders) é deliberadamente NÃO
+          # restaurado aqui: persistir a lista completa de external_ids já
+          # vistos (potencialmente dezenas de milhares numa janela grande)
+          # no metadata JSON do log não escala. Efeito prático de uma
+          # retomada: um pedido que reaparecesse numa página já vista ANTES
+          # da interrupção, se reaparecer de novo DEPOIS da retomada, deixa
+          # de ser contado como "pulado" (duplicado) e vira "atualizado" —
+          # só inflaciona contador, não corrompe dado. O upsert por
+          # Order#external_id (ver process_order) continua sendo a única
+          # proteção real contra linha duplicada, e essa proteção independe
+          # deste Set. Ver spec "does not create a duplicate Order row for
+          # an external_id that resurfaces after a resume".
           existing
         else
           @resume_from_page = 1
           @window_start     = days.days.ago.to_date
-          @window_end       = Time.current.to_date
+          @window_end       = default_window_end
           IntegrationSyncLog.create!(
             tenant: tenant, integration: integration, direction: "inbound", action: ACTION,
             status: "pending", started_at: Time.current,
@@ -170,6 +183,27 @@ module Integrations
             }
           )
         end
+      end
+
+      # Exclui o dia corrente da janela padrão. Investigado 2026-08-04: a
+      # documentação pública da Yampi (docs.yampi.com.br/api-reference/
+      # pedidos/pedido/listar-pedidos) não lista NENHUM parâmetro de
+      # ordenação pro GET /orders — só filtros, paginação (page/limit) e
+      # include. Sem um sort estável (ex: por id/created_at asc) pra fixar,
+      # a paginação por offset fica exposta à ordem default (não
+      # documentada, não garantida) da API. Um "hoje" que segue recebendo
+      # pedidos NOVOS enquanto a janela ainda está sendo paginada desloca os
+      # offsets — um pedido que estava na página N migra pra N+1, reaparece,
+      # e o dedupe de @seen_external_ids (ver process_orders) descarta como
+      # "duplicado na mesma importação". Confirmado em produção (Hidrabene,
+      # 2 rodadas): 20/20 dos motivos de skip amostrados eram exatamente
+      # esse. Excluir o dia ainda em escrita elimina o problema pela raiz —
+      # nenhum dia da janela segue recebendo pedidos durante a leitura. Este
+      # serviço é sobre HISTÓRICO (ver comentário de classe): "hoje" já é
+      # coberto por OrdersPollingService/webhook em near-real-time, então
+      # excluí-lo daqui não perde cobertura real.
+      def default_window_end
+        Time.current.to_date - 1.day
       end
 
       def persist_progress(last_completed_page: nil, error_message: nil)

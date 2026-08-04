@@ -191,6 +191,65 @@ RSpec.describe Integrations::Yampi::BackfillOrdersService do
     end
   end
 
+  describe "default window (excludes the current day)" do
+    it "sets window_end to yesterday, not today, to avoid pagination drift on a still-open day" do
+      stub_orders
+
+      described_class.call(channel_credential, days: 30)
+
+      log = IntegrationSyncLog.where(tenant: tenant, action: "order_backfill").last
+      expect(log.metadata["window_end"]).to eq((Date.current - 1.day).iso8601)
+    end
+  end
+
+  describe "resuming after a mid-run failure" do
+    def stub_auth
+      stub_request(:get, "https://api.dooki.com.br/v2/loja/catalog/products")
+        .with(query: hash_including("page" => "1", "per_page" => "1"))
+        .to_return(status: 200, body: { data: [] }.to_json, headers: { "Content-Type" => "application/json" })
+    end
+
+    def page_body(id, page, total_pages)
+      { "data" => [ { "id" => id, "number" => "N#{id}" } ],
+        "meta" => { "pagination" => { "current_page" => page, "total_pages" => total_pages } } }.to_json
+    end
+
+    def stub_page(page, id, total_pages: 5, status: 200)
+      json_headers = { "Content-Type" => "application/json" }
+      stub_request(:get, orders_url).with(query: hash_including("page" => page.to_s))
+        .to_return(status: status, body: status == 200 ? page_body(id, page, total_pages) : { message: "internal error" }.to_json, headers: json_headers)
+    end
+
+    before do
+      stub_auth
+      allow_any_instance_of(Integrations::YampiAdapter).to receive(:sleep)
+    end
+
+    it "does not create a duplicate Order row for an external_id that resurfaces after a resume, " \
+       "but also does not flag it as skipped (documented @seen_external_ids limitation)" do
+      stub_page(1, 1)
+      stub_page(2, 2)
+      stub_page(3, 3, status: 500)
+      described_class.call(channel_credential, days: 30) # fails on page 3; pages 1-2 (ids "1", "2") persisted
+
+      # Simulates the pagination-drift scenario confirmed in production
+      # (see BackfillOrdersService#default_window_end): on resume, page 3
+      # returns the SAME order ("2") that already succeeded on page 2
+      # before the crash. @seen_external_ids was reset by the resume (see
+      # resume_or_start_log), so this is NOT caught as an in-run duplicate
+      # — it's reprocessed as a normal "already existed" update instead.
+      stub_page(3, 2)
+      stub_page(4, 4, total_pages: 4)
+
+      result = described_class.call(channel_credential, days: 30)
+
+      expect(result.success?).to eq(true)
+      expect(tenant.orders.pluck(:external_id)).to contain_exactly("1", "2", "4") # no duplicate row for "2"
+      expect(result.skipped).to be_empty # not flagged as "duplicado" — the documented gap
+      expect(result.updated_count).to eq(1) # "2" counted as a re-update instead
+    end
+  end
+
   describe "days param" do
     it "defaults to 30 when not given" do
       stub_orders
