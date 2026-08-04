@@ -67,6 +67,19 @@ module Integrations
     AFFILIATE_TARGET_COLLABORATIONS_SEARCH_PATH = "/affiliate_seller/202508/target_collaborations/search".freeze
     AFFILIATE_CONVERSATIONS_PATH = "/affiliate_seller/202508/conversations".freeze
     AFFILIATE_UNREAD_MESSAGES_PATH = "/affiliate_seller/202508/conversations/messages/list/newest".freeze
+    # Search Target Collaborations requires collaboration_status in the
+    # body — confirmed in production (2026-08-04): omitting it fails with
+    # code 36009004 "CollaborationStatus is a required field and has not
+    # been provided." Only "ONGOING" is confirmed to work (the value used
+    # manually in the Partner Center Testing Tool example that was tested
+    # before this bug shipped). TikTok's status enum almost certainly has
+    # more values (e.g. an accepted-but-not-started or an ended
+    # collaboration), but the exact names are NOT confirmed — do not guess
+    # and add them here, same discipline as
+    # TiktokReturnRefundNormalizer's return_status. AffiliateSyncService
+    # loops this list, one full paginated pass per status; extend it only
+    # after checking the Testing Tool's field doc for the real enum.
+    AFFILIATE_COLLABORATION_STATUSES = %w[ONGOING].freeze
     SHOP_SCOPED_PATHS = [
       PRODUCT_SEARCH_PATH,
       PRODUCT_ACTIVATE_PATH,
@@ -521,12 +534,17 @@ module Integrations
       response
     end
 
-    # Search Target Collaborations — POST, paginated. Body carries filters
-    # (none used yet, sync fetches every plan), page_size/page_token in the
-    # query string, same split as Order/Return search.
-    def fetch_target_collaborations(page_token: nil, page_size: PAGE_SIZE)
+    # Search Target Collaborations — POST, paginated. collaboration_status
+    # is required in the body (see AFFILIATE_COLLABORATION_STATUSES above);
+    # page_size/page_token go in the query string, same split as
+    # Order/Return search.
+    def fetch_target_collaborations(collaboration_status:, page_token: nil, page_size: PAGE_SIZE)
       query_params = { page_size: page_size, page_token: page_token.presence }.compact
-      body = post(AFFILIATE_TARGET_COLLABORATIONS_SEARCH_PATH, {}, query_params: query_params)
+      body = post(
+        AFFILIATE_TARGET_COLLABORATIONS_SEARCH_PATH,
+        { collaboration_status: collaboration_status },
+        query_params: query_params
+      )
       body["data"] || {}
     end
 

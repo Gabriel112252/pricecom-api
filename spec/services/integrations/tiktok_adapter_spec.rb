@@ -687,6 +687,17 @@ RSpec.describe Integrations::TiktokAdapter do
   describe "#fetch_target_collaborations" do
     let(:search_url) { "https://open-api.tiktokglobalshop.com/affiliate_seller/202508/target_collaborations/search" }
 
+    it "sends collaboration_status in the body — required by TikTok (code 36009004 when omitted)" do
+      captured_body = nil
+      stub_request(:post, /\A#{Regexp.escape(search_url)}/)
+        .with { |request| captured_body = JSON.parse(request.body) }
+        .to_return(status: 200, body: { code: 0, data: { target_collaborations: [], next_page_token: "" } }.to_json)
+
+      adapter.fetch_target_collaborations(collaboration_status: "ONGOING")
+
+      expect(captured_body).to eq({ "collaboration_status" => "ONGOING" })
+    end
+
     it "paginates and sends shop_cipher" do
       stub_request(:post, /\A#{Regexp.escape(search_url)}/)
         .to_return(
@@ -694,7 +705,7 @@ RSpec.describe Integrations::TiktokAdapter do
           { status: 200, body: { code: 0, data: { target_collaborations: [ { "id" => "tc-2" } ], next_page_token: "" } }.to_json }
         )
 
-      first_page = adapter.fetch_target_collaborations
+      first_page = adapter.fetch_target_collaborations(collaboration_status: "ONGOING")
       expect(first_page["target_collaborations"].first["id"]).to eq("tc-1")
       expect(WebMock).to have_requested(:post, /\A#{Regexp.escape(search_url)}/)
         .with(query: hash_including("shop_cipher" => "GCP_cipher"))
@@ -704,8 +715,22 @@ RSpec.describe Integrations::TiktokAdapter do
       stub_request(:post, /\A#{Regexp.escape(search_url)}/)
         .to_return(status: 429, body: { message: "too many requests" }.to_json, headers: { "Retry-After" => "9" })
 
-      expect { adapter.fetch_target_collaborations }
+      expect { adapter.fetch_target_collaborations(collaboration_status: "ONGOING") }
         .to raise_error(Integrations::RateLimitError) { |error| expect(error.retry_after).to eq(9) }
+    end
+
+    it "raises ArgumentError (Ruby required keyword) when the caller omits collaboration_status entirely" do
+      expect { adapter.fetch_target_collaborations }.to raise_error(ArgumentError)
+    end
+
+    it "surfaces TikTok's real missing-field response as ApiError, for the case this required keyword doesn't catch (e.g. an empty string)" do
+      stub_request(:post, /\A#{Regexp.escape(search_url)}/)
+        .to_return(status: 200, body: {
+          code: 36_009_004, message: "CollaborationStatus is a required field and has not been provided."
+        }.to_json)
+
+      expect { adapter.fetch_target_collaborations(collaboration_status: "") }
+        .to raise_error(Integrations::ApiError, /36009004/)
     end
   end
 

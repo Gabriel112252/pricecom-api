@@ -18,6 +18,10 @@ module Integrations
     class AffiliateSyncService
       ACTION = "tiktok_affiliate_sync".freeze
       DEFAULT_SLEEP_SECONDS = Integer(ENV.fetch("TIKTOK_AFFILIATE_SYNC_SLEEP_MS", "250")) / 1000.0
+      # Only "ONGOING" is a confirmed collaboration_status value — see
+      # TiktokAdapter::AFFILIATE_COLLABORATION_STATUSES's comment. One full
+      # paginated pass per status in this list.
+      COLLABORATION_STATUSES = Integrations::TiktokAdapter::AFFILIATE_COLLABORATION_STATUSES
 
       Result = Struct.new(:outcome, :error_message, :metadata, keyword_init: true) do
         def success? = outcome == :success
@@ -39,6 +43,8 @@ module Integrations
         @creators_synced_count = 0
         @target_collaborations_processed_count = 0
         @rate_limit_count = 0
+        @status_index = 0
+        @page_token = nil
         @lock_acquired = false
       end
 
@@ -98,25 +104,44 @@ module Integrations
       def restore_checkpoint
         metadata = log.metadata || {}
         @page_token = metadata["page_token"]
+        @status_index = metadata["status_index"].to_i
         @creators_synced_count = metadata["creators_synced_count"].to_i
         @target_collaborations_processed_count = metadata["target_collaborations_processed_count"].to_i
         @rate_limit_count = metadata["rate_limit_count"].to_i
       end
 
+      # Loops COLLABORATION_STATUSES, one full paginated pass per status —
+      # the API requires collaboration_status and (as far as confirmed) has
+      # no "all statuses" wildcard. @status_index is set BEFORE the inner
+      # page loop starts, so a rate limit mid-page still checkpoints the
+      # correct status to resume into (same page-granularity trade-off as
+      # before: resume re-fetches the current page, never the wrong status).
       def process_pages
+        index = @status_index.to_i
         cursor = @page_token
 
-        loop do
-          renew_lock!
-          data = adapter.fetch_target_collaborations(page_token: cursor)
-          collaborations = Array(data["target_collaborations"])
-          collaborations.each { |summary| process_collaboration(summary) }
+        while index < COLLABORATION_STATUSES.length
+          @status_index = index
+          status = COLLABORATION_STATUSES[index]
 
-          cursor = data["next_page_token"]
-          @page_token = cursor
-          persist_checkpoint
-          break if collaborations.empty? || cursor.blank?
+          loop do
+            renew_lock!
+            data = adapter.fetch_target_collaborations(collaboration_status: status, page_token: cursor)
+            collaborations = Array(data["target_collaborations"])
+            collaborations.each { |summary| process_collaboration(summary) }
+
+            cursor = data["next_page_token"]
+            @page_token = cursor
+            persist_checkpoint
+            break if collaborations.empty? || cursor.blank?
+          end
+
+          index += 1
+          cursor = nil
+          @page_token = nil
         end
+
+        @status_index = index
       end
 
       def process_collaboration(summary)
@@ -195,6 +220,7 @@ module Integrations
           "channel_credential_id" => channel_credential.id,
           "run_id" => run_id,
           "page_token" => @page_token,
+          "status_index" => @status_index,
           "creators_synced_count" => creators_synced_count,
           "target_collaborations_processed_count" => target_collaborations_processed_count,
           "rate_limit_count" => rate_limit_count

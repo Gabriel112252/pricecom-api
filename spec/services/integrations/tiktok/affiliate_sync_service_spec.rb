@@ -32,11 +32,23 @@ RSpec.describe Integrations::Tiktok::AffiliateSyncService do
     }.merge(overrides)
   end
 
+  it "sends collaboration_status on every fetch_target_collaborations call — the bug that caused code 36009004 in production" do
+    allow(adapter).to receive(:fetch_target_collaborations)
+      .with(collaboration_status: "ONGOING", page_token: nil)
+      .and_return({ "target_collaborations" => [], "next_page_token" => "" })
+
+    described_class.call(credential)
+
+    expect(adapter).to have_received(:fetch_target_collaborations).with(collaboration_status: "ONGOING", page_token: nil)
+  end
+
   it "syncs creators from every target collaboration across pages and writes a daily snapshot" do
     allow(adapter).to receive(:fetch_target_collaborations)
-      .with(page_token: nil).and_return({ "target_collaborations" => [ { "id" => "tc-1" } ], "next_page_token" => "p2" })
+      .with(collaboration_status: "ONGOING", page_token: nil)
+      .and_return({ "target_collaborations" => [ { "id" => "tc-1" } ], "next_page_token" => "p2" })
     allow(adapter).to receive(:fetch_target_collaborations)
-      .with(page_token: "p2").and_return({ "target_collaborations" => [], "next_page_token" => "" })
+      .with(collaboration_status: "ONGOING", page_token: "p2")
+      .and_return({ "target_collaborations" => [], "next_page_token" => "" })
     allow(adapter).to receive(:fetch_target_collaboration_detail).with(target_collaboration_id: "tc-1")
       .and_return({ "creators" => [ creator_payload("uABC"), creator_payload("uDEF") ] })
 
@@ -55,6 +67,7 @@ RSpec.describe Integrations::Tiktok::AffiliateSyncService do
 
   it "upserts an existing creator instead of duplicating it on a second run" do
     allow(adapter).to receive(:fetch_target_collaborations)
+      .with(collaboration_status: "ONGOING", page_token: nil)
       .and_return({ "target_collaborations" => [ { "id" => "tc-1" } ], "next_page_token" => "" })
     allow(adapter).to receive(:fetch_target_collaboration_detail)
       .and_return({ "creators" => [ creator_payload("uABC", "showcase_product_count" => 1) ] })
@@ -68,15 +81,17 @@ RSpec.describe Integrations::Tiktok::AffiliateSyncService do
     expect(AffiliateCreator.find_by(creator_open_id: "uABC").showcase_product_count).to eq(5)
   end
 
-  it "persists a checkpoint and re-raises on a rate limit, without marking the log finished" do
+  it "persists a checkpoint (including which status it was on) and re-raises on a rate limit, without marking the log finished" do
     allow(adapter).to receive(:fetch_target_collaborations)
-      .with(page_token: nil).and_raise(Integrations::RateLimitError.new("rate limited", retry_after: 20))
+      .with(collaboration_status: "ONGOING", page_token: nil)
+      .and_raise(Integrations::RateLimitError.new("rate limited", retry_after: 20))
 
     expect { described_class.call(credential) }.to raise_error(Integrations::RateLimitError)
 
     log = IntegrationSyncLog.find_by(tenant: tenant, action: described_class::ACTION)
     expect(log.status).to eq("pending")
     expect(log.metadata["rate_limit_count"]).to eq(1)
+    expect(log.metadata["status_index"]).to eq(0)
   end
 
   it "marks the credential as errored and finishes the log on an authentication error" do
