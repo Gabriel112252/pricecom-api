@@ -57,6 +57,16 @@ module Integrations
     ORDER_STATEMENT_TRANSACTIONS_PATH = "/finance/202501/orders".freeze
     RETURN_SEARCH_PATH = "/return_refund/202309/returns/search".freeze
     SHOP_PERFORMANCE_PATH = "/analytics/202405/shop/performance".freeze
+    # Affiliate Seller API — paths and schemas CONFIRMED via the Partner
+    # Center API Testing Tool against the real Hidrabene credential
+    # (2026-08-04), not inferred. Version 202508 was the newest observed
+    # (202412 also responded); if 202508 turns out unstable, this is the
+    # single place to roll back. "Get Message in the Conversation" (full
+    # thread history within a conversation) was NOT confirmed and is
+    # deliberately left out here — see AffiliateDetailDrawer.vue.
+    AFFILIATE_TARGET_COLLABORATIONS_SEARCH_PATH = "/affiliate_seller/202508/target_collaborations/search".freeze
+    AFFILIATE_CONVERSATIONS_PATH = "/affiliate_seller/202508/conversations".freeze
+    AFFILIATE_UNREAD_MESSAGES_PATH = "/affiliate_seller/202508/conversations/messages/list/newest".freeze
     SHOP_SCOPED_PATHS = [
       PRODUCT_SEARCH_PATH,
       PRODUCT_ACTIVATE_PATH,
@@ -67,8 +77,17 @@ module Integrations
       ORDER_DETAIL_PATH,
       FINANCIAL_STATEMENTS_PATH,
       RETURN_SEARCH_PATH,
-      SHOP_PERFORMANCE_PATH
+      SHOP_PERFORMANCE_PATH,
+      AFFILIATE_TARGET_COLLABORATIONS_SEARCH_PATH,
+      AFFILIATE_CONVERSATIONS_PATH,
+      AFFILIATE_UNREAD_MESSAGES_PATH
     ].freeze
+    # Dynamic-segment affiliate paths (/target_collaborations/{id},
+    # /conversations/{id}/messages) can't live in the exact-match
+    # SHOP_SCOPED_PATHS list — matched by pattern, same technique already
+    # used for the inventory-update path below.
+    AFFILIATE_TARGET_COLLABORATION_DETAIL_PATH_PATTERN = %r{\A/affiliate_seller/202508/target_collaborations/[^/]+\z}.freeze
+    AFFILIATE_CONVERSATION_MESSAGES_PATH_PATTERN = %r{\A/affiliate_seller/202508/conversations/[^/]+/messages\z}.freeze
     # The inventory-update path has a dynamic {product_id} segment, so it
     # can't live in SHOP_SCOPED_PATHS (an exact-match list) — matched by
     # pattern instead, see #shop_scoped_query_params.
@@ -502,6 +521,68 @@ module Integrations
       response
     end
 
+    # Search Target Collaborations — POST, paginated. Body carries filters
+    # (none used yet, sync fetches every plan), page_size/page_token in the
+    # query string, same split as Order/Return search.
+    def fetch_target_collaborations(page_token: nil, page_size: PAGE_SIZE)
+      query_params = { page_size: page_size, page_token: page_token.presence }.compact
+      body = post(AFFILIATE_TARGET_COLLABORATIONS_SEARCH_PATH, {}, query_params: query_params)
+      body["data"] || {}
+    end
+
+    # Query Target Collaboration Detail — GET, returns the plan's creators[]
+    # and products[] arrays. This is where AffiliateCreator rows come from.
+    def fetch_target_collaboration_detail(target_collaboration_id:)
+      id = target_collaboration_id.to_s.strip
+      raise ArgumentError, "TiktokAdapter#fetch_target_collaboration_detail: id inválido" if id.blank?
+
+      path = "/affiliate_seller/202508/target_collaborations/#{id}"
+      body = get(path)
+      body.dig("data", "target_collaboration") || {}
+    end
+
+    # Create Conversation with creator — POST, `only_need_conversation_id:
+    # true` returns the existing conversation for that creator instead of
+    # always creating a new one (confirmed in the Testing Tool response:
+    # `is_new` tells the caller which happened).
+    def create_conversation(creator_open_id:)
+      id = creator_open_id.to_s.strip
+      raise ArgumentError, "TiktokAdapter#create_conversation: creator_open_id inválido" if id.blank?
+
+      body = post(AFFILIATE_CONVERSATIONS_PATH, { creator_open_id: id, only_need_conversation_id: true })
+      body["data"] || {}
+    end
+
+    # Send IM Message — POST. content is a plain text message; TikTok's
+    # `type` field only supports TEXT for what this adapter sends.
+    def send_message(conversation_id:, content:)
+      id = conversation_id.to_s.strip
+      raise ArgumentError, "TiktokAdapter#send_message: conversation_id inválido" if id.blank?
+
+      path = "/affiliate_seller/202508/conversations/#{id}/messages"
+      body = post(path, { content: content.to_s })
+      body["data"] || {}
+    end
+
+    # Get Conversation List — GET, paginated (page_token/next_page_token,
+    # same cursor convention as everything else in this adapter).
+    def fetch_conversations(page_token: nil, page_size: PAGE_SIZE)
+      query_params = { page_size: page_size, page_token: page_token.presence }.compact
+      body = get(AFFILIATE_CONVERSATIONS_PATH, query_params: query_params)
+      body["data"] || {}
+    end
+
+    # Get Latest Unread Messages — GET, a flat (non-paginated in the
+    # confirmed response) list of the newest unread message per conversation.
+    # unread_message_count here is PER CONVERSATION, not per message — see
+    # the disclaimer surfaced in CampaignsTab.vue. This is the only signal
+    # available for "did the creator see this"; there is no read timestamp
+    # per message.
+    def fetch_latest_unread_messages
+      body = get(AFFILIATE_UNREAD_MESSAGES_PATH)
+      body.dig("data", "newest_message_list") || []
+    end
+
     private
 
     class PaginatedPayload < Array
@@ -624,7 +705,12 @@ module Integrations
     end
 
     def shop_scoped_query_params(path)
-      return {} unless SHOP_SCOPED_PATHS.include?(path) || path.match?(INVENTORY_UPDATE_PATH_PATTERN)
+      unless SHOP_SCOPED_PATHS.include?(path) ||
+          path.match?(INVENTORY_UPDATE_PATH_PATTERN) ||
+          path.match?(AFFILIATE_TARGET_COLLABORATION_DETAIL_PATH_PATTERN) ||
+          path.match?(AFFILIATE_CONVERSATION_MESSAGES_PATH_PATTERN)
+        return {}
+      end
 
       shop_cipher = credentials[:shop_cipher].presence
       if shop_cipher.blank?

@@ -683,4 +683,129 @@ RSpec.describe Integrations::TiktokAdapter do
         .to raise_error(Integrations::ApiError)
     end
   end
+
+  describe "#fetch_target_collaborations" do
+    let(:search_url) { "https://open-api.tiktokglobalshop.com/affiliate_seller/202508/target_collaborations/search" }
+
+    it "paginates and sends shop_cipher" do
+      stub_request(:post, /\A#{Regexp.escape(search_url)}/)
+        .to_return(
+          { status: 200, body: { code: 0, data: { target_collaborations: [ { "id" => "tc-1" } ], next_page_token: "next" } }.to_json },
+          { status: 200, body: { code: 0, data: { target_collaborations: [ { "id" => "tc-2" } ], next_page_token: "" } }.to_json }
+        )
+
+      first_page = adapter.fetch_target_collaborations
+      expect(first_page["target_collaborations"].first["id"]).to eq("tc-1")
+      expect(WebMock).to have_requested(:post, /\A#{Regexp.escape(search_url)}/)
+        .with(query: hash_including("shop_cipher" => "GCP_cipher"))
+    end
+
+    it "raises RateLimitError on HTTP 429" do
+      stub_request(:post, /\A#{Regexp.escape(search_url)}/)
+        .to_return(status: 429, body: { message: "too many requests" }.to_json, headers: { "Retry-After" => "9" })
+
+      expect { adapter.fetch_target_collaborations }
+        .to raise_error(Integrations::RateLimitError) { |error| expect(error.retry_after).to eq(9) }
+    end
+  end
+
+  describe "#fetch_target_collaboration_detail" do
+    let(:detail_url) { "https://open-api.tiktokglobalshop.com/affiliate_seller/202508/target_collaborations/tc-1" }
+
+    it "returns the target_collaboration payload and sends shop_cipher" do
+      stub_request(:get, /\A#{Regexp.escape(detail_url)}/)
+        .to_return(status: 200, body: {
+          code: 0,
+          data: { target_collaboration: { "id" => "tc-1", "creators" => [ { "creator_open_id" => "uABC" } ] } }
+        }.to_json)
+
+      detail = adapter.fetch_target_collaboration_detail(target_collaboration_id: "tc-1")
+
+      expect(detail["creators"].first["creator_open_id"]).to eq("uABC")
+      expect(WebMock).to have_requested(:get, /\A#{Regexp.escape(detail_url)}/)
+        .with(query: hash_including("shop_cipher" => "GCP_cipher"))
+    end
+
+    it "raises ArgumentError when target_collaboration_id is blank" do
+      expect { adapter.fetch_target_collaboration_detail(target_collaboration_id: "") }.to raise_error(ArgumentError)
+    end
+  end
+
+  describe "#create_conversation" do
+    let(:conversations_url) { "https://open-api.tiktokglobalshop.com/affiliate_seller/202508/conversations" }
+
+    it "posts creator_open_id and only_need_conversation_id, returns the conversation payload" do
+      captured_body = nil
+      stub_request(:post, /\A#{Regexp.escape(conversations_url)}/)
+        .with { |request| captured_body = JSON.parse(request.body) }
+        .to_return(status: 200, body: {
+          code: 0, data: { conversation_id: "conv-1", is_new: true, unread_count: 0 }
+        }.to_json)
+
+      data = adapter.create_conversation(creator_open_id: "uABC")
+
+      expect(data["conversation_id"]).to eq("conv-1")
+      expect(captured_body).to eq({ "creator_open_id" => "uABC", "only_need_conversation_id" => true })
+    end
+
+    it "raises ArgumentError when creator_open_id is blank" do
+      expect { adapter.create_conversation(creator_open_id: "") }.to raise_error(ArgumentError)
+    end
+  end
+
+  describe "#send_message" do
+    let(:messages_url) { "https://open-api.tiktokglobalshop.com/affiliate_seller/202508/conversations/conv-1/messages" }
+
+    it "posts the message content to the conversation" do
+      captured_body = nil
+      stub_request(:post, /\A#{Regexp.escape(messages_url)}/)
+        .with { |request| captured_body = JSON.parse(request.body) }
+        .to_return(status: 200, body: { code: 0, data: { message_id: "msg-1" } }.to_json)
+
+      adapter.send_message(conversation_id: "conv-1", content: "Olá!")
+
+      expect(captured_body).to eq({ "content" => "Olá!" })
+    end
+
+    it "raises RateLimitError on a rate-limit-shaped body error" do
+      stub_request(:post, /\A#{Regexp.escape(messages_url)}/)
+        .to_return(status: 200, body: { code: 9999, message: "Request frequency exceeds limit" }.to_json)
+
+      expect { adapter.send_message(conversation_id: "conv-1", content: "Olá!") }
+        .to raise_error(Integrations::RateLimitError)
+    end
+  end
+
+  describe "#fetch_conversations" do
+    let(:conversations_url) { "https://open-api.tiktokglobalshop.com/affiliate_seller/202508/conversations" }
+
+    it "returns the conversation list page" do
+      stub_request(:get, /\A#{Regexp.escape(conversations_url)}/)
+        .to_return(status: 200, body: { code: 0, data: { conversations: [ { "conversation_id" => "conv-1" } ], next_page_token: "" } }.to_json)
+
+      data = adapter.fetch_conversations
+      expect(data["conversations"].first["conversation_id"]).to eq("conv-1")
+    end
+  end
+
+  describe "#fetch_latest_unread_messages" do
+    let(:unread_url) { "https://open-api.tiktokglobalshop.com/affiliate_seller/202508/conversations/messages/list/newest" }
+
+    it "returns the newest_message_list array" do
+      stub_request(:get, /\A#{Regexp.escape(unread_url)}/)
+        .to_return(status: 200, body: {
+          code: 0, data: { newest_message_list: [ { "conversation_id" => "conv-1", "unread_message_count" => 1 } ] }
+        }.to_json)
+
+      list = adapter.fetch_latest_unread_messages
+      expect(list.first["conversation_id"]).to eq("conv-1")
+    end
+
+    it "returns an empty array when there are no unread messages" do
+      stub_request(:get, /\A#{Regexp.escape(unread_url)}/)
+        .to_return(status: 200, body: { code: 0, data: { newest_message_list: [] } }.to_json)
+
+      expect(adapter.fetch_latest_unread_messages).to eq([])
+    end
+  end
 end

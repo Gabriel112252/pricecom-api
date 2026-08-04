@@ -151,6 +151,13 @@ Rails.application.routes.draw do
       get "dashboard/tiktok_orders", to: "dashboard#tiktok_orders"
       get "dashboard/customers", to: "dashboard#customers"
 
+      # Afiliados (TikTok Shop)
+      get  "affiliates/overview",     to: "affiliates#overview"
+      get  "affiliates/creators",     to: "affiliates#creators"
+      get  "affiliates/creators/:id", to: "affiliates#creator"
+      post "affiliates/creators/:id/messages", to: "affiliates#send_message"
+      resources :affiliate_campaigns, only: [ :index, :create, :show ]
+
       # TV Mode token (admin only) — regenerating invalidates the previous link
       get    "tv_token", to: "tv_tokens#show"
       post   "tv_token", to: "tv_tokens#create"

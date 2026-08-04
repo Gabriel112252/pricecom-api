@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_08_03_120000) do
+ActiveRecord::Schema[7.2].define(version: 2026_08_04_150000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -40,6 +40,88 @@ ActiveRecord::Schema[7.2].define(version: 2026_08_03_120000) do
     t.bigint "blob_id", null: false
     t.string "variation_digest", null: false
     t.index ["blob_id", "variation_digest"], name: "index_active_storage_variant_records_uniqueness", unique: true
+  end
+
+  create_table "affiliate_campaign_recipients", force: :cascade do |t|
+    t.bigint "affiliate_campaign_id", null: false
+    t.bigint "affiliate_creator_id", null: false
+    t.bigint "affiliate_message_id"
+    t.string "status", default: "pending", null: false
+    t.string "error_message"
+    t.datetime "sent_at"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["affiliate_campaign_id", "affiliate_creator_id"], name: "index_affiliate_campaign_recipients_on_campaign_creator", unique: true
+    t.index ["affiliate_campaign_id"], name: "index_affiliate_campaign_recipients_on_affiliate_campaign_id"
+    t.index ["affiliate_creator_id"], name: "index_affiliate_campaign_recipients_on_affiliate_creator_id"
+    t.index ["affiliate_message_id"], name: "index_affiliate_campaign_recipients_on_affiliate_message_id"
+  end
+
+  create_table "affiliate_campaigns", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "channel_id", null: false
+    t.string "name", null: false
+    t.jsonb "segment_filter", default: {}, null: false
+    t.text "message_template"
+    t.string "status", default: "draft", null: false
+    t.integer "sent_count", default: 0, null: false
+    t.integer "failed_count", default: 0, null: false
+    t.bigint "created_by_id"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["channel_id"], name: "index_affiliate_campaigns_on_channel_id"
+    t.index ["created_by_id"], name: "index_affiliate_campaigns_on_created_by_id"
+    t.index ["tenant_id"], name: "index_affiliate_campaigns_on_tenant_id"
+  end
+
+  create_table "affiliate_creators", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "channel_id", null: false
+    t.string "creator_open_id", null: false
+    t.string "username"
+    t.string "nickname"
+    t.string "avatar_url"
+    t.string "collaboration_status"
+    t.integer "showcase_product_count", default: 0, null: false
+    t.integer "content_product_count", default: 0, null: false
+    t.string "target_collaboration_id"
+    t.string "conversation_id"
+    t.boolean "has_free_sample", default: false, null: false
+    t.jsonb "raw_payload", default: {}, null: false
+    t.datetime "synced_at"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["channel_id"], name: "index_affiliate_creators_on_channel_id"
+    t.index ["tenant_id", "channel_id", "creator_open_id"], name: "index_affiliate_creators_on_tenant_channel_open_id", unique: true
+    t.index ["tenant_id"], name: "index_affiliate_creators_on_tenant_id"
+  end
+
+  create_table "affiliate_daily_snapshots", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "channel_id", null: false
+    t.date "snapshot_date", null: false
+    t.integer "active_creators_count", default: 0, null: false
+    t.integer "total_creators_count", default: 0, null: false
+    t.integer "showcase_product_count_total", default: 0, null: false
+    t.integer "content_product_count_total", default: 0, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["channel_id"], name: "index_affiliate_daily_snapshots_on_channel_id"
+    t.index ["tenant_id", "channel_id", "snapshot_date"], name: "index_affiliate_daily_snapshots_on_tenant_channel_date", unique: true
+    t.index ["tenant_id"], name: "index_affiliate_daily_snapshots_on_tenant_id"
+  end
+
+  create_table "affiliate_messages", force: :cascade do |t|
+    t.bigint "affiliate_creator_id", null: false
+    t.string "conversation_id"
+    t.string "direction", null: false
+    t.text "content"
+    t.datetime "sent_at"
+    t.jsonb "raw_payload", default: {}, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["affiliate_creator_id", "sent_at"], name: "index_affiliate_messages_on_affiliate_creator_id_and_sent_at"
+    t.index ["affiliate_creator_id"], name: "index_affiliate_messages_on_affiliate_creator_id"
   end
 
   create_table "audit_conflicts", force: :cascade do |t|
@@ -815,7 +897,7 @@ ActiveRecord::Schema[7.2].define(version: 2026_08_03_120000) do
     t.datetime "finished_at"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
-    t.index ["channel_product_listing_id", "stock_alert_rule_id"], name: "idx_one_inflight_execution_per_listing_rule", unique: true, where: "((status)::text = ANY ((ARRAY['pending'::character varying, 'executing'::character varying])::text[]))"
+    t.index ["channel_product_listing_id", "stock_alert_rule_id"], name: "idx_one_inflight_execution_per_listing_rule", unique: true, where: "((status)::text = ANY (ARRAY[('pending'::character varying)::text, ('executing'::character varying)::text]))"
     t.index ["channel_product_listing_id"], name: "idx_on_channel_product_listing_id_11f29f72e1"
     t.index ["idempotency_key"], name: "index_stock_replenishment_executions_on_idempotency_key", unique: true
     t.index ["product_id"], name: "index_stock_replenishment_executions_on_product_id"
@@ -917,6 +999,17 @@ ActiveRecord::Schema[7.2].define(version: 2026_08_03_120000) do
 
   add_foreign_key "active_storage_attachments", "active_storage_blobs", column: "blob_id"
   add_foreign_key "active_storage_variant_records", "active_storage_blobs", column: "blob_id"
+  add_foreign_key "affiliate_campaign_recipients", "affiliate_campaigns"
+  add_foreign_key "affiliate_campaign_recipients", "affiliate_creators"
+  add_foreign_key "affiliate_campaign_recipients", "affiliate_messages"
+  add_foreign_key "affiliate_campaigns", "channels"
+  add_foreign_key "affiliate_campaigns", "tenants"
+  add_foreign_key "affiliate_campaigns", "users", column: "created_by_id"
+  add_foreign_key "affiliate_creators", "channels"
+  add_foreign_key "affiliate_creators", "tenants"
+  add_foreign_key "affiliate_daily_snapshots", "channels"
+  add_foreign_key "affiliate_daily_snapshots", "tenants"
+  add_foreign_key "affiliate_messages", "affiliate_creators"
   add_foreign_key "audit_conflicts", "orders"
   add_foreign_key "audit_conflicts", "products"
   add_foreign_key "audit_conflicts", "tenants"

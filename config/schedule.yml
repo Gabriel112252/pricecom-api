@@ -89,6 +89,17 @@ tiktok_pending_financial_sync_dispatch:
 #   class: "Integrations::Tiktok::ShopAnalyticsSyncSchedulerJob"
 #   queue: integrations
 
+# Affiliate Seller API (target_collaborations/conversations — ver
+# TiktokAdapter's AFFILIATE_* paths e AffiliateSyncService). DESLIGADO DE
+# PROPÓSITO (2026-08-04): rodar manualmente 1x via console primeiro
+# (Integrations::Tiktok::AffiliateSyncJob.perform_later(channel_credential_id))
+# pra confirmar contra a Hidrabene que o sync roda limpo antes de ligar o
+# cron. Dado de criador muda pouco — 30min é conservador quando ligado.
+# tiktok_affiliate_sync_dispatch:
+#   cron: "*/30 * * * *"
+#   class: "Integrations::Tiktok::AffiliateSyncSchedulerJob"
+#   queue: integrations
+
 # idworks (ERP) has no webhooks — polling is the only option (see
 # Integrations::Idworks::OrderSyncService/ProductCostSyncService class
 # comments). Product cost changes infrequently, so a 6h full sync is
