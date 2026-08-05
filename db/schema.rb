@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_08_04_150000) do
+ActiveRecord::Schema[7.2].define(version: 2026_08_06_100000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -120,6 +120,8 @@ ActiveRecord::Schema[7.2].define(version: 2026_08_04_150000) do
     t.jsonb "raw_payload", default: {}, null: false
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.string "external_message_id"
+    t.index ["affiliate_creator_id", "external_message_id"], name: "index_affiliate_messages_on_creator_and_external_message_id", unique: true, where: "(external_message_id IS NOT NULL)"
     t.index ["affiliate_creator_id", "sent_at"], name: "index_affiliate_messages_on_affiliate_creator_id_and_sent_at"
     t.index ["affiliate_creator_id"], name: "index_affiliate_messages_on_affiliate_creator_id"
   end

@@ -61,9 +61,17 @@ module Integrations
     # Center API Testing Tool against the real Hidrabene credential
     # (2026-08-04), not inferred. Version 202508 was the newest observed
     # (202412 also responded); if 202508 turns out unstable, this is the
-    # single place to roll back. "Get Message in the Conversation" (full
-    # thread history within a conversation) was NOT confirmed and is
-    # deliberately left out here — see AffiliateDetailDrawer.vue.
+    # single place to roll back.
+    # - Get Message in the Conversation: CONFIRMED in production (Hidrabene,
+    #   2026-08-06) — GET /affiliate_seller/202412/conversation/{id}/messages
+    #   (singular "conversation", not to be confused with the plural
+    #   AFFILIATE_CONVERSATIONS_PATH above), scope
+    #   seller.affiliate_messages.write, page_size max 20. content comes back
+    #   as a nested JSON string (same {"content": "..."} shape as
+    #   #send_message's request body); there is no sender.role/nickname, only
+    #   sender_id — see #fetch_conversation_messages and
+    #   Integrations::Tiktok::AffiliateConversationSyncService for how the
+    #   caller infers inbound/outbound from it.
     AFFILIATE_TARGET_COLLABORATIONS_SEARCH_PATH = "/affiliate_seller/202508/target_collaborations/search".freeze
     AFFILIATE_CONVERSATIONS_PATH = "/affiliate_seller/202508/conversations".freeze
     AFFILIATE_UNREAD_MESSAGES_PATH = "/affiliate_seller/202508/conversations/messages/list/newest".freeze
@@ -108,6 +116,11 @@ module Integrations
     # has to be the one baked into the path itself, and nothing extra
     # added to the query string — see #send_message.
     AFFILIATE_CONVERSATION_MESSAGES_PATH_PATTERN = %r{\A/affiliate_seller/202412/conversations/[^/]+/messages\z}.freeze
+    # Get Message in the Conversation — also 202412, but singular
+    # "conversation" (not "conversations" like #send_message's path above).
+    # Distinct pattern, distinct constant — do not merge the two, the path
+    # shapes really differ. See #fetch_conversation_messages.
+    AFFILIATE_CONVERSATION_GET_MESSAGES_PATH_PATTERN = %r{\A/affiliate_seller/202412/conversation/[^/]+/messages\z}.freeze
     # The inventory-update path has a dynamic {product_id} segment, so it
     # can't live in SHOP_SCOPED_PATHS (an exact-match list) — matched by
     # pattern instead, see #shop_scoped_query_params.
@@ -613,6 +626,31 @@ module Integrations
       body["data"] || {}
     end
 
+    # Get Message in the Conversation — GET, singular "conversation" in the
+    # path (not to be confused with AFFILIATE_CONVERSATIONS_PATH/
+    # #fetch_conversations, which is plural and lists conversations, not
+    # messages within one). CONFIRMED in production (tenant Hidrabene,
+    # 2026-08-06): shop_cipher required in the query, page_size max 20 (the
+    # API silently caps or rejects above that — this adapter defaults to
+    # the confirmed max instead of guessing higher). Returns the raw "data"
+    # hash unchanged — { "has_more" =>, "next_page_token" =>, "messages" =>
+    # [{ "conversation_index" =>, "message_body" => { "id" =>,
+    # "conversation_id" =>, "type" =>, "content" =>, "create_time" =>,
+    # "sender_id" => } }] } — same as every other fetch_* here, this layer
+    # doesn't normalize or parse the nested `content` JSON string; see
+    # Integrations::Tiktok::AffiliateConversationSyncService for that (it
+    # also has the AffiliateCreator needed to turn sender_id into a
+    # direction, which this adapter has no access to).
+    def fetch_conversation_messages(conversation_id:, page_token: nil, page_size: 20)
+      id = conversation_id.to_s.strip
+      raise ArgumentError, "TiktokAdapter#fetch_conversation_messages: conversation_id inválido" if id.blank?
+
+      path = "/affiliate_seller/202412/conversation/#{id}/messages"
+      query_params = { page_size: page_size, page_token: page_token.presence }.compact
+      body = get(path, query_params: query_params)
+      body["data"] || {}
+    end
+
     # Get Latest Unread Messages — GET, a flat (non-paginated in the
     # confirmed response) list of the newest unread message per conversation.
     # unread_message_count here is PER CONVERSATION, not per message — see
@@ -749,7 +787,8 @@ module Integrations
       unless SHOP_SCOPED_PATHS.include?(path) ||
           path.match?(INVENTORY_UPDATE_PATH_PATTERN) ||
           path.match?(AFFILIATE_TARGET_COLLABORATION_DETAIL_PATH_PATTERN) ||
-          path.match?(AFFILIATE_CONVERSATION_MESSAGES_PATH_PATTERN)
+          path.match?(AFFILIATE_CONVERSATION_MESSAGES_PATH_PATTERN) ||
+          path.match?(AFFILIATE_CONVERSATION_GET_MESSAGES_PATH_PATTERN)
         return {}
       end
 

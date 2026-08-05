@@ -835,6 +835,61 @@ RSpec.describe Integrations::TiktokAdapter do
     end
   end
 
+  describe "#fetch_conversation_messages" do
+    # Singular "conversation" — CONFIRMED in production (Hidrabene,
+    # 2026-08-06), NOT the plural AFFILIATE_CONVERSATIONS_PATH/
+    # AFFILIATE_CONVERSATION_MESSAGES_PATH_PATTERN used by
+    # #fetch_conversations/#send_message.
+    let(:messages_url) { "https://open-api.tiktokglobalshop.com/affiliate_seller/202412/conversation/conv-1/messages" }
+
+    it "returns the raw messages page, with content still as a nested JSON string" do
+      stub_request(:get, /\A#{Regexp.escape(messages_url)}/)
+        .to_return(status: 200, body: {
+          code: 0,
+          data: {
+            has_more: false,
+            next_page_token: "",
+            messages: [
+              {
+                conversation_index: "1785936154640500",
+                message_body: {
+                  id: "7670537312148932104",
+                  conversation_id: "7670517941909700881",
+                  type: "TEXT",
+                  content: { content: "texto real aqui" }.to_json,
+                  create_time: 1_785_936_154,
+                  sender_id: "7497814839709541074"
+                }
+              }
+            ]
+          }
+        }.to_json)
+
+      data = adapter.fetch_conversation_messages(conversation_id: "conv-1")
+
+      expect(data["has_more"]).to eq(false)
+      message_body = data["messages"].first["message_body"]
+      expect(message_body["id"]).to eq("7670537312148932104")
+      expect(message_body["content"]).to eq({ "content" => "texto real aqui" }.to_json)
+    end
+
+    it "sends shop_cipher, page_size and page_token in the query, and no version param" do
+      stub_request(:get, /\A#{Regexp.escape(messages_url)}/)
+        .to_return(status: 200, body: { code: 0, data: { has_more: false, next_page_token: "", messages: [] } }.to_json)
+
+      adapter.fetch_conversation_messages(conversation_id: "conv-1", page_token: "tok-1", page_size: 20)
+
+      expect(WebMock).to have_requested(:get, messages_url)
+        .with(query: hash_including("shop_cipher" => "GCP_cipher", "page_size" => "20", "page_token" => "tok-1"))
+      expect(WebMock).to have_requested(:get, messages_url)
+        .with(query: hash_excluding("version"))
+    end
+
+    it "raises ArgumentError when conversation_id is blank" do
+      expect { adapter.fetch_conversation_messages(conversation_id: "") }.to raise_error(ArgumentError)
+    end
+  end
+
   describe "#fetch_latest_unread_messages" do
     let(:unread_url) { "https://open-api.tiktokglobalshop.com/affiliate_seller/202508/conversations/messages/list/newest" }
 

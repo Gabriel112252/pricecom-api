@@ -20,11 +20,17 @@ module Integrations
 
       def call
         ensure_conversation!
-        adapter.send_message(conversation_id: affiliate_creator.conversation_id, content: content)
+        response = adapter.send_message(conversation_id: affiliate_creator.conversation_id, content: content)
 
+        # external_message_id captured from TikTok's own send response so
+        # AffiliateConversationSyncService's dedupe recognizes this same
+        # message when it later comes back through Get Message in the
+        # Conversation — without it, the next sync would insert a second,
+        # duplicate row for a message we already persisted locally here.
         message = AffiliateMessage.create!(
           affiliate_creator: affiliate_creator,
           conversation_id: affiliate_creator.conversation_id,
+          external_message_id: response["message_id"],
           direction: "outbound",
           content: content,
           sent_at: Time.current

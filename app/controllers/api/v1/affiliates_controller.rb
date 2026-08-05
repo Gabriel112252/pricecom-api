@@ -46,6 +46,27 @@ module Api
         render json: creator_json(creator)
       end
 
+      # GET /api/v1/affiliates/creators/:id/messages — sincroniza o
+      # histórico real da conversa (TikTok Get Message in the Conversation,
+      # paginado) antes de devolver as mensagens persistidas. Síncrono
+      # dentro do request, como #send_message — o drawer chama isso ao
+      # abrir/trocar de criador, latência aceitável para uma conversa só.
+      # Se a sync falhar (rate limit, credencial expirada), ainda assim
+      # devolve o que já está persistido de syncs anteriores, marcando
+      # sync_failed para o frontend avisar sem quebrar o resto do drawer.
+      def messages
+        creator = current_tenant.affiliate_creators.find(params[:id])
+        sync_failed = false
+        begin
+          Integrations::Tiktok::AffiliateConversationSyncService.call(affiliate_creator: creator)
+        rescue Integrations::AuthenticationError, Integrations::RateLimitError, Integrations::ApiError
+          sync_failed = true
+        end
+
+        rows = creator.affiliate_messages.order(:sent_at).map { |m| message_json(m) }
+        render json: { rows: rows, sync_failed: sync_failed }
+      end
+
       # POST /api/v1/affiliates/creators/:id/messages — envio individual,
       # síncrono (uma mensagem só, latência aceitável dentro do request).
       def send_message
@@ -85,6 +106,15 @@ module Api
           target_collaboration_id: creator.target_collaboration_id,
           conversation_id: creator.conversation_id,
           synced_at: creator.synced_at
+        }
+      end
+
+      def message_json(message)
+        {
+          id: message.id,
+          direction: message.direction,
+          content: message.content,
+          sent_at: message.sent_at
         }
       end
 

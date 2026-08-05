@@ -44,6 +44,43 @@ RSpec.describe "Affiliates", type: :request do
     end
   end
 
+  describe "GET /api/v1/affiliates/creators/:id/messages" do
+    it "syncs and returns the persisted message history" do
+      creator = channel.affiliate_creators.create!(tenant: tenant, creator_open_id: "u1", conversation_id: "conv-1")
+      adapter = instance_double(
+        Integrations::TiktokAdapter,
+        fetch_conversation_messages: { "has_more" => false, "next_page_token" => "", "messages" => [] }
+      )
+      allow(Integrations::TiktokAdapter).to receive(:new).and_return(adapter)
+      tenant.channel_credentials.create!(channel: "tiktok", status: "active", credentials: { app_key: "k", app_secret: "s" })
+      creator.affiliate_messages.create!(direction: "inbound", content: "oi", sent_at: Time.current)
+
+      get "/api/v1/affiliates/creators/#{creator.id}/messages", headers: auth_headers(operador)
+
+      expect(response).to have_http_status(:ok)
+      body = JSON.parse(response.body)
+      expect(body["sync_failed"]).to eq(false)
+      expect(body["rows"].size).to eq(1)
+      expect(body["rows"].first["content"]).to eq("oi")
+    end
+
+    it "still returns already-persisted messages and flags sync_failed when the live sync fails" do
+      creator = channel.affiliate_creators.create!(tenant: tenant, creator_open_id: "u1", conversation_id: "conv-1")
+      adapter = instance_double(Integrations::TiktokAdapter)
+      allow(Integrations::TiktokAdapter).to receive(:new).and_return(adapter)
+      allow(adapter).to receive(:fetch_conversation_messages).and_raise(Integrations::RateLimitError.new("rate limited"))
+      tenant.channel_credentials.create!(channel: "tiktok", status: "active", credentials: { app_key: "k", app_secret: "s" })
+      creator.affiliate_messages.create!(direction: "outbound", content: "já salva", sent_at: Time.current)
+
+      get "/api/v1/affiliates/creators/#{creator.id}/messages", headers: auth_headers(operador)
+
+      expect(response).to have_http_status(:ok)
+      body = JSON.parse(response.body)
+      expect(body["sync_failed"]).to eq(true)
+      expect(body["rows"].size).to eq(1)
+    end
+  end
+
   describe "POST /api/v1/affiliates/creators/:id/messages" do
     it "sends the message and persists it" do
       creator = channel.affiliate_creators.create!(tenant: tenant, creator_open_id: "u1", conversation_id: "conv-1")

@@ -155,6 +155,7 @@ Rails.application.routes.draw do
       get  "affiliates/overview",     to: "affiliates#overview"
       get  "affiliates/creators",     to: "affiliates#creators"
       get  "affiliates/creators/:id", to: "affiliates#creator"
+      get  "affiliates/creators/:id/messages", to: "affiliates#messages"
       post "affiliates/creators/:id/messages", to: "affiliates#send_message"
       resources :affiliate_campaigns, only: [ :index, :create, :show ]
 
