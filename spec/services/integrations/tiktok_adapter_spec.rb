@@ -779,7 +779,12 @@ RSpec.describe Integrations::TiktokAdapter do
   end
 
   describe "#send_message" do
-    let(:messages_url) { "https://open-api.tiktokglobalshop.com/affiliate_seller/202508/conversations/conv-1/messages" }
+    # Version 202412, NOT 202508 like the other Affiliate Seller endpoints —
+    # see AFFILIATE_CONVERSATION_MESSAGES_PATH_PATTERN's comment: confirmed
+    # by manual testing against production (2026-08-05) that this endpoint
+    # rejects both 202508 and a 202412 *query param* with code 36009004;
+    # only baking 202412 into the path works.
+    let(:messages_url) { "https://open-api.tiktokglobalshop.com/affiliate_seller/202412/conversations/conv-1/messages" }
 
     it "posts the message content to the conversation" do
       captured_body = nil
@@ -790,6 +795,18 @@ RSpec.describe Integrations::TiktokAdapter do
       adapter.send_message(conversation_id: "conv-1", content: "Olá!")
 
       expect(captured_body).to eq({ "content" => "Olá!" })
+    end
+
+    it "hits the 202412-versioned path with shop_cipher, and does not add a version query param" do
+      stub_request(:post, /\A#{Regexp.escape(messages_url)}/)
+        .to_return(status: 200, body: { code: 0, data: { message_id: "msg-1" } }.to_json)
+
+      adapter.send_message(conversation_id: "conv-1", content: "Olá!")
+
+      expect(WebMock).to have_requested(:post, messages_url)
+        .with(query: hash_including("shop_cipher" => "GCP_cipher"))
+      expect(WebMock).to have_requested(:post, messages_url)
+        .with(query: hash_excluding("version"))
     end
 
     it "raises RateLimitError on a rate-limit-shaped body error" do

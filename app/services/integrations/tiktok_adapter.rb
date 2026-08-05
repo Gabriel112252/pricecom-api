@@ -100,7 +100,14 @@ module Integrations
     # SHOP_SCOPED_PATHS list — matched by pattern, same technique already
     # used for the inventory-update path below.
     AFFILIATE_TARGET_COLLABORATION_DETAIL_PATH_PATTERN = %r{\A/affiliate_seller/202508/target_collaborations/[^/]+\z}.freeze
-    AFFILIATE_CONVERSATION_MESSAGES_PATH_PATTERN = %r{\A/affiliate_seller/202508/conversations/[^/]+/messages\z}.freeze
+    # Send Message lives on API version 202412, NOT 202508 like the rest of
+    # the Affiliate Seller endpoints above — confirmed by manual testing
+    # against production (2026-08-05): sending version=202412 as a query
+    # param (mirroring the #affiliate_path? fix for the other endpoints)
+    # still failed with code 36009004 "Invalid API version". The version
+    # has to be the one baked into the path itself, and nothing extra
+    # added to the query string — see #send_message.
+    AFFILIATE_CONVERSATION_MESSAGES_PATH_PATTERN = %r{\A/affiliate_seller/202412/conversations/[^/]+/messages\z}.freeze
     # The inventory-update path has a dynamic {product_id} segment, so it
     # can't live in SHOP_SCOPED_PATHS (an exact-match list) — matched by
     # pattern instead, see #shop_scoped_query_params.
@@ -573,11 +580,18 @@ module Integrations
 
     # Send IM Message — POST. content is a plain text message; TikTok's
     # `type` field only supports TEXT for what this adapter sends.
+    #
+    # This endpoint is versioned 202412 in the path (not 202508 like the
+    # other Affiliate Seller endpoints) — see
+    # AFFILIATE_CONVERSATION_MESSAGES_PATH_PATTERN's comment. #affiliate_path?
+    # only matches the /affiliate_seller/202508/ prefix, so this path
+    # correctly gets no `version` query param added on top of the one
+    # already in the URL.
     def send_message(conversation_id:, content:)
       id = conversation_id.to_s.strip
       raise ArgumentError, "TiktokAdapter#send_message: conversation_id inválido" if id.blank?
 
-      path = "/affiliate_seller/202508/conversations/#{id}/messages"
+      path = "/affiliate_seller/202412/conversations/#{id}/messages"
       body = post(path, { content: content.to_s })
       body["data"] || {}
     end
