@@ -88,16 +88,64 @@ RSpec.describe "Affiliates", type: :request do
       expect(JSON.parse(response.body)["rows"].first["has_unread"]).to eq(false)
     end
 
-    it "does not call the adapter at all when the page has no rows" do
+    it "calls the adapter even when the query returns no rows — unread has to be known before pagination, not skipped based on the result" do
+      channel
       tenant.channel_credentials.create!(channel: "tiktok", status: "active", credentials: { app_key: "k", app_secret: "s" })
       adapter = instance_double(Integrations::TiktokAdapter)
       allow(Integrations::TiktokAdapter).to receive(:new).and_return(adapter)
-      allow(adapter).to receive(:fetch_latest_unread_messages)
+      allow(adapter).to receive(:fetch_latest_unread_messages).and_return([])
 
       get "/api/v1/affiliates/creators", headers: auth_headers(operador)
 
       expect(JSON.parse(response.body)["rows"]).to eq([])
-      expect(adapter).not_to have_received(:fetch_latest_unread_messages)
+      expect(adapter).to have_received(:fetch_latest_unread_messages).once
+    end
+
+    it "puts a creator with an unread message first, ahead of one that would otherwise rank higher on the chosen sort" do
+      low = channel.affiliate_creators.create!(tenant: tenant, creator_open_id: "u_low", conversation_id: "conv-low", content_product_count: 1)
+      high = channel.affiliate_creators.create!(tenant: tenant, creator_open_id: "u_high", conversation_id: "conv-high", content_product_count: 10)
+      tenant.channel_credentials.create!(channel: "tiktok", status: "active", credentials: { app_key: "k", app_secret: "s" })
+      adapter = instance_double(Integrations::TiktokAdapter)
+      allow(Integrations::TiktokAdapter).to receive(:new).and_return(adapter)
+      allow(adapter).to receive(:fetch_latest_unread_messages).and_return(
+        [ { "conversation_id" => "conv-low", "unread_message_count" => 1 } ]
+      )
+
+      get "/api/v1/affiliates/creators", params: { sort: "content_product_count", direction: "desc" }, headers: auth_headers(operador)
+
+      rows = JSON.parse(response.body)["rows"]
+      expect(rows.map { |r| r["creator_open_id"] }).to eq([ low.creator_open_id, high.creator_open_id ])
+      expect(rows.first["has_unread"]).to eq(true)
+    end
+
+    it "keeps the chosen sort untouched when nobody has an unread message" do
+      low = channel.affiliate_creators.create!(tenant: tenant, creator_open_id: "u_low", conversation_id: "conv-low", content_product_count: 1)
+      high = channel.affiliate_creators.create!(tenant: tenant, creator_open_id: "u_high", conversation_id: "conv-high", content_product_count: 10)
+      tenant.channel_credentials.create!(channel: "tiktok", status: "active", credentials: { app_key: "k", app_secret: "s" })
+      adapter = instance_double(Integrations::TiktokAdapter)
+      allow(Integrations::TiktokAdapter).to receive(:new).and_return(adapter)
+      allow(adapter).to receive(:fetch_latest_unread_messages).and_return([])
+
+      get "/api/v1/affiliates/creators", params: { sort: "content_product_count", direction: "desc" }, headers: auth_headers(operador)
+
+      rows = JSON.parse(response.body)["rows"]
+      expect(rows.map { |r| r["creator_open_id"] }).to eq([ high.creator_open_id, low.creator_open_id ])
+    end
+
+    it "falls back to the chosen sort, with nobody prioritized, when the unread check itself fails" do
+      low = channel.affiliate_creators.create!(tenant: tenant, creator_open_id: "u_low", conversation_id: "conv-low", content_product_count: 1)
+      high = channel.affiliate_creators.create!(tenant: tenant, creator_open_id: "u_high", conversation_id: "conv-high", content_product_count: 10)
+      tenant.channel_credentials.create!(channel: "tiktok", status: "active", credentials: { app_key: "k", app_secret: "s" })
+      adapter = instance_double(Integrations::TiktokAdapter)
+      allow(Integrations::TiktokAdapter).to receive(:new).and_return(adapter)
+      allow(adapter).to receive(:fetch_latest_unread_messages).and_raise(Integrations::ApiError.new("boom"))
+
+      get "/api/v1/affiliates/creators", params: { sort: "content_product_count", direction: "desc" }, headers: auth_headers(operador)
+
+      expect(response).to have_http_status(:ok)
+      rows = JSON.parse(response.body)["rows"]
+      expect(rows.map { |r| r["creator_open_id"] }).to eq([ high.creator_open_id, low.creator_open_id ])
+      expect(rows.map { |r| r["has_unread"] }).to eq([ false, false ])
     end
   end
 

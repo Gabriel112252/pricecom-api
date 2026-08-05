@@ -27,7 +27,13 @@ module Api
 
       # GET /api/v1/affiliates/creators — tabela "Meus Afiliados", mesmo
       # padrão de scope inline + whitelist de sort do
-      # DashboardController#tiktok_orders.
+      # DashboardController#tiktok_orders. Criadores com mensagem não lida
+      # sempre sobem para o topo, automaticamente — não é uma opção de sort
+      # configurável, é sempre aplicado por cima do sort escolhido (ver
+      # #order_clause). Por isso unread_conversation_ids precisa ser
+      # calculado ANTES de paginar: uma mensagem não lida na página 3 não
+      # tem como "furar a fila" se a gente só souber quem tem unread depois
+      # de já ter cortado a página.
       def creators
         channel = current_tenant.channels.find_by(platform: "tiktok")
         return render json: { rows: [], meta: pagination_meta_empty } unless channel
@@ -36,8 +42,8 @@ module Api
         sort = CREATOR_SORTS.fetch(params[:sort].to_s, CREATOR_SORTS["synced_at"])
         direction = params[:direction].to_s.downcase == "asc" ? "ASC" : "DESC"
         per = [ [ params.fetch(:per_page, PER_PAGE_DEFAULT).to_i, 1 ].max, PER_PAGE_MAX ].min
-        paged = scope.reorder(Arel.sql("#{sort} #{direction}"), id: :asc).page(params[:page]).per(per)
-        unread_ids = paged.any? ? unread_conversation_ids : Set.new
+        unread_ids = unread_conversation_ids
+        paged = scope.reorder(order_clause(sort, direction, unread_ids), id: :asc).page(params[:page]).per(per)
 
         render json: { rows: paged.map { |creator| creator_json(creator, unread_conversation_ids: unread_ids) }, meta: pagination_meta(paged) }
       end
@@ -113,11 +119,15 @@ module Api
 
       # "Mensagem não lida" por criador na listagem — mesma fonte de dado e
       # mesma degradação graciosa de
-      # Api::V1::AffiliateCampaignsController#unread_metrics (uma chamada só
-      # a Get Latest Unread Messages para a página inteira, cruzada em
-      # memória por conversation_id — nunca uma chamada por criador). Sem
+      # Api::V1::AffiliateCampaignsController#unread_metrics: UMA chamada a
+      # Get Latest Unread Messages, cruzada em memória por conversation_id
+      # — nunca uma chamada por criador. Chamado ANTES de paginar (ver
+      # #creators/#order_clause), então sempre reflete o tenant inteiro, não
+      # só a página atual — é o que permite furar a fila de qualquer
+      # página, não só priorizar dentro da página já cortada. Sem
       # credencial ou com falha na API, devolve um Set vazio (ninguém
-      # marcado como unread) em vez de quebrar a listagem.
+      # marcado como unread, sort cai de volta ao normal) em vez de quebrar
+      # a listagem.
       def unread_conversation_ids
         channel_credential = current_tenant.channel_credentials.find_by(channel: "tiktok")
         return Set.new unless channel_credential
@@ -129,6 +139,23 @@ module Api
           .to_set
       rescue Integrations::AuthenticationError, Integrations::RateLimitError, Integrations::ApiError
         Set.new
+      end
+
+      # unread_conversation_ids isn't a DB column — it's resolved in Ruby
+      # from a TikTok API call — so it can't be an ORDER BY term on its
+      # own. A CASE WHEN over the already-resolved conversation_id list
+      # buys a real SQL sort: unread creators (0) before everyone else (1),
+      # then params[:sort]/params[:direction] as the tie-breaker within
+      # each group. Empty unread_conversation_ids (no credential, API
+      # error, or genuinely nothing unread) skips the CASE WHEN entirely —
+      # same query shape as before this feature existed.
+      def order_clause(sort, direction, unread_conversation_ids)
+        return Arel.sql("#{sort} #{direction}") if unread_conversation_ids.blank?
+
+        unread_case = ActiveRecord::Base.sanitize_sql_array(
+          [ "CASE WHEN affiliate_creators.conversation_id IN (?) THEN 0 ELSE 1 END", unread_conversation_ids.to_a ]
+        )
+        Arel.sql("#{unread_case}, #{sort} #{direction}")
       end
 
       def message_json(message)
