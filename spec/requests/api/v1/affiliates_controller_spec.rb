@@ -42,6 +42,63 @@ RSpec.describe "Affiliates", type: :request do
       expect(rows.size).to eq(1)
       expect(rows.first["creator_open_id"]).to eq("u1")
     end
+
+    it "returns has_unread: false for every row when there is no tiktok credential" do
+      channel.affiliate_creators.create!(tenant: tenant, creator_open_id: "u1", conversation_id: "conv-1")
+
+      get "/api/v1/affiliates/creators", headers: auth_headers(operador)
+
+      rows = JSON.parse(response.body)["rows"]
+      expect(rows.first["has_unread"]).to eq(false)
+    end
+
+    it "marks has_unread: true only for the creator whose conversation_id has an unread message, with a single adapter call for the whole page" do
+      channel.affiliate_creators.create!(tenant: tenant, creator_open_id: "u1", conversation_id: "conv-1")
+      channel.affiliate_creators.create!(tenant: tenant, creator_open_id: "u2", conversation_id: "conv-2")
+      channel.affiliate_creators.create!(tenant: tenant, creator_open_id: "u3", conversation_id: nil)
+      tenant.channel_credentials.create!(channel: "tiktok", status: "active", credentials: { app_key: "k", app_secret: "s" })
+      adapter = instance_double(Integrations::TiktokAdapter)
+      allow(Integrations::TiktokAdapter).to receive(:new).and_return(adapter)
+      allow(adapter).to receive(:fetch_latest_unread_messages).and_return(
+        [
+          { "conversation_id" => "conv-1", "unread_message_count" => 2 },
+          { "conversation_id" => "conv-2", "unread_message_count" => 0 }
+        ]
+      )
+
+      get "/api/v1/affiliates/creators", headers: auth_headers(operador)
+
+      rows = JSON.parse(response.body)["rows"].index_by { |r| r["creator_open_id"] }
+      expect(rows["u1"]["has_unread"]).to eq(true)
+      expect(rows["u2"]["has_unread"]).to eq(false)
+      expect(rows["u3"]["has_unread"]).to eq(false)
+      expect(adapter).to have_received(:fetch_latest_unread_messages).once
+    end
+
+    it "degrades gracefully (has_unread: false, still 200) when the unread check raises" do
+      channel.affiliate_creators.create!(tenant: tenant, creator_open_id: "u1", conversation_id: "conv-1")
+      tenant.channel_credentials.create!(channel: "tiktok", status: "active", credentials: { app_key: "k", app_secret: "s" })
+      adapter = instance_double(Integrations::TiktokAdapter)
+      allow(Integrations::TiktokAdapter).to receive(:new).and_return(adapter)
+      allow(adapter).to receive(:fetch_latest_unread_messages).and_raise(Integrations::RateLimitError.new("rate limited"))
+
+      get "/api/v1/affiliates/creators", headers: auth_headers(operador)
+
+      expect(response).to have_http_status(:ok)
+      expect(JSON.parse(response.body)["rows"].first["has_unread"]).to eq(false)
+    end
+
+    it "does not call the adapter at all when the page has no rows" do
+      tenant.channel_credentials.create!(channel: "tiktok", status: "active", credentials: { app_key: "k", app_secret: "s" })
+      adapter = instance_double(Integrations::TiktokAdapter)
+      allow(Integrations::TiktokAdapter).to receive(:new).and_return(adapter)
+      allow(adapter).to receive(:fetch_latest_unread_messages)
+
+      get "/api/v1/affiliates/creators", headers: auth_headers(operador)
+
+      expect(JSON.parse(response.body)["rows"]).to eq([])
+      expect(adapter).not_to have_received(:fetch_latest_unread_messages)
+    end
   end
 
   describe "GET /api/v1/affiliates/creators/:id/messages" do

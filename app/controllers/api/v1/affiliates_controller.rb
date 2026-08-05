@@ -37,8 +37,9 @@ module Api
         direction = params[:direction].to_s.downcase == "asc" ? "ASC" : "DESC"
         per = [ [ params.fetch(:per_page, PER_PAGE_DEFAULT).to_i, 1 ].max, PER_PAGE_MAX ].min
         paged = scope.reorder(Arel.sql("#{sort} #{direction}"), id: :asc).page(params[:page]).per(per)
+        unread_ids = paged.any? ? unread_conversation_ids : Set.new
 
-        render json: { rows: paged.map { |creator| creator_json(creator) }, meta: pagination_meta(paged) }
+        render json: { rows: paged.map { |creator| creator_json(creator, unread_conversation_ids: unread_ids) }, meta: pagination_meta(paged) }
       end
 
       def creator
@@ -93,7 +94,7 @@ module Api
         end
       end
 
-      def creator_json(creator)
+      def creator_json(creator, unread_conversation_ids: Set.new)
         {
           id: creator.id,
           creator_open_id: creator.creator_open_id,
@@ -105,8 +106,29 @@ module Api
           content_product_count: creator.content_product_count,
           target_collaboration_id: creator.target_collaboration_id,
           conversation_id: creator.conversation_id,
-          synced_at: creator.synced_at
+          synced_at: creator.synced_at,
+          has_unread: creator.conversation_id.present? && unread_conversation_ids.include?(creator.conversation_id)
         }
+      end
+
+      # "Mensagem não lida" por criador na listagem — mesma fonte de dado e
+      # mesma degradação graciosa de
+      # Api::V1::AffiliateCampaignsController#unread_metrics (uma chamada só
+      # a Get Latest Unread Messages para a página inteira, cruzada em
+      # memória por conversation_id — nunca uma chamada por criador). Sem
+      # credencial ou com falha na API, devolve um Set vazio (ninguém
+      # marcado como unread) em vez de quebrar a listagem.
+      def unread_conversation_ids
+        channel_credential = current_tenant.channel_credentials.find_by(channel: "tiktok")
+        return Set.new unless channel_credential
+
+        adapter = Integrations::TiktokAdapter.new(channel_credential.credentials)
+        adapter.fetch_latest_unread_messages
+          .select { |message| message["unread_message_count"].to_i.positive? }
+          .map { |message| message["conversation_id"] }
+          .to_set
+      rescue Integrations::AuthenticationError, Integrations::RateLimitError, Integrations::ApiError
+        Set.new
       end
 
       def message_json(message)
