@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_08_06_100000) do
+ActiveRecord::Schema[7.2].define(version: 2026_08_06_140000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -196,6 +196,7 @@ ActiveRecord::Schema[7.2].define(version: 2026_08_06_100000) do
     t.datetime "orders_sync_cursor_at"
     t.boolean "polling_enabled", default: false, null: false
     t.datetime "carts_sync_cursor_at"
+    t.string "tiktok_seller_im_sender_id"
     t.index ["stock_source_channel_id"], name: "index_channel_credentials_on_stock_source_channel_id"
     t.index ["tenant_id", "channel"], name: "index_channel_credentials_on_tenant_id_and_channel", unique: true
     t.index ["tenant_id"], name: "index_channel_credentials_on_tenant_id"
