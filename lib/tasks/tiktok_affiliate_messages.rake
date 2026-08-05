@@ -61,9 +61,14 @@ namespace :tiktok do
          "AffiliateMessage id=16 da fabibessa_ duplicando id=98). " \
          "Não bate na API — só compara linhas já persistidas: para cada linha SEM external_message_id, " \
          "procura outra do mesmo affiliate_creator_id, mesma direction, mesmo content, com sent_at a " \
-         "até WINDOW_SECONDS (default 10) de distância e COM external_message_id — se achar, apaga a " \
-         "linha sem external_message_id (a com external_message_id é sempre a mais confiável, veio " \
-         "direto da API). Pede confirmação antes de apagar. " \
+         "até WINDOW_SECONDS (default 10) de distância e COM external_message_id — se achar, é a " \
+         "'mensagem boa' (a com external_message_id é sempre a mais confiável, veio direto da API). " \
+         "Antes de apagar a órfã, repontam-se para a mensagem boa quaisquer " \
+         "AffiliateCampaignRecipient#affiliate_message_id que ainda apontem para ela — sem esse passo " \
+         "o DELETE falha com InvalidForeignKey (aconteceu em produção 2026-08-06: órfãs referenciadas " \
+         "por um recipient de campanha). Cada par é resolvido dentro de uma transação própria; se um " \
+         "par falhar por qualquer motivo, fica logado e a task segue para o próximo em vez de abortar " \
+         "tudo. Pede confirmação antes de começar. " \
          "Uso: bin/rails 'tiktok:affiliate_messages:dedupe[tenant_slug]' WINDOW_SECONDS=10"
     task :dedupe, [ :tenant_slug ] => :environment do |_t, args|
       window_seconds = ENV["WINDOW_SECONDS"].to_i.positive? ? ENV["WINDOW_SECONDS"].to_i : 10
@@ -76,31 +81,37 @@ namespace :tiktok do
         scope = scope.joins(:affiliate_creator).where(affiliate_creators: { tenant_id: tenant.id })
       end
 
-      candidates = scope.select do |message|
-        AffiliateMessage
-          .where(affiliate_creator_id: message.affiliate_creator_id)
-          .where(direction: message.direction)
-          .where(content: message.content)
+      # Pareia cada órfã com a mensagem boa correspondente de uma vez só —
+      # mesmo critério de sempre, mas guardando o par (não só a órfã), já
+      # que o passo de repontar o recipient (abaixo) precisa do id da
+      # mensagem boa no momento do DELETE, não só saber que ela existe.
+      pairs = scope.filter_map do |orphan|
+        good_message = AffiliateMessage
+          .where(affiliate_creator_id: orphan.affiliate_creator_id)
+          .where(direction: orphan.direction)
+          .where(content: orphan.content)
           .where.not(external_message_id: nil)
-          .where(sent_at: (message.sent_at - window_seconds.seconds)..(message.sent_at + window_seconds.seconds))
-          .exists?
+          .where(sent_at: (orphan.sent_at - window_seconds.seconds)..(orphan.sent_at + window_seconds.seconds))
+          .first
+        { orphan: orphan, good: good_message } if good_message
       end
 
       puts "window_seconds=#{window_seconds}"
       puts "tenant_slug=#{tenant_slug.presence || 'all'}"
-      puts "duplicatas_encontradas=#{candidates.size}"
+      puts "duplicatas_encontradas=#{pairs.size}"
 
-      if candidates.empty?
+      if pairs.empty?
         puts "Nada para apagar."
         next
       end
 
-      candidates.each do |message|
-        puts "  id=#{message.id} affiliate_creator_id=#{message.affiliate_creator_id} " \
-             "sent_at=#{message.sent_at} content=#{message.content.to_s.truncate(60)}"
+      pairs.each do |pair|
+        puts "  id=#{pair[:orphan].id} -> mensagem boa id=#{pair[:good].id} " \
+             "affiliate_creator_id=#{pair[:orphan].affiliate_creator_id} sent_at=#{pair[:orphan].sent_at} " \
+             "content=#{pair[:orphan].content.to_s.truncate(60)}"
       end
 
-      print "Confirma a exclusão dessas #{candidates.size} linha(s)? (digite 'sim' para continuar): "
+      print "Confirma a exclusão dessas #{pairs.size} linha(s)? (digite 'sim' para continuar): "
       confirmation = $stdin.gets&.strip
       if confirmation != "sim"
         puts "Cancelado."
@@ -108,12 +119,22 @@ namespace :tiktok do
       end
 
       deleted = 0
-      candidates.each do |message|
-        message.destroy!
+      failed = 0
+      pairs.each do |pair|
+        orphan = pair[:orphan]
+        good_message = pair[:good]
+
+        ActiveRecord::Base.transaction do
+          AffiliateCampaignRecipient.where(affiliate_message_id: orphan.id).update_all(affiliate_message_id: good_message.id)
+          orphan.destroy!
+        end
         deleted += 1
+      rescue => e
+        failed += 1
+        puts "  ERRO id=#{orphan.id}: #{e.class}: #{e.message} — pulando, seguindo para a próxima"
       end
 
-      puts "Done. deletadas=#{deleted}"
+      puts "Done. deletadas=#{deleted} falhas=#{failed}"
     end
   end
 end
