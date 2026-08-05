@@ -786,7 +786,12 @@ RSpec.describe Integrations::TiktokAdapter do
     # only baking 202412 into the path works.
     let(:messages_url) { "https://open-api.tiktokglobalshop.com/affiliate_seller/202412/conversations/conv-1/messages" }
 
-    it "posts the message content to the conversation" do
+    # Body shape CONFIRMED via the Partner Center API Testing Tool's example
+    # curl and a real production call (tenant Hidrabene, 2026-08-05: code 0,
+    # message_id populated) — msg_type is required at the top level, and
+    # content is a STRING holding a serialized JSON object with a single
+    # `content` key (the real text is doubly nested).
+    it "posts msg_type and a doubly-JSON-nested content to the conversation" do
       captured_body = nil
       stub_request(:post, /\A#{Regexp.escape(messages_url)}/)
         .with { |request| captured_body = JSON.parse(request.body) }
@@ -794,7 +799,7 @@ RSpec.describe Integrations::TiktokAdapter do
 
       adapter.send_message(conversation_id: "conv-1", content: "Olá!")
 
-      expect(captured_body).to eq({ "content" => "Olá!" })
+      expect(captured_body).to eq({ "msg_type" => "TEXT", "content" => { "content" => "Olá!" }.to_json })
     end
 
     it "hits the 202412-versioned path with shop_cipher, and does not add a version query param" do

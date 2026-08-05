@@ -578,8 +578,14 @@ module Integrations
       body["data"] || {}
     end
 
-    # Send IM Message — POST. content is a plain text message; TikTok's
-    # `type` field only supports TEXT for what this adapter sends.
+    # Send IM Message — POST. Body shape CONFIRMED via the Partner Center
+    # API Testing Tool's example curl and a real production call (tenant
+    # Hidrabene, 2026-08-05: code 0, message_id populated) — NOT the shape
+    # this method originally shipped with. `msg_type` is required at the
+    # top level ("TEXT" is the only value this adapter sends); `content` is
+    # a STRING holding a serialized JSON object with a single `content` key
+    # — the real message text is doubly nested, not plain text:
+    #   { "msg_type": "TEXT", "content": "{\"content\": \"hello\"}" }
     #
     # This endpoint is versioned 202412 in the path (not 202508 like the
     # other Affiliate Seller endpoints) — see
@@ -592,7 +598,10 @@ module Integrations
       raise ArgumentError, "TiktokAdapter#send_message: conversation_id inválido" if id.blank?
 
       path = "/affiliate_seller/202412/conversations/#{id}/messages"
-      body = post(path, { content: content.to_s })
+      body = post(path, {
+        msg_type: "TEXT",
+        content: { content: content.to_s }.to_json
+      })
       body["data"] || {}
     end
 
