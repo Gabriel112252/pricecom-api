@@ -891,7 +891,12 @@ RSpec.describe Integrations::TiktokAdapter do
   end
 
   describe "#fetch_latest_unread_messages" do
-    let(:unread_url) { "https://open-api.tiktokglobalshop.com/affiliate_seller/202508/conversations/messages/list/newest" }
+    # Version 202412, NOT 202508 — like #send_message, this endpoint
+    # rejects 202508 with code 36009004 "Invalid API version" and only
+    # works on 202412, confirmed in production (Hidrabene, 2026-08-06). It
+    # shipped on 202508 originally and was broken silently ever since — see
+    # AFFILIATE_UNREAD_MESSAGES_PATH's comment.
+    let(:unread_url) { "https://open-api.tiktokglobalshop.com/affiliate_seller/202412/conversations/messages/list/newest" }
 
     it "returns the newest_message_list array" do
       stub_request(:get, /\A#{Regexp.escape(unread_url)}/)
@@ -908,6 +913,18 @@ RSpec.describe Integrations::TiktokAdapter do
         .to_return(status: 200, body: { code: 0, data: { newest_message_list: [] } }.to_json)
 
       expect(adapter.fetch_latest_unread_messages).to eq([])
+    end
+
+    it "sends shop_cipher on the 202412 path, and no version param" do
+      stub_request(:get, /\A#{Regexp.escape(unread_url)}/)
+        .to_return(status: 200, body: { code: 0, data: { newest_message_list: [] } }.to_json)
+
+      adapter.fetch_latest_unread_messages
+
+      expect(WebMock).to have_requested(:get, unread_url)
+        .with(query: hash_including("shop_cipher" => "GCP_cipher"))
+      expect(WebMock).to have_requested(:get, unread_url)
+        .with(query: hash_excluding("version"))
     end
   end
 end

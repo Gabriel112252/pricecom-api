@@ -72,9 +72,20 @@ module Integrations
     #   sender_id — see #fetch_conversation_messages and
     #   Integrations::Tiktok::AffiliateConversationSyncService for how the
     #   caller infers inbound/outbound from it.
+    # - Get Latest Unread Messages: like #send_message, this one is 202508
+    #   in the "newest observed" sense above but actually LIVES on 202412 —
+    #   confirmed in production (Hidrabene, 2026-08-06):
+    #   adapter.send(:get, "/affiliate_seller/202412/conversations/messages/
+    #   list/newest", ...) => {"code"=>0, "data"=>{"newest_message_list"=>[]}}
+    #   while 202508 fails with code 36009004 "Invalid API version". This
+    #   was broken SILENTLY since the endpoint first shipped — every
+    #   "Ainda não visualizou" card in campaigns and the "unread first"
+    #   sort in Meus Afiliados degraded through their generic rescue
+    #   (AuthenticationError/RateLimitError/ApiError) and always reported
+    #   "não foi possível verificar" / no unread, never a visible error.
     AFFILIATE_TARGET_COLLABORATIONS_SEARCH_PATH = "/affiliate_seller/202508/target_collaborations/search".freeze
     AFFILIATE_CONVERSATIONS_PATH = "/affiliate_seller/202508/conversations".freeze
-    AFFILIATE_UNREAD_MESSAGES_PATH = "/affiliate_seller/202508/conversations/messages/list/newest".freeze
+    AFFILIATE_UNREAD_MESSAGES_PATH = "/affiliate_seller/202412/conversations/messages/list/newest".freeze
     # Search Target Collaborations requires collaboration_status in the
     # body — confirmed in production (2026-08-04): omitting it fails with
     # code 36009004 "CollaborationStatus is a required field and has not
