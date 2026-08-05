@@ -66,12 +66,22 @@ module Affiliates
       scope = scope.where(collaboration_status: params[:collaboration_status]) if params[:collaboration_status].present?
       scope = scope.where(target_collaboration_id: params[:target_collaboration_id]) if params[:target_collaboration_id].present?
       scope = apply_segments(scope) if segments.present?
+      scope = apply_search(scope) if params[:q].present?
       scope
     end
 
     private
 
     attr_reader :tenant, :channel, :params
+
+    # Free-text search (nickname/username), "Meus Afiliados" only for now —
+    # AffiliateCampaign#segment_filter is read back from a persisted jsonb
+    # column, so `q` simply won't be present there unless campaign creation
+    # decides to expose search too (not this task's scope).
+    def apply_search(scope)
+      term = "%#{params[:q].to_s.strip}%"
+      scope.where("affiliate_creators.nickname ILIKE :term OR affiliate_creators.username ILIKE :term", term: term)
+    end
 
     def segments
       Array(params[:segments]).map(&:to_s) & SEGMENTS

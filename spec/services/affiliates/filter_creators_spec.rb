@@ -78,4 +78,41 @@ RSpec.describe Affiliates::FilterCreators do
       expect(result.to_a).to eq([ showcase_no_content_paused ])
     end
   end
+
+  describe "q: free-text search" do
+    let!(:maria) { channel.affiliate_creators.create!(tenant: tenant, creator_open_id: "u_maria", nickname: "Maria Criadora", username: "maria.criadora") }
+    let!(:joao) { channel.affiliate_creators.create!(tenant: tenant, creator_open_id: "u_joao", nickname: "João Afiliado", username: "joaoafiliado") }
+
+    it "matches by a case-insensitive partial nickname" do
+      expect(call(q: "criad").to_a).to eq([ maria ])
+    end
+
+    it "matches by a case-insensitive partial username" do
+      expect(call(q: "JOAOAFI").to_a).to eq([ joao ])
+    end
+
+    it "returns no rows when nothing matches" do
+      expect(call(q: "ninguem-com-esse-nome").to_a).to eq([])
+    end
+
+    it "is ignored when blank, same as other filters" do
+      expect(call(q: "").to_a).to match_array(
+        [ accepted_no_content, accepted_with_content, showcase_no_content_paused, paused_no_showcase, no_status, maria, joao ]
+      )
+    end
+
+    it "combines with an exact filter via AND" do
+      channel.affiliate_creators.create!(
+        tenant: tenant, creator_open_id: "u_maria_paused", nickname: "Maria Pausada", username: "maria.pausada", collaboration_status: "PAUSED"
+      )
+
+      result = call(collaboration_status: "PAUSED", q: "maria")
+
+      expect(result.map(&:username)).to eq([ "maria.pausada" ])
+    end
+
+    it "does not break the campaign-creation usage (segment_filter jsonb hash without q)" do
+      expect { call({ segments: [ "accepted_no_content" ] }.with_indifferent_access) }.not_to raise_error
+    end
+  end
 end
