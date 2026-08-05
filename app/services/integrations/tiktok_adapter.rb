@@ -736,7 +736,22 @@ module Integrations
           "TiktokAdapter: shop_cipher ausente; reautorize a integração TikTok Shop"
       end
 
-      { shop_cipher: shop_cipher }
+      params = { shop_cipher: shop_cipher }
+      params[:version] = "202508" if affiliate_path?(path)
+      params
+    end
+
+    # Affiliate Seller API endpoints reject calls that omit an explicit
+    # `version` query param with code 36009004 "Invalid API version" —
+    # confirmed in production (tenant Hidrabene, 2026-08-05): every
+    # affiliate campaign message (create_conversation/send_message/
+    # fetch_target_collaborations/fetch_target_collaboration_detail/
+    # fetch_conversations/fetch_latest_unread_messages) was failing 100%
+    # until this was added. Same pattern as #warehouse_compat_params
+    # (a path already carrying its version in the URL still needing it
+    # duplicated as a query param).
+    def affiliate_path?(path)
+      path.start_with?("/affiliate_seller/202508/")
     end
 
     # Get Warehouse List 202309 still enforces the legacy-era signed
