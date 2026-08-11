@@ -107,7 +107,21 @@ module Integrations
     attr_reader :credentials
 
     def partner_id
-      credentials[:partner_id]
+      credentials[:partner_id].to_s.strip
+    end
+
+    # Both partner_id and partner_key are typed/pasted by hand into
+    # CredentialForm.vue and stored verbatim (ChannelCredentialsController's
+    # credential_params does `permit!.to_h`, no normalization anywhere in
+    # the pipeline) — a trailing newline or space from a copy-paste off the
+    # Shopee console silently becomes part of the HMAC key/base_string and
+    # produces exactly Shopee's generic "error_sign"/"Wrong sign" response,
+    # with every other query param (partner_id, path, timestamp, redirect)
+    # still looking correct. Stripped here, at read time, so it's fixed
+    # retroactively for credentials already saved with the stray
+    # whitespace too, not just future ones.
+    def partner_key
+      credentials[:partner_key].to_s.strip
     end
 
     def sandbox?
@@ -115,7 +129,7 @@ module Integrations
     end
 
     def hmac(base_string)
-      OpenSSL::HMAC.hexdigest("SHA256", credentials[:partner_key].to_s, base_string)
+      OpenSSL::HMAC.hexdigest("SHA256", partner_key, base_string)
     end
 
     # Endpoints de auth usam a assinatura public-level nos query params e o

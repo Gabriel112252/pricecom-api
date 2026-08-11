@@ -38,9 +38,27 @@ RSpec.describe Integrations::ShopeeAuthService do
       expect(query["partner_id"]).to eq("2011234")
       expect(query["redirect"]).to eq("https://api.example.com/api/v1/webhooks/shopee?state=abc")
       expect(query["sign"]).to match(/\A\h{64}\z/)
-      expect(query["sign"]).to eq(
-        service.public_sign("/api/v2/shop/auth_partner", query.fetch("timestamp").to_i)
+    end
+
+    # Regression: the previous version of this spec only compared
+    # query["sign"] against service.public_sign(...) — the very method
+    # under test — so it would have stayed green even if authorize_url
+    # signed the wrong base_string entirely (e.g. the full URL instead of
+    # just the path, or the shop-level formula instead of the public one).
+    # This independently recomputes the expected sign straight from
+    # OpenSSL, the same way Shopee's own server does, to actually catch
+    # that class of bug — this is the exact gap that let a real "Wrong
+    # sign" rejection from Shopee's sandbox reach production undetected.
+    it "signs exactly partner_id + auth_partner path + timestamp, independently verified" do
+      url = service.authorize_url(redirect_url: "https://api.example.com/api/v1/webhooks/shopee?state=abc")
+      query = Rack::Utils.parse_query(URI.parse(url).query)
+      timestamp = query.fetch("timestamp")
+
+      expected_sign = OpenSSL::HMAC.hexdigest(
+        "SHA256", "partner-secret-key", "2011234/api/v2/shop/auth_partner#{timestamp}"
       )
+
+      expect(query["sign"]).to eq(expected_sign)
     end
 
     it "uses the sandbox base URL when environment=sandbox is stored in the credentials" do
@@ -49,6 +67,34 @@ RSpec.describe Integrations::ShopeeAuthService do
       url = sandbox.authorize_url(redirect_url: "https://api.example.com/cb")
 
       expect(url).to start_with("https://partner.test-stable.shopeemobile.com/api/v2/shop/auth_partner?")
+    end
+
+    # Regression: partner_id/partner_key are typed/pasted by hand into
+    # CredentialForm.vue and stored verbatim (no trimming anywhere in the
+    # save pipeline) — a stray trailing newline or space from copying the
+    # key off the Shopee console silently corrupts the HMAC and produces
+    # Shopee's generic "error_sign"/"Wrong sign", with every other visible
+    # query param still looking correct. #partner_id/#partner_key strip
+    # whitespace at read time so an already-saved credential with this
+    # exact corruption is fixed without Gabriel needing to re-enter it.
+    it "produces the same sign whether or not the stored partner_id/partner_key have stray whitespace" do
+      padded = described_class.new(
+        "partner_id" => "  2011234\n", "partner_key" => "\tpartner-secret-key \n"
+      )
+
+      clean_url = service.authorize_url(redirect_url: "https://api.example.com/cb")
+      padded_url = padded.authorize_url(redirect_url: "https://api.example.com/cb")
+
+      clean_query  = Rack::Utils.parse_query(URI.parse(clean_url).query)
+      padded_query = Rack::Utils.parse_query(URI.parse(padded_url).query)
+
+      expect(padded_query["partner_id"]).to eq("2011234")
+      expect(
+        padded.public_sign("/api/v2/shop/auth_partner", padded_query.fetch("timestamp").to_i)
+      ).to eq(
+        service.public_sign("/api/v2/shop/auth_partner", padded_query.fetch("timestamp").to_i)
+      )
+      expect(clean_query["partner_id"]).to eq(padded_query["partner_id"])
     end
   end
 
