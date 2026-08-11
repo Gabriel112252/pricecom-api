@@ -148,6 +148,42 @@ RSpec.describe "Webhooks", type: :request do
     end
   end
 
+  describe "shopee" do
+    before do
+      tenant.channel_credentials.create!(
+        channel: "shopee", status: "active",
+        credentials: { partner_id: "123456", partner_key: "shopee-secret", shop_id: "789", access_token: "tok" }
+      )
+    end
+
+    it "accepts a correctly signed payload" do
+      signature = OpenSSL::HMAC.hexdigest("sha256", "shopee-secret", body)
+      post_webhook("shopee", headers: { "Authorization" => signature })
+      expect(response).to have_http_status(:accepted)
+    end
+
+    it "rejects a missing signature" do
+      post_webhook("shopee")
+      expect(response).to have_http_status(:unauthorized)
+    end
+
+    it "rejects an invalid signature" do
+      post_webhook("shopee", headers: { "Authorization" => "bogus" })
+      expect(response).to have_http_status(:unauthorized)
+    end
+
+    it "rejects with a clear 401 (not a 500) when no Shopee ChannelCredential is connected for this tenant" do
+      other_tenant = Tenant.create!(name: "Outra Loja", slug: "outra-loja-#{SecureRandom.hex(4)}")
+      signature = OpenSSL::HMAC.hexdigest("sha256", "shopee-secret", body)
+
+      post "/api/v1/webhooks/shopee", params: body,
+        headers: { "X-Tenant-Slug" => other_tenant.slug, "Content-Type" => "application/json", "Authorization" => signature }
+
+      expect(response).to have_http_status(:unauthorized)
+      expect(JSON.parse(response.body)["error"]).to be_present
+    end
+  end
+
   it "never leaks the raw signature into stored event headers (redacted before persistence)" do
     tenant.channel_credentials.create!(
       channel: "shopify", status: "active",

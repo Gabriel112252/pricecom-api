@@ -103,6 +103,14 @@ module Api
         render json: Dashboard::BuildCustomers.call(tenant: current_tenant, params: params)
       end
 
+      # GET /api/v1/dashboard/products_search — autocomplete search by SKU
+      # or product name, for the "Produtos" tab's search panel. Answers
+      # "total units/revenue sold for this specific product" outside the
+      # Top 10 rankings. Same period/channel filters as the summary.
+      def products_search
+        render json: Dashboard::SearchProducts.call(tenant: current_tenant, params: params)
+      end
+
       def financial
         settlements = apply_financial_filters(current_tenant.financial_settlements)
         items       = FinancialSettlementItem.where(

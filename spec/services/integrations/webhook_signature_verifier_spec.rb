@@ -5,15 +5,15 @@ RSpec.describe Integrations::WebhookSignatureVerifier do
   let(:raw_body) { '{"id":123,"event":"order.created"}' }
 
   describe ".verifiable?" do
-    it "is true for shopify, yampi and tiktok" do
+    it "is true for shopify, yampi, tiktok and shopee" do
       expect(described_class.verifiable?("shopify")).to eq(true)
       expect(described_class.verifiable?("yampi")).to eq(true)
       expect(described_class.verifiable?("tiktok")).to eq(true)
+      expect(described_class.verifiable?("shopee")).to eq(true)
     end
 
     it "is false for providers without an implemented scheme" do
       expect(described_class.verifiable?("mercadolivre")).to eq(false)
-      expect(described_class.verifiable?("shopee")).to eq(false)
       expect(described_class.verifiable?("unknown")).to eq(false)
     end
   end
@@ -50,6 +50,18 @@ RSpec.describe Integrations::WebhookSignatureVerifier do
 
     it "rejects an incorrect signature" do
       expect(described_class.verify?(provider: "tiktok", raw_body: raw_body, header_value: "deadbeef", secret: secret)).to eq(false)
+    end
+  end
+
+  describe ".verify? for shopee (hex HMAC-SHA256 over the raw body, keyed by partner_key)" do
+    it "accepts a correctly computed signature" do
+      signature = OpenSSL::HMAC.hexdigest("sha256", secret, raw_body)
+
+      expect(described_class.verify?(provider: "shopee", raw_body: raw_body, header_value: signature, secret: secret)).to eq(true)
+    end
+
+    it "rejects an incorrect signature" do
+      expect(described_class.verify?(provider: "shopee", raw_body: raw_body, header_value: "deadbeef", secret: secret)).to eq(false)
     end
   end
 
