@@ -104,6 +104,18 @@ RSpec.describe "Channel Credentials", type: :request do
       expect(tenant.channels.find_by(platform: "tiktok")).to be_present
     end
 
+    it "logs channel_credential.updated without leaking credential values in metadata" do
+      expect {
+        post "/api/v1/integrations/tiktok/connect", headers: auth_headers(admin),
+          params: { credentials: { app_key: "tenant-app-key", app_secret: "tenant-app-secret" } }
+      }.to change(UserActivityLog, :count).by(1)
+
+      log = UserActivityLog.last
+      expect(log.action).to eq("channel_credential.updated")
+      expect(log.metadata).to eq("channel" => "tiktok")
+      expect(log.metadata.to_s).not_to include("tenant-app-secret")
+    end
+
     it "creates the matching Channel the first time a new channel is connected" do
       stub_yampi_auth
       expect(tenant.channels.where(platform: "yampi")).to be_empty

@@ -8,6 +8,7 @@ module Api
         tenant = user&.tenant
 
         if user&.authenticate(params[:password]) && user.active?
+          log_activity!(action: "login.success", target: user, tenant: tenant, actor: user)
           token = JsonWebToken.encode(user_id: user.id, tenant_id: tenant.id)
           render json: {
             token: token,
@@ -24,6 +25,19 @@ module Api
             }
           }
         else
+          # tenant pode ser nil (e-mail não corresponde a nenhum usuário) —
+          # log_activity! não grava nada nesse caso (UserActivityLog exige
+          # tenant_id): uma tentativa com e-mail desconhecido não pertence
+          # a tenant nenhum, então não há onde registrá-la numa tabela
+          # de auditoria escopada por tenant. Tentativa de senha errada
+          # pra um e-mail que existe é logada normalmente.
+          log_activity!(
+            action: "login.failed",
+            target: user,
+            tenant: tenant,
+            actor: user,
+            metadata: { email: params[:email], reason: user.nil? ? "email_not_found" : (user.active? ? "wrong_password" : "inactive") }
+          )
           render json: { error: "E-mail ou senha inválidos" }, status: :unauthorized
         end
       end

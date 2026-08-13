@@ -1,0 +1,12 @@
+Olá, <%= @user.name %>,
+
+<% if @inviter.present? -%>
+<%= @inviter.name %> te convidou para acessar o <%= @tenant.name %> no Pricecom.
+<% else -%>
+Você foi convidado para acessar o <%= @tenant.name %> no Pricecom.
+<% end -%>
+
+Acesse o link abaixo para definir sua senha e ativar sua conta:
+<%= @accept_url %>
+
+Este link expira em 7 dias. Se você não esperava este convite, pode ignorar este e-mail.

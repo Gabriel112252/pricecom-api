@@ -39,7 +39,6 @@ Rails.application.configure do
   # customers' browsers. Same fallback host already used for the frontend
   # in Api::V1::TiktokOauthController#frontend_base_url.
   app_host = ENV.fetch("APP_HOST", "https://pricecom-pricecom-api.dzxtro.easypanel.host")
-  config.action_mailer.default_url_options = { host: app_host }
   Rails.application.routes.default_url_options[:host] = app_host
 
   # Mount Action Cable outside main process or domain.
@@ -84,6 +83,30 @@ Rails.application.configure do
   # Ignore bad email addresses and do not raise email delivery errors.
   # Set this to true and configure the email server for immediate delivery to raise delivery errors.
   # config.action_mailer.raise_delivery_errors = false
+
+  # E-mail transacional — hoje só UserMailer#invitation_email. Host é o
+  # FRONTEND_URL (não app_host acima) porque o único link que um mailer
+  # gera hoje aponta pro SPA (tela de aceitar convite), nunca pra API.
+  config.action_mailer.default_url_options = { host: ENV["FRONTEND_URL"] }
+
+  # SMTP genérico por env var — não amarrado a um provider específico, pra
+  # não precisar mexer em código se trocar de Resend pra outro no futuro.
+  # Hoje configurado com Resend (ver .env.example): smtp.resend.com:587,
+  # user_name literal "resend", password = API key do Resend.
+  # Se as env vars estiverem ausentes (SMTP não configurado ainda),
+  # UserMailer#invitation_email detecta isso e pula o envio com um warning
+  # no log, sem derrubar a request que criou o usuário — ver
+  # UserMailer#smtp_configured?.
+  config.action_mailer.smtp_settings = {
+    address:              ENV["SMTP_ADDRESS"],
+    port:                 ENV.fetch("SMTP_PORT", 587).to_i,
+    domain:               ENV["SMTP_DOMAIN"],
+    user_name:            ENV["SMTP_USERNAME"],
+    password:             ENV["SMTP_PASSWORD"],
+    authentication:       "plain",
+    enable_starttls_auto: true
+  }
+  config.action_mailer.delivery_method = :smtp
 
   # Enable locale fallbacks for I18n (makes lookups for any locale fall back to
   # the I18n.default_locale when a translation cannot be found).

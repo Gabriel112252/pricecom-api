@@ -1139,6 +1139,71 @@ RSpec.describe Dashboard::BuildSummary do
     end
   end
 
+  # Regressão: build_top_products_by_revenue/margin e
+  # build_product_turnover_summary montavam a query direto em OrderItem
+  # filtrando só tenant+período, nunca channel_ids — a aba Produtos do
+  # dashboard ignorava o filtro de canal enquanto o resto do resumo (KPIs,
+  # gráficos) já respeitava. Corrigido trocando a base da query pra
+  # `orders_in_period(period)`, que já aplica channel_ids do mesmo jeito
+  # que todo o resto do summary.
+  describe "top products / turnover — respeitam o filtro de canal" do
+    let(:product) { tenant.products.create!(sku: "SKU-CANAL", name: "Produto Canal", cost_price: 10) }
+
+    def add_item(order, qty:, unit_price:, unit_cost: 10)
+      order.order_items.create!(
+        product: product, sku: product.sku, name: product.name,
+        quantity: qty, unit_price: unit_price, unit_cost: unit_cost
+      )
+    end
+
+    before do
+      # unit_cost diferente por canal de propósito — se a query somasse os
+      # dois canais junto (o bug), a margem "só de A" apareceria diluída
+      # pelo custo de B, e o teste pegaria isso; com unit_cost igual nos
+      # dois, o percentual dá 90% em qualquer combinação e o teste não
+      # provaria nada.
+      add_item(make_order(channel_a, gross: 200, margin: 100, ordered_at: 1.day.ago), qty: 2, unit_price: 100, unit_cost: 10)
+      add_item(make_order(channel_b, gross: 300, margin: 150, ordered_at: 1.day.ago), qty: 3, unit_price: 100, unit_cost: 50)
+    end
+
+    def call_for(channel_ids: nil)
+      params = { from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601 }
+      params[:channel_ids] = channel_ids if channel_ids
+      described_class.call(tenant: tenant, params: ActionController::Parameters.new(params))
+    end
+
+    it "top_products_by_revenue: só a receita do canal filtrado, soma dos dois quando todos os canais" do
+      only_a = call_for(channel_ids: [ channel_a.id.to_s ])
+      only_b = call_for(channel_ids: [ channel_b.id.to_s ])
+      all = call_for
+
+      expect(only_a[:top_products_by_revenue]).to eq([ { sku: product.sku, name: product.name, revenue: 200.0 } ])
+      expect(only_b[:top_products_by_revenue]).to eq([ { sku: product.sku, name: product.name, revenue: 300.0 } ])
+      expect(all[:top_products_by_revenue]).to eq([ { sku: product.sku, name: product.name, revenue: 500.0 } ])
+    end
+
+    it "top_products_by_margin: mesmo recorte por canal (unit_cost difere entre canais de propósito)" do
+      only_a = call_for(channel_ids: [ channel_a.id.to_s ])
+      only_b = call_for(channel_ids: [ channel_b.id.to_s ])
+      all = call_for
+
+      expect(only_a[:top_products_by_margin]).to eq([ { sku: product.sku, name: product.name, margin_pct: 90.0 } ])
+      expect(only_b[:top_products_by_margin]).to eq([ { sku: product.sku, name: product.name, margin_pct: 50.0 } ])
+      # combinado: receita 500, custo (2*10 + 3*50)=170 -> margem 66%
+      expect(all[:top_products_by_margin]).to eq([ { sku: product.sku, name: product.name, margin_pct: 66.0 } ])
+    end
+
+    it "product_turnover_summary: quantidade só do canal filtrado, soma quando todos os canais" do
+      only_a = call_for(channel_ids: [ channel_a.id.to_s ])
+      only_b = call_for(channel_ids: [ channel_b.id.to_s ])
+      all = call_for
+
+      expect(only_a[:product_turnover_summary].first).to include(sku: product.sku, total_qty: 2.0)
+      expect(only_b[:product_turnover_summary].first).to include(sku: product.sku, total_qty: 3.0)
+      expect(all[:product_turnover_summary].first).to include(sku: product.sku, total_qty: 5.0)
+    end
+  end
+
   describe "cart abandonment" do
     let(:tiktok_channel) { tenant.channels.create!(name: "TikTok Shop", platform: "tiktok") }
 

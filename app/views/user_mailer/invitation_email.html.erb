@@ -1,0 +1,22 @@
+<p>Olá, <%= @user.name %>,</p>
+
+<p>
+  <% if @inviter.present? %>
+    <strong><%= @inviter.name %></strong> te convidou para acessar o
+  <% else %>
+    Você foi convidado para acessar o
+  <% end %>
+  <strong><%= @tenant.name %></strong> no Pricecom.
+</p>
+
+<p>
+  Clique no link abaixo para definir sua senha e ativar sua conta:
+</p>
+
+<p>
+  <a href="<%= @accept_url %>"><%= @accept_url %></a>
+</p>
+
+<p style="color: #6b7688; font-size: 13px;">
+  Este link expira em 7 dias. Se você não esperava este convite, pode ignorar este e-mail.
+</p>

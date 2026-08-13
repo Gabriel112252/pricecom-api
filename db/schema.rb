@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_08_06_140000) do
+ActiveRecord::Schema[7.2].define(version: 2026_08_14_100000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -900,7 +900,7 @@ ActiveRecord::Schema[7.2].define(version: 2026_08_06_140000) do
     t.datetime "finished_at"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
-    t.index ["channel_product_listing_id", "stock_alert_rule_id"], name: "idx_one_inflight_execution_per_listing_rule", unique: true, where: "((status)::text = ANY (ARRAY[('pending'::character varying)::text, ('executing'::character varying)::text]))"
+    t.index ["channel_product_listing_id", "stock_alert_rule_id"], name: "idx_one_inflight_execution_per_listing_rule", unique: true, where: "((status)::text = ANY ((ARRAY['pending'::character varying, 'executing'::character varying])::text[]))"
     t.index ["channel_product_listing_id"], name: "idx_on_channel_product_listing_id_11f29f72e1"
     t.index ["idempotency_key"], name: "index_stock_replenishment_executions_on_idempotency_key", unique: true
     t.index ["product_id"], name: "index_stock_replenishment_executions_on_product_id"
@@ -987,15 +987,37 @@ ActiveRecord::Schema[7.2].define(version: 2026_08_06_140000) do
     t.index ["tenant_id"], name: "index_testimonials_on_tenant_id"
   end
 
+  create_table "user_activity_logs", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "user_id"
+    t.string "action", null: false
+    t.string "target_type"
+    t.bigint "target_id"
+    t.jsonb "metadata", default: {}, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["target_type", "target_id"], name: "index_user_activity_logs_on_target_type_and_target_id"
+    t.index ["tenant_id", "action"], name: "index_user_activity_logs_on_tenant_id_and_action"
+    t.index ["tenant_id", "created_at"], name: "index_user_activity_logs_on_tenant_id_and_created_at"
+    t.index ["tenant_id"], name: "index_user_activity_logs_on_tenant_id"
+    t.index ["user_id"], name: "index_user_activity_logs_on_user_id"
+  end
+
   create_table "users", force: :cascade do |t|
     t.bigint "tenant_id", null: false
     t.string "name", null: false
     t.string "email", null: false
-    t.string "password_digest", null: false
+    t.string "password_digest"
     t.string "role", default: "operador", null: false
     t.boolean "active", default: true
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.string "invitation_token"
+    t.datetime "invitation_sent_at"
+    t.datetime "invitation_accepted_at"
+    t.string "mcp_api_key"
+    t.index ["invitation_token"], name: "index_users_on_invitation_token", unique: true
+    t.index ["mcp_api_key"], name: "index_users_on_mcp_api_key", unique: true
     t.index ["tenant_id", "email"], name: "index_users_on_tenant_id_and_email", unique: true
     t.index ["tenant_id"], name: "index_users_on_tenant_id"
   end
@@ -1098,5 +1120,7 @@ ActiveRecord::Schema[7.2].define(version: 2026_08_06_140000) do
   add_foreign_key "testimonial_products", "testimonials"
   add_foreign_key "testimonials", "products"
   add_foreign_key "testimonials", "tenants"
+  add_foreign_key "user_activity_logs", "tenants"
+  add_foreign_key "user_activity_logs", "users"
   add_foreign_key "users", "tenants"
 end

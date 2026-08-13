@@ -1,5 +1,6 @@
 class ApplicationController < ActionController::API
   include ExceptionHandler
+  include ActivityLogging
 
   before_action :authenticate_request!
 

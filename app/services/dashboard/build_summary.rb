@@ -1772,7 +1772,7 @@ module Dashboard
       rows = OrderItem
         .joins(:product, order: :channel)
         .merge(Order.revenue_countable)
-        .where(orders: { tenant_id: tenant.id, ordered_at: period_range(period) })
+        .where(order_id: orders_in_period(period).select(:id))
         .where(is_gift: false)
         .where("order_items.unit_cost IS NOT NULL AND order_items.unit_cost > 0")
         .where(item_discount_split_reliable_sql)
@@ -1802,7 +1802,7 @@ module Dashboard
       rows = OrderItem
         .joins(:product, order: :channel)
         .merge(Order.revenue_countable)
-        .where(orders: { tenant_id: tenant.id, ordered_at: period_range(period) })
+        .where(order_id: orders_in_period(period).select(:id))
         .where(is_gift: false)
         .where(item_discount_split_reliable_sql)
         .group("products.id", "products.sku", "products.name")
@@ -1824,7 +1824,7 @@ module Dashboard
       items = OrderItem
         .joins(:order, :product)
         .merge(Order.revenue_countable)
-        .where(orders: { tenant_id: tenant.id, ordered_at: period_range(period) })
+        .where(order_id: orders_in_period(period).select(:id))
         .where(is_gift: false)
 
       direct = items.group("products.id", "products.sku", "products.name").sum(:quantity)

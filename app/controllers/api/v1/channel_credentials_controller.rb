@@ -24,6 +24,11 @@ module Api
           return render json: { errors: credential.errors.full_messages }, status: :unprocessable_entity
         end
 
+        # Só o fato de ter mudado, nunca os valores — credentials é dado
+        # sensível (ver ActiveRecord::Encryption em ChannelCredential) e
+        # não deveria estar em texto plano nem no audit log.
+        log_activity!(action: "channel_credential.updated", target: credential, metadata: { channel: credential.channel })
+
         # A ChannelCredential alone doesn't give Order#channel_id anything to
         # point at — Channel is the older, separate table that's been driving
         # orders/pricing/commission since Etapa 1. Without this, order

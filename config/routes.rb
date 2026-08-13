@@ -8,6 +8,18 @@ Rails.application.routes.draw do
       post "auth/login", to: "auth#login"
       get  "auth/me",    to: "auth#me"
 
+      # Usuários — CRUD é admin only (ver UsersController#require_admin!);
+      # accept_invitation é a única action pública daqui (usuário convidado
+      # ainda não tem token JWT nenhum nesse momento).
+      resources :users, only: [ :index, :create, :update, :destroy ]
+      post "users/accept_invitation", to: "users#accept_invitation"
+
+      # Log de ações administrativas (criação/edição/desativação de
+      # usuário, login, mudança de credencial de canal) — não confundir
+      # com audit_conflicts abaixo, que é reconciliação de dado financeiro/
+      # custo, um conceito completamente diferente.
+      resources :user_activity_logs, only: [ :index ]
+
       # Tenants
       resources :tenants, only: [ :index, :show, :create, :update ]
 
@@ -164,6 +176,12 @@ Rails.application.routes.draw do
       get    "tv_token", to: "tv_tokens#show"
       post   "tv_token", to: "tv_tokens#create"
       delete "tv_token", to: "tv_tokens#destroy"
+
+      # Token MCP — por usuário (não tenant-wide como tv_token acima),
+      # qualquer usuário autenticado gerencia o próprio. Ver
+      # McpTokensController — valor bruto só sai de #create.
+      get  "mcp_token", to: "mcp_tokens#show"
+      post "mcp_token", to: "mcp_tokens#create"
 
       # Integration Health
       get "integration_health", to: "integration_health#index"

@@ -37,6 +37,14 @@ gem "faraday"
 # partir de foto/frame de vídeo)
 gem "anthropic"
 
+# MCP server (item 5 do roadmap) — expõe tools de leitura/escrita pra
+# clientes MCP (Claude Desktop, Claude.ai). Mesma gem e versão já em
+# produção no ScrumFlow (~/projetos/scrumflow/back) — ver
+# config/initializers/fast_mcp.rb pro monkey-patch de auth que replica o
+# de lá (bugs confirmados ainda presentes na 1.6.0, a mais recente
+# publicada até este levantamento).
+gem "fast-mcp", "~> 1.6"
+
 # Windows does not include zoneinfo files, so bundle the tzinfo-data gem
 gem "tzinfo-data", platforms: %i[ windows jruby ]
 
