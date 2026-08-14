@@ -111,6 +111,14 @@ module Api
         render json: Dashboard::SearchProducts.call(tenant: current_tenant, params: params)
       end
 
+      # GET /api/v1/dashboard/products_timeseries — daily qty/revenue for 2+
+      # SKUs selected in the "Produtos" tab's comparison chart. Same period/
+      # channel filters as the summary; complements products_search (period
+      # totals) with a day-by-day breakdown.
+      def products_timeseries
+        render json: Dashboard::ProductsTimeseries.call(tenant: current_tenant, params: params)
+      end
+
       def financial
         settlements = apply_financial_filters(current_tenant.financial_settlements)
         items       = FinancialSettlementItem.where(

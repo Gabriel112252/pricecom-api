@@ -78,6 +78,9 @@ module Integrations
         channel_credential.update!(status: "error")
         finish_log(status: "error", error_message: e.message)
         result(:error, e.message)
+      rescue Integrations::OrdersPollingLock::LockLostError => e
+        finish_log(status: "error", error_message: e.message)
+        result(:error, e.message)
       rescue Integrations::RateLimitError => e
         @rate_limited = true
         @retry_after = e.retry_after || 60
@@ -129,11 +132,31 @@ module Integrations
           @pages_fetched += 1
           orders = data["orders"] || []
           process_page(orders)
-          lock.renew
+          persist_cursor_progress
+
+          unless lock.renew
+            raise Integrations::OrdersPollingLock::LockLostError,
+              "lock perdido durante paginação (página #{@pages_fetched})"
+          end
 
           page_token = data["next_page_token"]
           break if orders.empty? || page_token.blank?
         end
+      end
+
+      # Advances orders_sync_cursor_at after every page instead of only once
+      # at the end of #call — if the process dies mid-run (network drop,
+      # restart), the next attempt resumes from here instead of redoing the
+      # whole window from previous_cursor_at. Reuses #next_cursor_at, which
+      # already clamps to cursor_to and never regresses below
+      # previous_cursor_at, so this is safe to call repeatedly with
+      # out-of-order pages. No-op (skipped) until at least one order with a
+      # usable timestamp has been observed, since next_cursor_at would
+      # otherwise just rewrite the same previous_cursor_at value.
+      def persist_cursor_progress
+        return unless @max_seen_cursor_at
+
+        channel_credential.update!(orders_sync_cursor_at: next_cursor_at)
       end
 
       # Backfill sweeps by creation time; incremental sweeps by update time

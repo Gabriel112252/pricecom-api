@@ -5,6 +5,12 @@ module Integrations
   # compatibility with in-flight locks). The key embeds the credential's
   # channel, tenant and id, so different channels never contend.
   class OrdersPollingLock
+    # Raised by callers (not by this class) when a renew mid-run comes back
+    # false — see Integrations::Tiktok::OrdersPollingService#fetch_and_process_pages.
+    # Same naming convention as FinancialSyncLock::LockLostError/
+    # AffiliateSyncLock::LockLostError.
+    class LockLostError < StandardError; end
+
     DEFAULT_TTL_SECONDS = 15.minutes.to_i
     RELEASE_SCRIPT = <<~LUA.squish
       if redis.call("GET", KEYS[1]) == ARGV[1] then

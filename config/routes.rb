@@ -163,6 +163,7 @@ Rails.application.routes.draw do
       get "dashboard/tiktok_orders", to: "dashboard#tiktok_orders"
       get "dashboard/customers", to: "dashboard#customers"
       get "dashboard/products_search", to: "dashboard#products_search"
+      get "dashboard/products_timeseries", to: "dashboard#products_timeseries"
 
       # Afiliados (TikTok Shop)
       get  "affiliates/overview",     to: "affiliates#overview"
