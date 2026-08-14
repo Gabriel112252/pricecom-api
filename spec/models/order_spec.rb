@@ -77,4 +77,48 @@ RSpec.describe Order, type: :model do
       expect([ order.reload.margin, order.margin_pct ]).to eq(original_values)
     end
   end
+
+  describe ".sales_and_refunds" do
+    let(:tenant)  { Tenant.create!(name: "Loja Teste", slug: "loja-teste-#{SecureRandom.hex(4)}") }
+    let(:channel) { tenant.channels.create!(platform: "tiktok", name: "TikTok Shop") }
+
+    def make_order(order_type:, status: "COMPLETED")
+      tenant.orders.create!(
+        channel: channel, external_id: "order-#{order_type}-#{status}-#{SecureRandom.hex(3)}",
+        order_type: order_type, status: status, gross_value: 100
+      )
+    end
+
+    it "includes sale and refund orders" do
+      sale   = make_order(order_type: "sale")
+      refund = make_order(order_type: "refund")
+
+      expect(Order.sales_and_refunds).to include(sale, refund)
+    end
+
+    it "excludes sample orders (free samples sent to TikTok creators/affiliates)" do
+      sample = make_order(order_type: "sample")
+
+      expect(Order.sales_and_refunds).not_to include(sample)
+    end
+
+    it "excludes cancellation and exchange order_types" do
+      cancellation = make_order(order_type: "cancellation")
+      exchange     = make_order(order_type: "exchange")
+
+      expect(Order.sales_and_refunds).not_to include(cancellation, exchange)
+    end
+
+    it "excludes an order whose status is a cancellation alias, regardless of order_type" do
+      canceled_sale = make_order(order_type: "sale", status: "cancelled")
+
+      expect(Order.sales_and_refunds).not_to include(canceled_sale)
+    end
+
+    it "excludes unpaid/status_unknown orders (revenue_countable)" do
+      unpaid = make_order(order_type: "sale", status: "unpaid")
+
+      expect(Order.sales_and_refunds).not_to include(unpaid)
+    end
+  end
 end

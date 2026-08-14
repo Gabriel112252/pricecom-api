@@ -121,9 +121,10 @@ module Dashboard
       tenant.orders.joins(:channel).where(channels: { platform: channel })
     end
 
-    # Mirrors Dashboard::BuildSummary#financial_orders exactly.
+    # Mirrors Dashboard::BuildSummary#financial_orders exactly (both back
+    # this same Order.sales_and_refunds scope now).
     def valid_orders(scope)
-      scope.where(order_type: %w[sale refund]).not_canceled.revenue_countable
+      scope.merge(Order.sales_and_refunds)
     end
 
     # ---- 1) Taxa de recompra (por cliente) ----

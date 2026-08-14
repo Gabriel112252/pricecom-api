@@ -142,10 +142,7 @@ module Dashboard
     end
 
     def financial_orders(scope)
-      scope
-        .where(order_type: %w[sale refund])
-        .not_canceled
-        .revenue_countable
+      scope.merge(Order.sales_and_refunds)
     end
 
     # Contrapartida de transparência do revenue_countable: os pedidos
@@ -1771,7 +1768,7 @@ module Dashboard
     def build_top_products_by_margin(period)
       rows = OrderItem
         .joins(:product, order: :channel)
-        .merge(Order.revenue_countable)
+        .merge(Order.sales_and_refunds)
         .where(order_id: orders_in_period(period).select(:id))
         .where(is_gift: false)
         .where("order_items.unit_cost IS NOT NULL AND order_items.unit_cost > 0")
@@ -1801,7 +1798,7 @@ module Dashboard
     def build_top_products_by_revenue(period)
       rows = OrderItem
         .joins(:product, order: :channel)
-        .merge(Order.revenue_countable)
+        .merge(Order.sales_and_refunds)
         .where(order_id: orders_in_period(period).select(:id))
         .where(is_gift: false)
         .where(item_discount_split_reliable_sql)
@@ -1823,7 +1820,7 @@ module Dashboard
     def build_product_turnover_summary(period, limit: 15)
       items = OrderItem
         .joins(:order, :product)
-        .merge(Order.revenue_countable)
+        .merge(Order.sales_and_refunds)
         .where(order_id: orders_in_period(period).select(:id))
         .where(is_gift: false)
 

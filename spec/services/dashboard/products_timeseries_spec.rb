@@ -101,4 +101,44 @@ RSpec.describe Dashboard::ProductsTimeseries do
     by_date = result[:series].first[:points].index_by { |p| p[:date] }
     expect(by_date["2026-08-10"]).to include(qty_sold: 0.0, revenue: 0.0)
   end
+
+  it "excludes cancelled orders from the daily series, even with order_type sale" do
+    canceled_order = make_order(channel_yampi, gross: 100, ordered_at: Time.zone.parse("2026-08-10 10:00:00"), status: "cancelled")
+    canceled_order.order_items.create!(product: product_a, sku: "2080", name: product_a.name, quantity: 5, unit_price: 100, unit_cost: 10)
+
+    result = call(skus: [ "2080" ], from: "2026-08-09", to: "2026-08-11")
+
+    by_date = result[:series].first[:points].index_by { |p| p[:date] }
+    expect(by_date["2026-08-10"]).to include(qty_sold: 0.0, revenue: 0.0)
+  end
+
+  describe "free samples (order_type: sample)" do
+    it "excludes sample orders from the daily qty_sold/revenue series" do
+      sample_order = make_order(channel_tiktok, gross: 0, ordered_at: Time.zone.parse("2026-08-10 10:00:00"), order_type: "sample")
+      sample_order.order_items.create!(product: product_a, sku: "2080", name: product_a.name, quantity: 4, unit_price: 0, unit_cost: 10)
+
+      result = call(skus: [ "2080" ], from: "2026-08-09", to: "2026-08-11")
+
+      by_date = result[:series].first[:points].index_by { |p| p[:date] }
+      expect(by_date["2026-08-10"]).to include(qty_sold: 0.0, revenue: 0.0)
+    end
+
+    it "reports sample_qty_sent as a period total per series, separate from the daily points" do
+      real_order = make_order(channel_tiktok, gross: 118.90, ordered_at: Time.zone.parse("2026-08-10 10:00:00"))
+      real_order.order_items.create!(
+        product: product_a, sku: "2080", name: product_a.name, quantity: 2,
+        unit_price: 35.04, unit_cost: 17.23, discount: 48.82, seller_discount: 42.04, platform_discount: 6.78
+      )
+
+      sample_order = make_order(channel_tiktok, gross: 0, ordered_at: Time.zone.parse("2026-08-11 10:00:00"), order_type: "sample")
+      sample_order.order_items.create!(product: product_a, sku: "2080", name: product_a.name, quantity: 4, unit_price: 0, unit_cost: 10)
+
+      result = call(skus: [ "2080" ], from: "2026-08-09", to: "2026-08-12")
+
+      series = result[:series].first
+      expect(series[:sample_qty_sent]).to eq(4.0)
+      # not folded into any of the daily points
+      expect(series[:points].sum { |p| p[:qty_sold] }).to eq(2.0)
+    end
+  end
 end

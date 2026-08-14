@@ -65,10 +65,24 @@ module Dashboard
     def product_scope(product)
       scope = OrderItem
         .joins(:product, order: :channel)
-        .merge(Order.revenue_countable)
+        .merge(Order.sales_and_refunds)
         .where(orders: { tenant_id: tenant.id, ordered_at: period_range })
         .where(is_gift: false, product_id: product.id)
         .where(item_discount_split_reliable_sql)
+      scope = scope.where(orders: { channel_id: channel_ids }) if channel_ids.present?
+      scope
+    end
+
+    # Free samples sent to TikTok creators/affiliates (orders.order_type
+    # "sample" — see Order::ORDER_TYPES) are deliberately excluded from
+    # product_scope above (they're not a sale), but the volume itself is
+    # still relevant to show — separately labeled, never folded into
+    # total_qty_sold/total_revenue.
+    def sample_scope(product)
+      scope = OrderItem
+        .joins(:product, order: :channel)
+        .where(orders: { tenant_id: tenant.id, ordered_at: period_range, order_type: "sample" })
+        .where(is_gift: false, product_id: product.id)
       scope = scope.where(orders: { channel_id: channel_ids }) if channel_ids.present?
       scope
     end
@@ -93,12 +107,15 @@ module Dashboard
           { platform: platform, orders_count: orders_count, qty_sold: qty.to_f, revenue: revenue.to_f.round(2) }
         end
 
+      sample_qty_sent = sample_scope(product).sum(:quantity)
+
       {
         sku: product.sku,
         name: product.name,
         total_qty_sold: total_qty.to_f,
         total_revenue: total_revenue.to_f.round(2),
-        by_channel: by_channel
+        by_channel: by_channel,
+        sample_qty_sent: sample_qty_sent.to_f
       }
     end
   end

@@ -4,7 +4,7 @@ module Dashboard
   # only) with a day-by-day breakdown so "how did product X do over time"
   # can be answered, not just "how much in total". Same base scope/revenue
   # formula as SearchProducts (and BuildSummary#build_top_products_by_revenue):
-  # OrderItem -> Order.revenue_countable, is_gift false, TikTok-aware
+  # OrderItem -> Order.sales_and_refunds, is_gift false, TikTok-aware
   # item_revenue_amount_sql, guarded by item_discount_split_reliable_sql.
   # channel_ids is applied here from day one — this is new code, not a
   # retrofit like the 3 charts that shipped without it.
@@ -64,7 +64,7 @@ module Dashboard
     def daily_rows(product)
       scope = OrderItem
         .joins(:product, order: :channel)
-        .merge(Order.revenue_countable)
+        .merge(Order.sales_and_refunds)
         .where(orders: { tenant_id: tenant.id, ordered_at: period_range })
         .where(is_gift: false, product_id: product.id)
         .where(item_discount_split_reliable_sql)
@@ -80,6 +80,20 @@ module Dashboard
         .to_h { |bucket, qty, revenue| [ bucket.to_date, [ qty.to_f, revenue.to_f.round(2) ] ] }
     end
 
+    # Aggregate total for the whole period, not a daily point — free
+    # samples (order_type "sample", see Order::ORDER_TYPES) are rare enough
+    # per product/day that a full dashed series would mostly be zeros; a
+    # single caption number is what the frontend shows next to each
+    # product's legend entry.
+    def sample_qty_sent(product)
+      scope = OrderItem
+        .joins(:product, order: :channel)
+        .where(orders: { tenant_id: tenant.id, ordered_at: period_range, order_type: "sample" })
+        .where(is_gift: false, product_id: product.id)
+      scope = scope.where(orders: { channel_id: channel_ids }) if channel_ids.present?
+      scope.sum(:quantity)
+    end
+
     def product_series(product)
       rows = daily_rows(product)
 
@@ -88,7 +102,7 @@ module Dashboard
         { date: date.iso8601, qty_sold: qty, revenue: revenue.round(2) }
       end
 
-      { sku: product.sku, name: product.name, points: points }
+      { sku: product.sku, name: product.name, points: points, sample_qty_sent: sample_qty_sent(product).to_f }
     end
   end
 end

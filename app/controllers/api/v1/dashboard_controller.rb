@@ -145,9 +145,7 @@ module Api
         period = resolve_freight_period
         scope = current_tenant.orders
           .where(ordered_at: period[:from].beginning_of_day..period[:to].end_of_day)
-          .where(order_type: %w[sale refund])
-          .not_canceled
-          .revenue_countable
+          .merge(Order.sales_and_refunds)
 
         channel_ids = Array(params[:channel_ids]).reject(&:blank?)
         scope = scope.where(channel_id: channel_ids) if channel_ids.present?
@@ -189,9 +187,7 @@ module Api
           .joins(:channel)
           .where(channels: { platform: "tiktok" })
           .where(ordered_at: period[:from].beginning_of_day..period[:to].end_of_day)
-          .where(order_type: %w[sale refund])
-          .not_canceled
-          .revenue_countable
+          .merge(Order.sales_and_refunds)
 
         channel_ids = Array(params[:channel_ids]).reject(&:blank?)
         scope = scope.where(channel_id: channel_ids) if channel_ids.present?

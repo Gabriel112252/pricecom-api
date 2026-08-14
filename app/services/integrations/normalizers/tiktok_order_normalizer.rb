@@ -96,7 +96,13 @@ module Integrations
         raw.to_s.casecmp?("unpaid") ? "unpaid" : raw
       end
 
+      # is_sample_order checked first: a free sample sent to a creator/
+      # affiliate (TikTok Shop Affiliate program) genuinely has
+      # unit_price/gross_value at 0 from the API itself — not a sync bug —
+      # and must never be counted as a sale (see Order::ORDER_TYPES).
       def extract_order_type
+        return "sample" if @p["is_sample_order"] == true
+
         combined = "#{extract_status} #{@event_type}".downcase
         return "cancellation" if CANCEL_KEYWORDS.any? { |k| combined.include?(k) }
         return "refund"       if REFUND_KEYWORDS.any? { |k| combined.include?(k) }

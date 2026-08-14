@@ -1750,4 +1750,58 @@ RSpec.describe Dashboard::BuildSummary do
       expect(summary[:yampi_utm_breakdown]).to eq(available: true, total_orders: 0)
     end
   end
+
+  # Order.sales_and_refunds regression: build_top_products_by_revenue,
+  # build_top_products_by_margin and build_product_turnover_summary used to
+  # rely on Order.revenue_countable alone (status-only), so free samples
+  # (order_type "sample") and cancelled orders leaked into product
+  # rankings/giro. Same gap Dashboard::SearchProducts/ProductsTimeseries had.
+  describe "product rankings and turnover exclude samples and cancellations" do
+    let(:product) { tenant.products.create!(sku: "2080", name: "Protetor Solar Clareador") }
+
+    def make_item_order(order_type: "sale", status: "COMPLETED", quantity:, unit_price:, unit_cost: 10)
+      order = tenant.orders.create!(
+        channel: channel_a, external_id: "order-#{SecureRandom.hex(4)}", order_number: "N#{SecureRandom.hex(3)}",
+        order_type: order_type, status: status, gross_value: unit_price * quantity, ordered_at: 1.day.ago
+      )
+      order.order_items.create!(product: product, sku: "2080", name: product.name, quantity: quantity, unit_price: unit_price, unit_cost: unit_cost)
+      order
+    end
+
+    def summary_for(from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601)
+      described_class.call(tenant: tenant, params: ActionController::Parameters.new(from: from, to: to))
+    end
+
+    it "excludes sample orders from top_products_by_revenue/margin and product_turnover_summary" do
+      make_item_order(quantity: 3, unit_price: 50) # real sale: R$150, cost 30 -> margin 80%
+      make_item_order(order_type: "sample", quantity: 10, unit_price: 0)
+
+      result = summary_for
+
+      revenue_row = result[:top_products_by_revenue].find { |r| r[:sku] == "2080" }
+      expect(revenue_row[:revenue]).to eq(150.0)
+
+      margin_row = result[:top_products_by_margin].find { |r| r[:sku] == "2080" }
+      expect(margin_row[:margin_pct]).to eq(80.0)
+
+      turnover_row = result[:product_turnover_summary].find { |r| r[:sku] == "2080" }
+      expect(turnover_row[:total_qty]).to eq(3)
+    end
+
+    it "excludes cancelled orders from top_products_by_revenue/margin and product_turnover_summary" do
+      make_item_order(quantity: 3, unit_price: 50) # real sale: R$150, cost 30 -> margin 80%
+      make_item_order(status: "cancelled", quantity: 20, unit_price: 999)
+
+      result = summary_for
+
+      revenue_row = result[:top_products_by_revenue].find { |r| r[:sku] == "2080" }
+      expect(revenue_row[:revenue]).to eq(150.0)
+
+      margin_row = result[:top_products_by_margin].find { |r| r[:sku] == "2080" }
+      expect(margin_row[:margin_pct]).to eq(80.0)
+
+      turnover_row = result[:product_turnover_summary].find { |r| r[:sku] == "2080" }
+      expect(turnover_row[:total_qty]).to eq(3)
+    end
+  end
 end

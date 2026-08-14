@@ -75,6 +75,33 @@ RSpec.describe Integrations::Normalizers::TiktokOrderNormalizer do
     end
   end
 
+  # Free samples sent to TikTok creators/affiliates (SELLER_FUND_FREE_SAMPLE)
+  # genuinely have unit_price/gross_value at 0 from the API — not a sync
+  # bug — but must not be counted as a sale (Order::ORDER_TYPES "sample",
+  # excluded from Order.sales_and_refunds). Confirmed against real Hidrabene
+  # production payloads: unit_price=0 correlated 100% with is_sample_order.
+  describe "order_type: sample orders" do
+    it "maps is_sample_order: true to order_type 'sample', regardless of status" do
+      result = described_class.new(raw_order.merge("is_sample_order" => true, "order_type" => "SELLER_FUND_FREE_SAMPLE"), "order.polling").normalize
+      expect(result[:order_type]).to eq("sample")
+    end
+
+    it "checks is_sample_order before the cancellation/refund keyword match" do
+      result = described_class.new(
+        raw_order.merge("is_sample_order" => true, "status" => "CANCELLED"), "order.polling"
+      ).normalize
+      expect(result[:order_type]).to eq("sample")
+    end
+
+    it "does not mark a regular order as sample just because is_sample_order is absent/false" do
+      result = described_class.new(raw_order.merge("is_sample_order" => false), "order.polling").normalize
+      expect(result[:order_type]).to eq("sale")
+
+      result_absent = described_class.new(raw_order.except("is_sample_order"), "order.polling").normalize
+      expect(result_absent[:order_type]).to eq("sale")
+    end
+  end
+
   describe "order fields" do
     it "extracts id, status, payment method and recipient" do
       expect(normalized).to include(

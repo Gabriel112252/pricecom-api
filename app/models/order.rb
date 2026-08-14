@@ -11,7 +11,12 @@ class Order < ApplicationRecord
   has_many :converted_carts, class_name: "Cart", foreign_key: :converted_order_id,
     dependent: :nullify, inverse_of: :converted_order
 
-  ORDER_TYPES = %w[sale refund cancellation exchange].freeze
+  # "sample" — amostra grátis enviada a criador/afiliado (TikTok Shop
+  # Affiliate: order_type "SELLER_FUND_FREE_SAMPLE" / is_sample_order true
+  # na Order API), não é venda de cliente. unit_price/gross_value vêm
+  # genuinamente zerados da própria API, não é bug de sync — mas precisa
+  # ficar fora de sales_and_refunds pra não contaminar volume/receita.
+  ORDER_TYPES = %w[sale refund cancellation exchange sample].freeze
 
   # Statuses que nunca contam como venda: 'unpaid' (pedido TikTok criado sem
   # pagamento — o proxy de carrinho abandonado do canal) e 'status_unknown'
@@ -36,6 +41,18 @@ class Order < ApplicationRecord
   scope :sales,        -> { where(order_type: "sale") }
   scope :cancellations, -> { where(order_type: "cancellation") }
   scope :refunds,      -> { where(order_type: "refund") }
+
+  # A definição canônica de "conta como venda/faturamento real": sale ou
+  # refund, não cancelado, revenue_countable. Antes desta mudança essa
+  # combinação exata vivia duplicada à mão em 4 lugares (financial_orders
+  # em BuildSummary, BuildCustomers, freight_comparable_orders e
+  # tiktok_orders_scope em DashboardController) — e as 6 queries a nível
+  # item (rankings/busca/giro/evolução de produto) usavam só
+  # revenue_countable sozinho, sem excluir cancelamento nem order_type
+  # "sample"/"exchange". NÃO usar em orders_in_period/canceled_amount_for/
+  # build_returns_and_refunds (BuildSummary) — esses 3 precisam ver pedido
+  # cancelado de propósito, ver comentário lá.
+  scope :sales_and_refunds, -> { where(order_type: %w[sale refund]).not_canceled.revenue_countable }
 
   # margin_pct e a coluna decimal(5,2): valores fora de +-999.99 estouram o insert
   MARGIN_PCT_RANGE = (-999.99..999.99)

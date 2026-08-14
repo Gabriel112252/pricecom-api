@@ -109,4 +109,68 @@ RSpec.describe Dashboard::SearchProducts do
 
     expect(result[:results].first[:total_qty_sold]).to eq(0.0)
   end
+
+  it "excludes cancelled orders from total_qty_sold/total_revenue, even with order_type sale" do
+    order = make_order(channel_yampi, gross: 100, ordered_at: 1.day.ago, status: "cancelled")
+    order.order_items.create!(product: product, sku: "2080", name: product.name, quantity: 5, unit_price: 100, unit_cost: 10)
+
+    result = call(q: "2080", from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601)
+
+    expect(result[:results].first[:total_qty_sold]).to eq(0.0)
+    expect(result[:results].first[:total_revenue]).to eq(0.0)
+  end
+
+  describe "free samples (order_type: sample)" do
+    it "excludes sample orders from total_qty_sold/total_revenue/by_channel" do
+      sample_order = make_order(channel_tiktok, gross: 0, ordered_at: 1.day.ago, order_type: "sample")
+      sample_order.order_items.create!(product: product, sku: "2080", name: product.name, quantity: 4, unit_price: 0, unit_cost: 10)
+
+      result = call(q: "2080", from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601)
+
+      row = result[:results].first
+      expect(row[:total_qty_sold]).to eq(0.0)
+      expect(row[:total_revenue]).to eq(0.0)
+      expect(row[:by_channel]).to eq([])
+    end
+
+    it "reports sample_qty_sent separately from real sales, without folding it into total_qty_sold" do
+      real_order = make_order(channel_yampi, gross: 50, ordered_at: 1.day.ago)
+      real_order.order_items.create!(product: product, sku: "2080", name: product.name, quantity: 3, unit_price: 20, unit_cost: 10, discount: 10)
+
+      sample_order = make_order(channel_tiktok, gross: 0, ordered_at: 1.day.ago, order_type: "sample")
+      sample_order.order_items.create!(product: product, sku: "2080", name: product.name, quantity: 4, unit_price: 0, unit_cost: 10)
+
+      result = call(q: "2080", from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601)
+
+      row = result[:results].first
+      expect(row[:total_qty_sold]).to eq(3.0)
+      expect(row[:sample_qty_sent]).to eq(4.0)
+    end
+
+    it "restricts sample_qty_sent to the selected channel when channel_ids is given" do
+      make_order(channel_tiktok, gross: 0, ordered_at: 1.day.ago, order_type: "sample").order_items.create!(
+        product: product, sku: "2080", name: product.name, quantity: 4, unit_price: 0, unit_cost: 10
+      )
+      make_order(channel_yampi, gross: 0, ordered_at: 1.day.ago, order_type: "sample").order_items.create!(
+        product: product, sku: "2080", name: product.name, quantity: 2, unit_price: 0, unit_cost: 10
+      )
+
+      result = call(
+        q: "2080", from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601,
+        channel_ids: [ channel_tiktok.id.to_s ]
+      )
+
+      expect(result[:results].first[:sample_qty_sent]).to eq(4.0)
+    end
+
+    it "returns sample_qty_sent 0.0 for a product with no samples" do
+      make_order(channel_yampi, gross: 50, ordered_at: 1.day.ago).order_items.create!(
+        product: product, sku: "2080", name: product.name, quantity: 1, unit_price: 50, unit_cost: 10
+      )
+
+      result = call(q: "2080", from: 6.days.ago.to_date.iso8601, to: Date.current.iso8601)
+
+      expect(result[:results].first[:sample_qty_sent]).to eq(0.0)
+    end
+  end
 end
