@@ -53,6 +53,26 @@ RSpec.describe "idworks:inspect_order_payload rake task" do
     expect(output).to include('["ML", "YAMPI"]')
   end
 
+  it "finds the integration regardless of its status (production integrations aren't always literally 'connected')" do
+    tenant.integrations.create!(
+      provider: "idworks", name: "idworks", status: "error",
+      credentials: { base_url: "https://cliente.idworks.com.br/1.0", email: "user@hidrabene.com", password: "secret" }
+    )
+
+    stub_request(:post, "https://cliente.idworks.com.br/1.0/user/signin/local")
+      .to_return(status: 200, body: signin_fixture, headers: { "Content-Type" => "application/json" })
+    stub_request(:get, "https://cliente.idworks.com.br/1.0/orders")
+      .with(query: hash_including("Page" => "0"))
+      .to_return(status: 200, body: [ { "IDOrder" => 1, "Order" => "555001" } ].to_json, headers: { "Content-Type" => "application/json" })
+
+    ENV["TENANT_SLUG"] = tenant.slug
+    ENV["DAYS"] = "30"
+
+    output = capture_stdout { Rake::Task["idworks:inspect_order_payload"].invoke }
+
+    expect(output).to include("pedidos recebidos")
+  end
+
   def capture_stdout
     original = $stdout
     $stdout = StringIO.new

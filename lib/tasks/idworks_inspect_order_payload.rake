@@ -26,8 +26,15 @@ namespace :idworks do
     tenant = ENV["TENANT_SLUG"].present? ? Tenant.find_by!(slug: ENV["TENANT_SLUG"]) : Tenant.first
     abort "Nenhum tenant encontrado." unless tenant
 
-    integration = tenant.integrations.find_by(provider: "idworks", status: "connected")
-    abort "[#{tenant.slug}] nenhuma integration idworks conectada." unless integration
+    # Mesmo critério de lookup de idworks_product_loja_backfill.rake —
+    # sem filtrar por status: "connected" (o valor real em produção pode
+    # não bater com esse literal exato, e isso não deveria decidir se a
+    # integration existe ou não). client.authenticate! logo abaixo já
+    # falha com uma mensagem clara se as credenciais estiverem inválidas.
+    integrations = tenant.integrations.where(provider: "idworks")
+    abort "[#{tenant.slug}] esperado exatamente 1 integration idworks, encontrado #{integrations.count}." if integrations.count != 1
+
+    integration = integrations.first
 
     client = Integrations::Idworks::BaseClient.new(integration.credentials)
     client.authenticate!
