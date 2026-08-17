@@ -48,6 +48,12 @@ RSpec.describe Integrations::Idworks::ProductCostSyncService do
       expect(tenant.products.find_by(sku: "CAN-001").cost_price).to eq(BigDecimal("11.20"))
     end
 
+    it "tags synced products with the syncing integration (loja)" do
+      described_class.call(integration)
+
+      expect(tenant.products.find_by(sku: "CAM-001-P-AZUL").integration_id).to eq(integration.id)
+    end
+
     it "propagates product cost to matching order items and recalculates order margin" do
       product = tenant.products.find_by(sku: "CAM-001-P-AZUL")
       order = tenant.orders.create!(

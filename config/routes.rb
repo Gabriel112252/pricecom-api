@@ -155,6 +155,7 @@ Rails.application.routes.draw do
       get "stock_overview/:id", to: "stock_overview#show"
 
       get "reconciliation_overview", to: "reconciliation_overview#index"
+      get "idworks_dashboard", to: "idworks_dashboard#index"
 
       # Dashboard
       get "dashboard/summary",   to: "dashboard#summary"

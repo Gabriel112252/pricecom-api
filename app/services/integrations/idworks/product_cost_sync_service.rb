@@ -22,6 +22,13 @@ module Integrations
     # Only applies cost when DataSourceConfig has "cost" pointed at
     # "idworks" for this tenant — a tenant that's repointed cost elsewhere
     # shouldn't have idworks silently overwrite it.
+    #
+    # Also tags product.integration_id with this run's `integration` — the
+    # tenant has no explicit "loja" column (Hidrabene x Anasol), so which
+    # idworks Integration (one per company/loja, see Integration#name
+    # uniqueness scoped to provider) last synced a SKU's catalog is the
+    # source of truth for which loja that product belongs to. Ver
+    # Idworks::DashboardStatsService.
     class ProductCostSyncService
       Result = Struct.new(:outcome, :synced_count, :error_message, :metadata, keyword_init: true) do
         def success? = outcome == :success
@@ -126,7 +133,11 @@ module Integrations
 
         @matched_count = matched_count + 1
 
-        product.assign_attributes(cost_price: cost, idworks_id: raw[:idworks_id].presence || product.idworks_id)
+        product.assign_attributes(
+          cost_price: cost,
+          idworks_id: raw[:idworks_id].presence || product.idworks_id,
+          integration_id: integration.id
+        )
         if product.changed?
           product.save!
           @product_updated_count = product_updated_count + 1

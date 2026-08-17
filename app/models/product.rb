@@ -1,5 +1,9 @@
 class Product < ApplicationRecord
   belongs_to :tenant
+  # Loja (Hidrabene x Anasol): qual Integration idworks sincronizou esse
+  # produto por último — ver Integrations::Idworks::ProductCostSyncService
+  # e Idworks::DashboardStatsService. Nil até a primeira sync de custo.
+  belongs_to :integration, optional: true
   has_many :order_items, dependent: :nullify
   has_many :pricing_rules, dependent: :destroy
   has_many :channel_operational_costs, dependent: :destroy

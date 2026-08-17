@@ -11,6 +11,10 @@ module Dashboard
     # history (20260726000000_add_seller_and_platform_discount_to_order_items.rb,
     # Integrations::Tiktok::DiscountBackfillService).
     include Dashboard::ProductRevenueSql
+    # tiktok_revenue_sql/effective_revenue_sql/financial_revenue_available_sql
+    # live in OrderRevenueSql — shared with Idworks::DashboardStatsService so
+    # both use the exact same order-level "receita efetiva" formula.
+    include Dashboard::OrderRevenueSql
 
     FINANCIAL_CONFLICT_TYPES = %w[
       nf_discount_mismatch nf_freight_mismatch settlement_amount_mismatch missing_settlement fee_rate_mismatch
@@ -169,57 +173,6 @@ module Dashboard
     def pct_change(current, previous)
       return nil if previous.nil? || previous.to_f.abs < 0.01
       ((current - previous) / previous.to_f * 100).round(2)
-    end
-
-    # Fórmula de receita TikTok em dois estágios: pedido com demonstrativo
-    # sincronizado usa revenue_amount (confirmado, já líquido de desconto do
-    # vendedor + subsídio da plataforma); pedido ainda pendente (backfill em
-    # andamento) usa uma ESTIMATIVA — gross_value - seller_discount — em vez
-    # de ficar de fora do valor. seller_discount já vem do normalizer de
-    # pedido (Get Order Detail, imediato), não do fechamento do statement,
-    # então a estimativa está disponível desde a criação do pedido. Nunca é
-    # exata: não reflete taxas/comissões/ajustes que só o fechamento revela
-    # (ver tiktok_revenue_confirmed_sql para separar os dois casos na UI).
-    def tiktok_revenue_sql
-      "CASE WHEN orders.financial_synced_at IS NOT NULL THEN orders.revenue_amount " \
-        "ELSE GREATEST(COALESCE(orders.gross_value, 0) - COALESCE(orders.seller_discount, 0), 0) END"
-    end
-
-    # Predicado companheiro de tiktok_revenue_sql: true quando o valor acima
-    # é o revenue_amount confirmado pelo fechamento, false quando é a
-    # estimativa. Usado tanto em COUNT(*) FILTER quanto pra decidir, por
-    # pedido, se a UI mostra o badge "estimado".
-    def tiktok_revenue_confirmed_sql
-      "orders.financial_synced_at IS NOT NULL"
-    end
-
-    # Regra central de "receita efetiva" da Visão Geral: canal TikTok usa
-    # tiktok_revenue_sql (confirmado quando sincronizado, estimado quando
-    # pendente — nunca fica de fora do SUM). Os demais canais preservam a
-    # fórmula histórica (gross_value - discount - refund_amount), sem
-    # nenhuma mudança de comportamento pra Yampi.
-    #
-    # Centralizado aqui de propósito: todo widget monetário da Visão Geral
-    # (kpis, revenue_breakdown, revenue_timeline, sales_by_channel,
-    # regional_sales) deve reutilizar este helper em vez de reimplementar o
-    # CASE. Exige que a scope já tenha `.joins(:channel)` (usa
-    # channels.platform).
-    def effective_revenue_sql
-      "CASE " \
-        "WHEN channels.platform = 'tiktok' THEN (#{tiktok_revenue_sql}) " \
-        "ELSE COALESCE(orders.gross_value, 0) - COALESCE(orders.discount, 0) - COALESCE(orders.refund_amount, 0) " \
-      "END"
-    end
-
-    # Predicado companheiro de effective_revenue_sql: true quando o valor é
-    # CONFIRMADO (não-TikTok, sempre; TikTok só quando sincronizado), false
-    # quando é uma estimativa TikTok ainda pendente. Desde que
-    # effective_revenue_sql passou a estimar em vez de excluir, isto deixou
-    # de servir como divisor de ticket médio (todo pedido agora contribui
-    # com algum valor) — usar só como contador informativo de cobertura
-    # (financial_orders_count e afins).
-    def financial_revenue_available_sql
-      "channels.platform <> 'tiktok' OR (#{tiktok_revenue_confirmed_sql})"
     end
 
     # Uma única query agregada por trás de effective_revenue e da contagem

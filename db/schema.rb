@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_08_14_100000) do
+ActiveRecord::Schema[7.2].define(version: 2026_08_17_120000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "plpgsql"
 
@@ -772,6 +772,8 @@ ActiveRecord::Schema[7.2].define(version: 2026_08_14_100000) do
     t.integer "lead_time_days", default: 0
     t.boolean "infinite_inventory", default: false, null: false
     t.datetime "stock_synced_at"
+    t.bigint "integration_id"
+    t.index ["integration_id"], name: "index_products_on_integration_id"
     t.index ["qty_available"], name: "index_products_on_qty_available"
     t.index ["tenant_id", "abc_curve"], name: "index_products_on_tenant_id_and_abc_curve"
     t.index ["tenant_id", "sku"], name: "index_products_on_tenant_id_and_sku", unique: true
@@ -1094,6 +1096,7 @@ ActiveRecord::Schema[7.2].define(version: 2026_08_14_100000) do
   add_foreign_key "payment_fee_rules", "tenants"
   add_foreign_key "pricing_rules", "channels"
   add_foreign_key "pricing_rules", "products"
+  add_foreign_key "products", "integrations"
   add_foreign_key "products", "tenants"
   add_foreign_key "reconciliation_items", "integrations"
   add_foreign_key "reconciliation_items", "products"
