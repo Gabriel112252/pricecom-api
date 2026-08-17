@@ -115,6 +115,25 @@ RSpec.describe Idworks::DashboardStatsService do
       expect(yampi_row[:average_ticket]).to eq(100.0)
       expect(yampi_row[:share_percentage]).to eq(50.0)
     end
+
+    # Regression: channel_breakdown must never hardcode/allowlist a subset
+    # of channels.platform — it groups by whatever channels the scoped
+    # orders actually joins to. Reported bug (2026-08-17) turned out to be
+    # products.integration_id backfill, not this method, but this locks in
+    # that all 4 platforms surface when they have orders in the period.
+    it "includes every channel with orders in the period, not just tiktok/yampi" do
+      shopee_channel = tenant.channels.create!(name: "Shopee", platform: "shopee")
+      ml_channel = tenant.channels.create!(name: "Mercado Livre", platform: "mercadolivre")
+
+      make_order(channel: yampi_channel, gross_value: 100, ordered_at: period_from + 1.day)
+      make_order(channel: tiktok_channel, gross_value: 100, ordered_at: period_from + 1.day)
+      make_order(channel: shopee_channel, gross_value: 100, ordered_at: period_from + 1.day)
+      make_order(channel: ml_channel, gross_value: 100, ordered_at: period_from + 1.day)
+
+      breakdown = call_service.channel_breakdown
+
+      expect(breakdown.map { |row| row[:channel] }).to contain_exactly("Yampi", "TikTok Shop", "Shopee", "Mercado Livre")
+    end
   end
 
   describe "orders_timeseries" do
