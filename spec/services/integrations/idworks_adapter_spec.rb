@@ -139,10 +139,37 @@ RSpec.describe Integrations::IdworksAdapter do
     it "returns order_ref/idworks_order_id/value_shipping and related value fields" do
       orders = adapter.fetch_orders(from: Time.utc(2026, 6, 1, 0, 0, 0), to: Time.utc(2026, 6, 1, 2, 0, 0))
 
+      raw_keys = %w[IDOrder Order ValueProduct ValueOrder ValueShipping ValuePaid]
       expect(orders).to contain_exactly(
-        { order_ref: "555001", idworks_order_id: "88001", value_shipping: BigDecimal("15.30"), value_product: BigDecimal("180.00"), value_order: BigDecimal("199.90"), value_paid: BigDecimal("199.90") },
-        { order_ref: "555999-NOT-IN-PRICECOM", idworks_order_id: "88002", value_shipping: BigDecimal("0"), value_product: BigDecimal("29.90"), value_order: BigDecimal("29.90"), value_paid: BigDecimal("29.90") }
+        { order_ref: "555001", idworks_order_id: "88001", value_shipping: BigDecimal("15.30"), value_product: BigDecimal("180.00"), value_order: BigDecimal("199.90"), value_paid: BigDecimal("199.90"), sales_channel_slug: nil, raw_keys: raw_keys },
+        { order_ref: "555999-NOT-IN-PRICECOM", idworks_order_id: "88002", value_shipping: BigDecimal("0"), value_product: BigDecimal("29.90"), value_order: BigDecimal("29.90"), value_paid: BigDecimal("29.90"), sales_channel_slug: nil, raw_keys: raw_keys }
       )
+    end
+
+    # SalesChannelLogoUrl confirmed 2026-08-17: not an enum, a logo URL —
+    # the channel is the filename without extension, lowercased. See
+    # Idworks::DashboardStatsService for the slug -> display name mapping.
+    describe "sales_channel_slug (SalesChannelLogoUrl)" do
+      def orders_with_logo_url(url)
+        stub_request(:get, orders_url)
+          .with(query: hash_including("Page" => "0", "DateFrom" => "2026-06-01T00:00:00Z", "DateTo" => "2026-06-01T02:00:00Z"))
+          .to_return(status: 200, body: [ { "IDOrder" => 1, "Order" => "N1", "SalesChannelLogoUrl" => url } ].to_json, headers: { "Content-Type" => "application/json" })
+
+        adapter.fetch_orders(from: Time.utc(2026, 6, 1, 0, 0, 0), to: Time.utc(2026, 6, 1, 2, 0, 0)).first[:sales_channel_slug]
+      end
+
+      it "extracts the lowercased filename without extension" do
+        expect(orders_with_logo_url("https://cdn.idworks.com.br/logo/mercadolivre.png")).to eq("mercadolivre")
+      end
+
+      it "is resilient to a query string after the extension" do
+        expect(orders_with_logo_url("https://cdn.idworks.com.br/logo/Shopify.png?v=2&x=1")).to eq("shopify")
+      end
+
+      it "is nil for a blank logo URL" do
+        expect(orders_with_logo_url("")).to be_nil
+        expect(orders_with_logo_url(nil)).to be_nil
+      end
     end
   end
 

@@ -61,6 +61,44 @@ RSpec.describe Integrations::Idworks::OrderSyncService do
       described_class.call(integration)
       expect(matching_order.reload.tax_amount).to be_nil
     end
+
+    it "tags idworks_sales_channel from SalesChannelLogoUrl even though the fixture has no such field (stays nil)" do
+      described_class.call(integration)
+      expect(matching_order.reload.idworks_sales_channel).to be_nil
+    end
+
+    it "tags idworks_sales_channel from a real SalesChannelLogoUrl payload, independent of freight outcome" do
+      stub_request(:get, "https://cliente.idworks.com.br/1.0/orders").with(query: hash_including("Page" => "0"))
+        .to_return(
+          status: 200,
+          body: [ {
+            "IDOrder" => 88001, "Order" => "555001", "ValueShipping" => 15.30,
+            "SalesChannelLogoUrl" => "https://cdn.idworks.com.br/logo/mercadolivre.png"
+          } ].to_json,
+          headers: { "Content-Type" => "application/json" }
+        )
+
+      described_class.call(integration)
+
+      expect(matching_order.reload.idworks_sales_channel).to eq("mercadolivre")
+    end
+
+    it "still tags idworks_sales_channel when freight is already up to date (no-op freight path)" do
+      matching_order.update!(real_freight_cost: 15.30)
+      stub_request(:get, "https://cliente.idworks.com.br/1.0/orders").with(query: hash_including("Page" => "0"))
+        .to_return(
+          status: 200,
+          body: [ {
+            "IDOrder" => 88001, "Order" => "555001", "ValueShipping" => 15.30,
+            "SalesChannelLogoUrl" => "https://cdn.idworks.com.br/logo/shopee.png?v=2"
+          } ].to_json,
+          headers: { "Content-Type" => "application/json" }
+        )
+
+      described_class.call(integration)
+
+      expect(matching_order.reload.idworks_sales_channel).to eq("shopee")
+    end
   end
 
   context "when freight is NOT configured to idworks" do

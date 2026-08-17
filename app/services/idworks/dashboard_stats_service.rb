@@ -25,9 +25,37 @@ module Idworks
     UNMAPPED_LOJA_KEY = "nao_identificado".freeze
     TOP_PRODUCTS_LIMIT = 10
 
+    # channel_breakdown (só nesta aba — as outras continuam via
+    # channels.platform, a integração própria do Pricecom, que não cobre
+    # canal sem integração direta como Mercado Livre) agrupa por
+    # orders.idworks_sales_channel em vez de channels.name. Esse campo vem
+    # do filename de SalesChannelLogoUrl no payload do idworks (ver
+    # IdworksAdapter#extract_channel_slug) — CONFIRMADO 2026-08-17 contra
+    # payload real: shopify/tiktok/shopee/mercadolivre, nada além disso
+    # visto até agora.
+    #
+    # "shopify" tem uma regra extra confirmada com o Gabriel: Yampi é o
+    # checkout que passou a rodar em cima do Shopify a partir dessa data —
+    # pedido "shopify" ANTES do corte continua "Shopify" (nomenclatura
+    # antiga), a partir do corte (inclusive) vira "Yampi". A data usada pro
+    # corte é orders.ordered_at — o mesmo campo que já delimita todo o
+    # resto do período nesta classe (base_orders_scope), não
+    # Recordtimestamp do idworks (que o próprio IdworksAdapter documenta
+    # como possivelmente um "last modified", não a data real do pedido).
+    SHOPIFY_TO_YAMPI_CUTOFF = Date.new(2026, 6, 15).freeze
+    IDWORKS_CHANNEL_DISPLAY_NAMES = {
+      "tiktok"       => "TikTok Shop",
+      "shopee"       => "Shopee",
+      "mercadolivre" => "Mercado Livre",
+      "shopify"      => "Shopify",
+      "yampi"        => "Yampi"
+    }.freeze
+    UNMAPPED_CHANNEL_KEY = "nao_identificado".freeze
+    UNMAPPED_CHANNEL_DISPLAY_NAME = "Não identificado".freeze
+
     Result = Struct.new(
       :revenue_total, :orders_count, :average_ticket, :revenue_by_loja,
-      :orders_timeseries, :top_products, :channel_breakdown,
+      :orders_timeseries, :top_products, :channel_breakdown, :real_skus_sold,
       keyword_init: true
     )
 
@@ -50,7 +78,8 @@ module Idworks
         revenue_by_loja:   revenue_by_loja,
         orders_timeseries: orders_timeseries,
         top_products:      top_products,
-        channel_breakdown: channel_breakdown
+        channel_breakdown: channel_breakdown,
+        real_skus_sold:    real_skus_sold
       )
     end
 
@@ -174,33 +203,70 @@ module Idworks
       rows.map { |sku, name, quantity, revenue| { sku: sku, name: name, quantity: quantity.to_f, revenue: revenue.to_f.round(2) } }
     end
 
-    # Mesma forma de summary.sales_by_channel — reaproveitado por
-    # SalesByChannelChart no frontend. Respeita o filtro `loja`.
+    # "SKUs reais vendidos" — diferente de top_products acima (que ranqueia
+    # pelo SKU literal do order_item, kit incluído como se fosse 1 unidade
+    # do próprio kit): aqui uma venda de kit é explodida nos componentes
+    # que de fato saíram do estoque, via Products::TopRealSkusSold (mesma
+    # lógica de Dashboard::BuildSummary#build_product_turnover_summary,
+    # compartilhada — não uma segunda cópia). integration_id vai
+    # DEPOIS da explosão (ver comentário da classe) — não dá pra filtrar
+    # order_items_scope por products.integration_id antes de explodir sem
+    # arriscar descartar a venda inteira de um kit sem loja própria.
+    def real_skus_sold
+      return [] if loja.present? && integration_for_loja(loja).nil?
+
+      integration_id = loja.present? ? integration_for_loja(loja).id : :any
+      Products::TopRealSkusSold.call(item_scope_in_period, limit: TOP_PRODUCTS_LIMIT, integration_id: integration_id)
+    end
+
+    # Canal nativo do idworks (orders.idworks_sales_channel), não
+    # channels.name/Pricecom — ver o comentário de IDWORKS_CHANNEL_DISPLAY_NAMES
+    # acima pra por quê. Ainda precisa de .joins(:channel) só porque
+    # effective_revenue_sql (compartilhado com o resto do dashboard, não
+    # duplicado aqui) depende de channels.platform pra saber se é TikTok.
+    # Todo pedido cai em algum grupo (ELSE do CASE), nunca fica de fora da
+    # soma — ver spec de regressão "nenhum pedido cai fora do agrupamento".
     def channel_breakdown
       rows = scoped_orders
         .joins(:channel)
-        .group("channels.id", "channels.name")
+        .group(Arel.sql(idworks_channel_key_sql))
         .pluck(
-          Arel.sql("channels.name"),
+          Arel.sql(idworks_channel_key_sql),
           Arel.sql("COUNT(*)"),
           Arel.sql("COALESCE(SUM(#{effective_revenue_sql}), 0)")
         )
 
       total_revenue = rows.sum { |_, _, revenue| revenue.to_f }
 
-      rows.filter_map do |name, count, revenue|
+      rows.filter_map do |key, count, revenue|
         count_i = count.to_i
         next if count_i.zero?
 
         revenue_f = revenue.to_f.round(2)
         {
-          channel:          name,
+          channel:          IDWORKS_CHANNEL_DISPLAY_NAMES.fetch(key, UNMAPPED_CHANNEL_DISPLAY_NAME),
           orders_count:     count_i,
           net_revenue:      revenue_f,
           average_ticket:   count_i.positive? ? (revenue_f / count_i).round(2) : nil,
           share_percentage: total_revenue.positive? ? (revenue_f / total_revenue * 100).round(2) : 0
         }
       end.sort_by { |row| -row[:net_revenue] }
+    end
+
+    # Chave crua de agrupamento — "shopify" antes do corte, "yampi" a
+    # partir dele (inclusive), os outros 3 slugs conhecidos como vieram,
+    # qualquer coisa fora disso (nil, slug desconhecido) cai no bucket
+    # "não identificado". Mapeamento pro nome de exibição fica em
+    # IDWORKS_CHANNEL_DISPLAY_NAMES — evita nome acentuado ("Mercado
+    # Livre") dentro de SQL bruto.
+    def idworks_channel_key_sql
+      quoted_cutoff = ActiveRecord::Base.connection.quote(SHOPIFY_TO_YAMPI_CUTOFF.beginning_of_day)
+      known_slugs = (IDWORKS_CHANNEL_DISPLAY_NAMES.keys - [ "yampi" ]).map { |slug| ActiveRecord::Base.connection.quote(slug) }.join(", ")
+
+      "CASE " \
+        "WHEN orders.idworks_sales_channel = 'shopify' AND orders.ordered_at >= #{quoted_cutoff} THEN 'yampi' " \
+        "WHEN orders.idworks_sales_channel IN (#{known_slugs}) THEN orders.idworks_sales_channel " \
+        "ELSE #{ActiveRecord::Base.connection.quote(UNMAPPED_CHANNEL_KEY)} END"
     end
   end
 end

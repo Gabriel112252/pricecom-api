@@ -1777,29 +1777,7 @@ module Dashboard
         .where(order_id: orders_in_period(period).select(:id))
         .where(is_gift: false)
 
-      direct = items.group("products.id", "products.sku", "products.name").sum(:quantity)
-
-      combined = {}
-      direct.each do |(id, sku, name), qty|
-        combined[id] = { id: id, sku: sku, name: name, direct_qty: qty.to_f, kit_qty: 0.0 }
-      end
-
-      items.where(products: { is_kit: true })
-        .includes(product: { kit_components: { component_product: { kit_components: :component_product } } })
-        .find_each do |item|
-          Products::ExplodeKit.call(item.product, item.quantity).each do |leaf|
-            entry = combined[leaf[:product].id] ||= {
-              id: leaf[:product].id, sku: leaf[:product].sku, name: leaf[:product].name,
-              direct_qty: 0.0, kit_qty: 0.0
-            }
-            entry[:kit_qty] += leaf[:real_qty].to_f
-          end
-        end
-
-      combined.values
-        .map { |e| e.merge(total_qty: e[:direct_qty] + e[:kit_qty], kit_only: e[:direct_qty].zero? && e[:kit_qty] > 0) }
-        .sort_by { |e| -e[:total_qty] }
-        .first(limit)
+      Products::TopRealSkusSold.call(items, limit: limit)
     end
 
     def period_range(period)

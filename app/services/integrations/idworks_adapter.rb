@@ -351,14 +351,31 @@ module Integrations
 
     def normalize_order(raw)
       {
-        order_ref:        first_present(raw, "Order", "order", "OrderNumber", "orderNumber", "ExternalOrder", "externalOrder")&.to_s,
-        idworks_order_id: first_present(raw, "IDOrder", "IDORDER", "idOrder", "id_order", "OrderId", "orderId")&.to_s,
-        value_shipping:   to_decimal(first_present(raw, "ValueShipping", "valueShipping", "ShippingValue", "shippingValue", "FreightValue", "freightValue")),
-        value_product:    to_decimal(first_present(raw, "ValueProduct", "valueProduct")),
-        value_order:      to_decimal(first_present(raw, "ValueOrder", "valueOrder")),
-        value_paid:       to_decimal(first_present(raw, "ValuePaid", "valuePaid")),
-        raw_keys:         raw.is_a?(Hash) ? raw.keys : []
+        order_ref:          first_present(raw, "Order", "order", "OrderNumber", "orderNumber", "ExternalOrder", "externalOrder")&.to_s,
+        idworks_order_id:   first_present(raw, "IDOrder", "IDORDER", "idOrder", "id_order", "OrderId", "orderId")&.to_s,
+        value_shipping:     to_decimal(first_present(raw, "ValueShipping", "valueShipping", "ShippingValue", "shippingValue", "FreightValue", "freightValue")),
+        value_product:      to_decimal(first_present(raw, "ValueProduct", "valueProduct")),
+        value_order:        to_decimal(first_present(raw, "ValueOrder", "valueOrder")),
+        value_paid:         to_decimal(first_present(raw, "ValuePaid", "valuePaid")),
+        sales_channel_slug: extract_channel_slug(first_present(raw, "SalesChannelLogoUrl")),
+        raw_keys:           raw.is_a?(Hash) ? raw.keys : []
       }
+    end
+
+    # SalesChannelLogoUrl — CONFIRMED 2026-08-17 against real order payload:
+    # não é um enum, é a URL do logo do canal (ex:
+    # ".../logo/mercadolivre.png") — o canal é o filename sem extensão,
+    # lowercased. Só este campo foi confirmado (sem variantes de
+    # casing/nome chutadas) — ver Idworks::DashboardStatsService pro
+    # mapeamento desses slugs pros nomes de canal do resto do dashboard.
+    # Resiliente a query string (".../logo/tiktok.png?v=2") e path
+    # variável — não assume estrutura fixa de URL, só pega o nome do
+    # arquivo antes da extensão.
+    def extract_channel_slug(logo_url)
+      return nil if logo_url.blank?
+
+      filename = logo_url.to_s.split("?").first.to_s.split("/").last.to_s
+      filename.sub(/\.[a-zA-Z0-9]+\z/, "").strip.downcase.presence
     end
 
     def extract_pagination(body)

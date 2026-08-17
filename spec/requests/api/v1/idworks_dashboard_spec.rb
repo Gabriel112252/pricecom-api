@@ -16,7 +16,7 @@ RSpec.describe "Idworks Dashboard", type: :request do
 
       order = tenant.orders.create!(
         channel: channel, external_id: "order-1", order_number: "N1", order_type: "sale",
-        gross_value: 100, ordered_at: Date.new(2026, 8, 3)
+        gross_value: 100, ordered_at: Date.new(2026, 8, 3), idworks_sales_channel: "shopee"
       )
       order.order_items.create!(product: product, sku: product.sku, name: product.name, quantity: 2, unit_price: 50)
 
@@ -32,8 +32,9 @@ RSpec.describe "Idworks Dashboard", type: :request do
       expect(body["orders_count"]).to eq(1)
       expect(body["revenue_total"]).to eq(100.0)
       expect(body["top_products"]).to eq([ { "sku" => "HID-1", "name" => "Produto Hidrabene", "quantity" => 2.0, "revenue" => 100.0 } ])
-      expect(body["channel_breakdown"].first["channel"]).to eq("Yampi")
+      expect(body["channel_breakdown"].first["channel"]).to eq("Shopee")
       expect(body["revenue_by_loja"]).to include("hidrabene" => 100.0, "anasol" => 0.0)
+      expect(body["real_skus_sold"]).to eq([ { "id" => product.id, "sku" => "HID-1", "name" => "Produto Hidrabene", "integration_id" => integration.id, "direct_qty" => 2.0, "kit_qty" => 0.0, "total_qty" => 2.0, "kit_only" => false } ])
     end
 
     it "defaults the period to the last week when not given" do

@@ -24,7 +24,8 @@ module Api
           revenue_by_loja:    result.revenue_by_loja,
           orders_timeseries:  result.orders_timeseries,
           top_products:       result.top_products,
-          channel_breakdown:  result.channel_breakdown
+          channel_breakdown:  result.channel_breakdown,
+          real_skus_sold:     result.real_skus_sold
         }
       rescue ArgumentError
         render json: { errors: [ "Datas inválidas" ] }, status: :unprocessable_entity
