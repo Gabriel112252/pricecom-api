@@ -212,11 +212,100 @@ module Idworks
     # DEPOIS da explosão (ver comentário da classe) — não dá pra filtrar
     # order_items_scope por products.integration_id antes de explodir sem
     # arriscar descartar a venda inteira de um kit sem loja própria.
+    #
+    # channel_breakdown por linha (planilha externa aprovada pelo Gabriel
+    # pede "por marca: ranking de produtos + breakdown por canal" — faltava
+    # cruzar produto x canal, só existia agregado em #channel_breakdown
+    # acima) — cada produto ganha sua própria repartição por canal nativo
+    # do idworks (com avulso/kit/receita já cruzados também, ver
+    # #channel_breakdown_by_product_id), calculada uma vez e reaproveitada
+    # por linha do ranking.
     def real_skus_sold
       return [] if loja.present? && integration_for_loja(loja).nil?
 
       integration_id = loja.present? ? integration_for_loja(loja).id : :any
-      Products::TopRealSkusSold.call(item_scope_in_period, limit: TOP_PRODUCTS_LIMIT, integration_id: integration_id)
+      ranked = Products::TopRealSkusSold.call(item_scope_in_period, limit: TOP_PRODUCTS_LIMIT, integration_id: integration_id)
+      breakdown_by_product = channel_breakdown_by_product_id
+
+      ranked.map { |entry| entry.merge(channel_breakdown: breakdown_by_product[entry[:id]] || []) }
+    end
+
+    # {product_id => [{channel:, direct_qty:, kit_qty:, quantity:, revenue:}]}
+    # — cruza as 3 dimensões que antes só existiam separadas (canal nativo
+    # do idworks, e avulso/kit de Products::TopRealSkusSold/ExplodeKit).
+    # Sempre a repartição completa (todo produto, todo canal) — real_skus_sold
+    # acima só usa as entradas dos produtos que já estão no ranking loja-filtrado.
+    #
+    # Parte "avulso" (is_kit: false) é uma única agregação SQL — reaproveita
+    # #idworks_channel_key_sql e item_revenue_amount_sql direto, sem
+    # reimplementar o CASE em Ruby. Parte "em kit" precisa de Ruby mesmo
+    # (Products::ExplodeKit é recursivo, não dá pra expressar em SQL) — o
+    # canal aí vem de #idworks_channel_display_name_for, que replica a
+    # MESMA regra de #idworks_channel_key_sql pra um Order já carregado em
+    # memória, então as duas nunca podem divergir sem os testes pegarem
+    # (ver spec "concorda com channel_breakdown do agregado").
+    #
+    # Receita "aproximada" pro componente explodido de um kit: o
+    # order_item do kit só tem UM valor de venda pra tudo que veio junto
+    # (ex: "Kit Clareador" vendido por R$150, sem preço individual por
+    # componente registrado em lugar nenhum) — a única forma de atribuir
+    # receita a cada componente sem inventar um preço é ratear
+    # proporcionalmente à quantidade real que aquele componente representa
+    # na explosão daquela venda. É uma aproximação por construção — dado
+    # daí o nome da coluna na UI ("Receita Aproximada"), não um valor
+    # contábil exato.
+    def channel_breakdown_by_product_id
+      acc = Hash.new { |hash, key| hash[key] = Hash.new { |inner, channel| inner[channel] = { direct_qty: 0.0, kit_qty: 0.0, revenue: 0.0 } } }
+
+      item_scope_in_period.where(products: { is_kit: false })
+        .group("products.id", Arel.sql(idworks_channel_key_sql))
+        .pluck(Arel.sql("products.id"), Arel.sql(idworks_channel_key_sql), Arel.sql("SUM(order_items.quantity)"), Arel.sql("SUM(#{item_revenue_amount_sql})"))
+        .each do |product_id, channel_key, qty, revenue|
+          entry = acc[product_id][IDWORKS_CHANNEL_DISPLAY_NAMES.fetch(channel_key, UNMAPPED_CHANNEL_DISPLAY_NAME)]
+          entry[:direct_qty] += qty.to_f
+          entry[:revenue] += revenue.to_f
+        end
+
+      item_scope_in_period.where(products: { is_kit: true })
+        .select("order_items.*", "(#{item_revenue_amount_sql}) AS computed_item_revenue")
+        .includes(:order, product: { kit_components: { component_product: { kit_components: :component_product } } })
+        .find_each do |item|
+          channel = idworks_channel_display_name_for(item.order)
+          leaves = Products::ExplodeKit.call(item.product, item.quantity)
+          total_real_units = leaves.sum { |leaf| leaf[:real_qty].to_f }
+          item_revenue = item.computed_item_revenue.to_f
+
+          leaves.each do |leaf|
+            share = total_real_units.positive? ? (leaf[:real_qty].to_f / total_real_units) : 0.0
+            entry = acc[leaf[:product].id][channel]
+            entry[:kit_qty] += leaf[:real_qty].to_f
+            entry[:revenue] += item_revenue * share
+          end
+        end
+
+      acc.transform_values do |by_channel|
+        by_channel.map do |channel, values|
+          {
+            channel:    channel,
+            direct_qty: values[:direct_qty].round(2),
+            kit_qty:    values[:kit_qty].round(2),
+            quantity:   (values[:direct_qty] + values[:kit_qty]).round(2),
+            revenue:    values[:revenue].round(2)
+          }
+        end.sort_by { |row| -row[:quantity] }
+      end
+    end
+
+    # Mesmo mapeamento de #idworks_channel_key_sql (shopify pré/pós corte
+    # vira Shopify/Yampi, slug desconhecido ou nulo vira "não identificado"),
+    # em Ruby — aqui já temos o Order carregado (não uma agregação SQL),
+    # então não precisa do CASE bruto.
+    def idworks_channel_display_name_for(order)
+      slug = order.idworks_sales_channel
+      return UNMAPPED_CHANNEL_DISPLAY_NAME if slug.blank?
+
+      key = (slug == "shopify" && order.ordered_at >= SHOPIFY_TO_YAMPI_CUTOFF.beginning_of_day) ? "yampi" : slug
+      IDWORKS_CHANNEL_DISPLAY_NAMES.fetch(key, UNMAPPED_CHANNEL_DISPLAY_NAME)
     end
 
     # Canal nativo do idworks (orders.idworks_sales_channel), não

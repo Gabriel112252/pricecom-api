@@ -34,7 +34,11 @@ RSpec.describe "Idworks Dashboard", type: :request do
       expect(body["top_products"]).to eq([ { "sku" => "HID-1", "name" => "Produto Hidrabene", "quantity" => 2.0, "revenue" => 100.0 } ])
       expect(body["channel_breakdown"].first["channel"]).to eq("Shopee")
       expect(body["revenue_by_loja"]).to include("hidrabene" => 100.0, "anasol" => 0.0)
-      expect(body["real_skus_sold"]).to eq([ { "id" => product.id, "sku" => "HID-1", "name" => "Produto Hidrabene", "integration_id" => integration.id, "direct_qty" => 2.0, "kit_qty" => 0.0, "total_qty" => 2.0, "kit_only" => false } ])
+      expect(body["real_skus_sold"]).to eq([ {
+        "id" => product.id, "sku" => "HID-1", "name" => "Produto Hidrabene", "integration_id" => integration.id,
+        "direct_qty" => 2.0, "kit_qty" => 0.0, "total_qty" => 2.0, "kit_only" => false,
+        "channel_breakdown" => [ { "channel" => "Shopee", "direct_qty" => 2.0, "kit_qty" => 0.0, "quantity" => 2.0, "revenue" => 100.0 } ]
+      } ])
     end
 
     it "defaults the period to the last week when not given" do

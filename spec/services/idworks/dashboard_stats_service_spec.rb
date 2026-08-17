@@ -203,6 +203,112 @@ RSpec.describe Idworks::DashboardStatsService do
       expect(hidrabene_result.map { |e| e[:sku] }).to eq([ "PROTETOR" ])
       expect(anasol_result).to eq([])
     end
+
+    # Planilha externa aprovada pelo Gabriel: "por marca, ranking de
+    # produtos + breakdown por canal", com avulso/kit e receita aproximada
+    # também cruzados na mesma linha — não é só quantidade por canal mais.
+    describe "channel_breakdown per product (canal x avulso/kit x receita)" do
+      it "splits a directly-sold product's quantity AND revenue by the idworks-native channel of the orders it came from" do
+        product = tenant.products.create!(sku: "HID-1", name: "Produto Hidrabene", integration: hidrabene_integration)
+        order1 = make_order(channel: yampi_channel, gross_value: 100, ordered_at: period_from + 1.day, idworks_sales_channel: "tiktok")
+        order1.order_items.create!(product: product, sku: product.sku, name: product.name, quantity: 3, unit_price: 30)
+        order2 = make_order(channel: yampi_channel, gross_value: 100, ordered_at: period_from + 1.day, idworks_sales_channel: "shopee")
+        order2.order_items.create!(product: product, sku: product.sku, name: product.name, quantity: 2, unit_price: 30)
+
+        entry = call_service.real_skus_sold.find { |e| e[:sku] == "HID-1" }
+
+        expect(entry[:channel_breakdown]).to contain_exactly(
+          { channel: "TikTok Shop", direct_qty: 3.0, kit_qty: 0.0, quantity: 3.0, revenue: 90.0 },
+          { channel: "Shopee", direct_qty: 2.0, kit_qty: 0.0, quantity: 2.0, revenue: 60.0 }
+        )
+      end
+
+      it "attributes exploded kit-component quantity AND a proportional share of the kit's revenue to the channel of the order it was sold through" do
+        sabonete = tenant.products.create!(sku: "SABONETE", name: "Sabonete", integration: hidrabene_integration)
+        kit = tenant.products.create!(sku: "KIT044", name: "Kit", is_kit: true)
+        kit.kit_components.create!(component_product: sabonete, quantity: 2)
+
+        order = make_order(channel: yampi_channel, gross_value: 100, ordered_at: period_from + 1.day, idworks_sales_channel: "mercadolivre")
+        order.order_items.create!(product: kit, sku: kit.sku, name: kit.name, quantity: 3, unit_price: 100) # item revenue = 300
+
+        entry = call_service.real_skus_sold.find { |e| e[:sku] == "SABONETE" }
+
+        # único componente do kit -> recebe 100% da receita do item (300)
+        expect(entry[:channel_breakdown]).to eq([ { channel: "Mercado Livre", direct_qty: 0.0, kit_qty: 6.0, quantity: 6.0, revenue: 300.0 } ])
+      end
+
+      # A receita de um kit é rateada proporcionalmente à quantidade real
+      # de cada componente na explosão — não existe preço individual por
+      # componente registrado em lugar nenhum, então isto é o máximo de
+      # precisão possível (daí "Aproximada" no nome da coluna na UI).
+      it "splits a kit's revenue proportionally across multiple different components by their real quantity share" do
+        sabonete = tenant.products.create!(sku: "SABONETE", name: "Sabonete", integration: hidrabene_integration)
+        protetor = tenant.products.create!(sku: "PROTETOR", name: "Protetor", integration: hidrabene_integration)
+        kit = tenant.products.create!(sku: "KIT044", name: "Kit", is_kit: true)
+        kit.kit_components.create!(component_product: sabonete, quantity: 2)
+        kit.kit_components.create!(component_product: protetor, quantity: 1)
+
+        order = make_order(channel: yampi_channel, gross_value: 100, ordered_at: period_from + 1.day, idworks_sales_channel: "tiktok")
+        order.order_items.create!(product: kit, sku: kit.sku, name: kit.name, quantity: 1, unit_price: 90) # item revenue = 90
+
+        result = call_service.real_skus_sold
+        sabonete_entry = result.find { |e| e[:sku] == "SABONETE" }
+        protetor_entry = result.find { |e| e[:sku] == "PROTETOR" }
+
+        # sabonete: 2 de 3 unidades reais (2/3 de 90 = 60) | protetor: 1 de 3 (1/3 de 90 = 30)
+        expect(sabonete_entry[:channel_breakdown]).to eq([ { channel: "TikTok Shop", direct_qty: 0.0, kit_qty: 2.0, quantity: 2.0, revenue: 60.0 } ])
+        expect(protetor_entry[:channel_breakdown]).to eq([ { channel: "TikTok Shop", direct_qty: 0.0, kit_qty: 1.0, quantity: 1.0, revenue: 30.0 } ])
+      end
+
+      it "combines direct and kit-exploded channel quantities/revenue for the same real product in the same channel" do
+        protetor = tenant.products.create!(sku: "PROTETOR", name: "Protetor", integration: hidrabene_integration)
+        kit = tenant.products.create!(sku: "KIT044", name: "Kit", is_kit: true)
+        kit.kit_components.create!(component_product: protetor, quantity: 1)
+
+        direct_order = make_order(channel: yampi_channel, gross_value: 100, ordered_at: period_from + 1.day, idworks_sales_channel: "shopee")
+        direct_order.order_items.create!(product: protetor, sku: protetor.sku, name: protetor.name, quantity: 4, unit_price: 20) # revenue 80
+        kit_order = make_order(channel: yampi_channel, gross_value: 100, ordered_at: period_from + 1.day, idworks_sales_channel: "shopee")
+        kit_order.order_items.create!(product: kit, sku: kit.sku, name: kit.name, quantity: 2, unit_price: 20) # revenue 40, 1 componente -> 100%
+
+        entry = call_service.real_skus_sold.find { |e| e[:sku] == "PROTETOR" }
+
+        expect(entry[:channel_breakdown]).to eq([ { channel: "Shopee", direct_qty: 4.0, kit_qty: 2.0, quantity: 6.0, revenue: 120.0 } ])
+      end
+
+      # Regressão: a soma do breakdown por canal de uma linha nunca pode
+      # divergir do total_qty/direct_qty/kit_qty da mesma linha.
+      it "sums to exactly total_qty (and direct_qty/kit_qty) for every entry" do
+        sabonete = tenant.products.create!(sku: "SABONETE", name: "Sabonete", integration: hidrabene_integration)
+        kit = tenant.products.create!(sku: "KIT044", name: "Kit", is_kit: true)
+        kit.kit_components.create!(component_product: sabonete, quantity: 1)
+
+        order1 = make_order(channel: yampi_channel, gross_value: 100, ordered_at: period_from + 1.day, idworks_sales_channel: "tiktok")
+        order1.order_items.create!(product: sabonete, sku: sabonete.sku, name: sabonete.name, quantity: 5, unit_price: 20)
+        order2 = make_order(channel: yampi_channel, gross_value: 100, ordered_at: period_from + 1.day, idworks_sales_channel: nil)
+        order2.order_items.create!(product: kit, sku: kit.sku, name: kit.name, quantity: 3, unit_price: 20)
+
+        call_service.real_skus_sold.each do |entry|
+          expect(entry[:channel_breakdown].sum { |row| row[:quantity] }).to eq(entry[:total_qty])
+          expect(entry[:channel_breakdown].sum { |row| row[:direct_qty] }).to eq(entry[:direct_qty])
+          expect(entry[:channel_breakdown].sum { |row| row[:kit_qty] }).to eq(entry[:kit_qty])
+        end
+      end
+
+      it "does not mix channel breakdown across the loja filter — each entry's own real component channel split" do
+        hidrabene_product = tenant.products.create!(sku: "HID-1", name: "Hidrabene", integration: hidrabene_integration)
+        anasol_product = tenant.products.create!(sku: "ANA-1", name: "Anasol", integration: anasol_integration)
+
+        hid_order = make_order(channel: yampi_channel, gross_value: 100, ordered_at: period_from + 1.day, idworks_sales_channel: "tiktok")
+        hid_order.order_items.create!(product: hidrabene_product, sku: hidrabene_product.sku, name: hidrabene_product.name, quantity: 2, unit_price: 50)
+        ana_order = make_order(channel: yampi_channel, gross_value: 100, ordered_at: period_from + 1.day, idworks_sales_channel: "shopee")
+        ana_order.order_items.create!(product: anasol_product, sku: anasol_product.sku, name: anasol_product.name, quantity: 4, unit_price: 25)
+
+        hidrabene_result = call_service(loja: "hidrabene").real_skus_sold
+
+        expect(hidrabene_result.map { |e| e[:sku] }).to eq([ "HID-1" ])
+        expect(hidrabene_result.first[:channel_breakdown]).to eq([ { channel: "TikTok Shop", direct_qty: 2.0, kit_qty: 0.0, quantity: 2.0, revenue: 100.0 } ])
+      end
+    end
   end
 
   describe "orders_timeseries" do
