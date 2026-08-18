@@ -1474,8 +1474,12 @@ module Dashboard
         .where(action: "idworks_order_sync")
         .order(created_at: :desc)
         .first
-      order_ids_with_items = non_gift_items.distinct.pluck(:order_id)
-      missing_item_order_ids = scope.where.not(id: order_ids_with_items).pluck(:id)
+      # Passa a relação pra where.not (subquery no SQL), não um array
+      # materializado — com dezenas de milhares de pedidos no período,
+      # .pluck(:order_id) antes do where.not vira um WHERE id NOT IN
+      # (literal de dezenas de milhares de inteiros), muito mais lento pro
+      # Postgres planejar/executar que a mesma comparação como subquery.
+      missing_item_order_ids = scope.where.not(id: non_gift_items.select(:order_id)).pluck(:id)
       missing_cost_order_ids = (missing_item_order_ids + non_gift_items
         .where("order_items.product_id IS NULL OR order_items.unit_cost IS NULL OR order_items.unit_cost <= 0")
         .distinct
