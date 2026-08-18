@@ -159,6 +159,7 @@ Rails.application.routes.draw do
 
       # Dashboard
       get "dashboard/summary",   to: "dashboard#summary"
+      get "dashboard/summary_extended", to: "dashboard#summary_extended"
       get "dashboard/financial", to: "dashboard#financial"
       get "dashboard/freight_orders", to: "dashboard#freight_orders"
       get "dashboard/tiktok_orders", to: "dashboard#tiktok_orders"

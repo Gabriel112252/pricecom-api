@@ -39,8 +39,18 @@ module Api
         "7_12" => { label: "Parcelado 7-12x", range: 7..12 }
       }.freeze
 
+      # Tier rápido — Visão Geral (KPIs, receita, canal, mapa). Ver
+      # Dashboard::BuildSummary#call_overview.
       def summary
-        render json: Dashboard::BuildSummary.call(tenant: current_tenant, params: params)
+        render json: Dashboard::BuildSummary.call_overview(tenant: current_tenant, params: params)
+      end
+
+      # GET /api/v1/dashboard/summary_extended — tier lento, buscado à parte
+      # pelo frontend depois que #summary já pintou a tela (mesmo padrão de
+      # carregamento em duas etapas do kanban do ScrumFlow: estrutura rápida
+      # primeiro, conteúdo pesado depois, sem travar a primeira pintura).
+      def summary_extended
+        render json: Dashboard::BuildSummary.call_extended(tenant: current_tenant, params: params)
       end
 
       # GET /api/v1/dashboard/freight_orders — per-order freight comparison

@@ -59,12 +59,41 @@ module Dashboard
       new(tenant: tenant, params: params).call
     end
 
+    # Tier rápido — GET /dashboard/summary. Só o que a aba Visão Geral
+    # (sempre visível ao abrir o dashboard) precisa pra pintar algo útil:
+    # KPIs, card de receita, gráfico de receita/pedidos, vendas por canal,
+    # mapa regional. data_quality/coupons entram aqui mesmo sendo usados
+    # por outras abas também — build_kpis depende deles pra calcular margem
+    # de contribuição/desconto, então não têm como ficar só no tier lento
+    # sem quebrar os KPIs.
+    def self.call_overview(tenant:, params:)
+      new(tenant: tenant, params: params).call_overview
+    end
+
+    # Tier lento — GET /dashboard/summary_extended. O resto: gráficos e
+    # tabelas das abas Vendas/Descontos & Cupons/Produtos/Financeiro
+    # (consolidado)/Saúde Operacional, que não bloqueiam a primeira pintura
+    # da tela. Recalcula period/orders_scope/current_totals/data_quality
+    # de novo (chamada HTTP separada, sem estado compartilhado com
+    # call_overview) — o mesmo trade-off do padrão colunas→tasks do
+    # ScrumFlow: um pouco de trabalho duplicado em troca de não bloquear a
+    # resposta rápida atrás do lote pesado.
+    def self.call_extended(tenant:, params:)
+      new(tenant: tenant, params: params).call_extended
+    end
+
     def initialize(tenant:, params:)
       @tenant = tenant
       @params = params
     end
 
+    # Mantido pra quem precisa do payload completo numa tacada só (specs
+    # existentes, TvDashboard) — só une os dois tiers, sem lógica própria.
     def call
+      call_overview.merge(call_extended)
+    end
+
+    def call_overview
       period      = resolve_period
       granularity = resolve_granularity(period)
 
@@ -86,19 +115,35 @@ module Dashboard
         kpis:                     build_kpis(current_totals, prev_totals, data_quality, coupons, regional_sales).merge(exclusions),
         overview_financial_coverage: build_overview_financial_coverage(current_totals, prev_totals),
         revenue_breakdown:        build_revenue_breakdown(period, current_totals, prev_totals),
-        financial_composition:    build_financial_composition(current_totals, data_quality),
         revenue_timeline:         build_revenue_timeline(period_rows, granularity),
         sales_by_channel:         build_sales_by_channel(orders_scope, current_totals),
         regional_sales:           regional_sales,
         coupons:                  coupons,
+        data_sources:             build_data_sources,
+        data_quality:             data_quality
+      }
+    end
+
+    def call_extended
+      period      = resolve_period
+      granularity = resolve_granularity(period)
+
+      orders_scope = financial_orders(orders_in_period(period))
+      prev_scope   = financial_orders(orders_in_period(previous_period(period)))
+
+      current_totals = period_totals(orders_scope, period)
+      prev_totals    = period_totals(prev_scope, previous_period(period))
+      period_rows    = revenue_rows(orders_scope, granularity)
+      data_quality   = build_data_quality(orders_scope)
+
+      {
+        financial_composition:    build_financial_composition(current_totals, data_quality),
         discount_ticket_summary:  build_discount_ticket_summary(orders_scope),
         product_discount_exposure: build_product_discount_exposure(orders_scope),
         revenue:                  build_revenue(orders_scope, period_rows, granularity, current_totals, prev_totals),
         financial:                build_financial(orders_scope, current_totals, prev_totals, data_quality, period, granularity),
         margin:                   build_margin(period_rows, granularity, current_totals, prev_totals, data_quality),
         orders:                   build_orders(orders_scope, granularity, current_totals, prev_totals),
-        data_sources:             build_data_sources,
-        data_quality:             data_quality,
         conflicts:                build_conflicts,
         reconciliation:           build_reconciliation(period),
         cart_abandonment:         build_cart_abandonment(period),
