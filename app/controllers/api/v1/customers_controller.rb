@@ -15,6 +15,10 @@ module Api
         render json: Customers::Rfm.call(tenant: current_tenant)
       end
 
+      def cohorts
+        render json: Customers::Cohorts.call(tenant: current_tenant)
+      end
+
       def export
         export_params = params.to_unsafe_h.merge("page" => 1, "per_page" => Customers::BaseQuery::MAX_PER_PAGE)
         first_page = Customers::BaseQuery.call(tenant: current_tenant, params: export_params)
@@ -29,7 +33,7 @@ module Api
           rows.concat(payload[:rows])
         end
 
-        csv = CSV.generate(headers: true) do |out|
+        csv = "\uFEFF" + CSV.generate(headers: true, col_sep: ";") do |out|
           out << [
             "Nome", "E-mail", "UF", "Pedidos", "Valor total", "Ticket médio",
             "Primeira compra", "Última compra", "Dias sem comprar", "Canal de entrada",
