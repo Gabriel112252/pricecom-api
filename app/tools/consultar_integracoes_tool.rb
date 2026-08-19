@@ -24,9 +24,12 @@ class ConsultarIntegracoesTool < ApplicationTool
     credentials = tenant.channel_credentials
     credentials = credentials.where("LOWER(channel) = ?", provider.downcase) if provider.present?
 
+    integrations = integrations.to_a
+    credentials = credentials.to_a
+
     {
-      integracoes: integrations.order(:provider, :name).map { |integration| integration_payload(integration) },
-      credenciais_de_canal: credentials.order(:channel).map { |credential| credential_payload(credential) },
+      integracoes: integrations.sort_by { |integration| [ integration.provider.to_s, integration.name.to_s ] }.map { |integration| integration_payload(integration) },
+      credenciais_de_canal: credentials.sort_by { |credential| credential.channel.to_s }.map { |credential| credential_payload(credential) },
       fontes_de_dados: tenant.data_source_configs.order(:data_type).map do |config|
         {
           tipo: config.data_type,
@@ -35,8 +38,8 @@ class ConsultarIntegracoesTool < ApplicationTool
           atualizado_em: config.updated_at
         }
       end,
-      eventos_recentes: recent_events(tenant, integrations, credentials, max),
-      logs_recentes: recent_logs(tenant, integrations, credentials, max)
+      eventos_recentes: recent_events(tenant, integrations, credentials, provider, max),
+      logs_recentes: recent_logs(tenant, integrations, credentials, provider, max)
     }
   end
 
@@ -69,15 +72,16 @@ class ConsultarIntegracoesTool < ApplicationTool
     }
   end
 
-  def recent_events(tenant, integrations, credentials, limit)
+  def recent_events(tenant, integrations, credentials, provider, limit)
     scope = tenant.integration_events
     integration_ids = integrations.map(&:id)
 
-    if integration_ids.any?
+    if provider.present? && integration_ids.empty? && credentials.empty?
+      return []
+    elsif integration_ids.any?
       scope = scope.where(integration_id: integration_ids)
     elsif credentials.any?
-      providers = credentials.map(&:channel)
-      scope = scope.where(provider: providers)
+      scope = scope.where(provider: credentials.map(&:channel))
     end
 
     scope.order(created_at: :desc).limit(limit).map do |event|
@@ -97,10 +101,14 @@ class ConsultarIntegracoesTool < ApplicationTool
     end
   end
 
-  def recent_logs(tenant, integrations, credentials, limit)
+  def recent_logs(tenant, integrations, credentials, provider, limit)
     scope = tenant.integration_sync_logs
     integration_ids = integrations.map(&:id)
     credential_ids = credentials.map(&:id)
+
+    if provider.present? && integration_ids.empty? && credential_ids.empty?
+      return []
+    end
 
     if integration_ids.any? || credential_ids.any?
       clauses = []
@@ -116,7 +124,7 @@ class ConsultarIntegracoesTool < ApplicationTool
         binds[:credential_ids] = credential_ids
       end
 
-      scope = scope.where(clauses.join(" OR "), **binds)
+      scope = scope.where(clauses.join(" OR "), binds)
     end
 
     scope.order(created_at: :desc).limit(limit).map do |log|
