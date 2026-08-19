@@ -152,7 +152,7 @@ pagarme_payable_sync:
 # cheios para dar tempo dos syncs externos terminarem. Pendencias de custo e
 # reconciliacao IDWorks podem disparar refresh extraordinario, limitado a 1x/h.
 operational_conflicts_reconciliation:
-  cron: "7,37 * * * *"
+  cron: "7,22,37,52 * * * *"
   class: "Audits::ReconcileOpenConflictsJob"
   queue: integrations
 
