@@ -4,6 +4,11 @@ module Api
       PER_PAGE_DEFAULT = 50
       PER_PAGE_MAX     = 100
 
+      # Tipos temporariamente desativados como pendencia operacional. Eles
+      # continuam acessiveis quando filtrados explicitamente e no historico,
+      # mas nao entram na fila aberta padrao nem nos seus contadores.
+      DISABLED_DEFAULT_CONFLICT_TYPES = %w[missing_cost].freeze
+
       SEVERITY_ORDER_SQL = <<~SQL.squish
         CASE audit_conflicts.severity
           WHEN 'critical' THEN 0
@@ -64,10 +69,15 @@ module Api
         except = Array(except)
 
         scope = scope.where(status:        params[:status])        if params[:status].present? && !except.include?(:status)
-        scope = scope.where(conflict_type: params[:conflict_type])  if params[:conflict_type].present?
-        scope = scope.where(severity:      params[:severity])       if params[:severity].present?
-        scope = scope.where(order_id:      params[:order_id])       if params[:order_id].present?
-        scope = scope.where(product_id:    params[:product_id])     if params[:product_id].present?
+        scope = scope.where(conflict_type: params[:conflict_type]) if params[:conflict_type].present?
+
+        if params[:conflict_type].blank? && active_queue_request?
+          scope = scope.where.not(conflict_type: DISABLED_DEFAULT_CONFLICT_TYPES)
+        end
+
+        scope = scope.where(severity:   params[:severity])   if params[:severity].present?
+        scope = scope.where(order_id:   params[:order_id])   if params[:order_id].present?
+        scope = scope.where(product_id: params[:product_id]) if params[:product_id].present?
 
         scope = scope.where("audit_conflicts.created_at >= ?", params[:date_from]) if params[:date_from].present?
         scope = scope.where("audit_conflicts.created_at <= ?", params[:date_to])   if params[:date_to].present?
@@ -87,6 +97,10 @@ module Api
         end
 
         scope
+      end
+
+      def active_queue_request?
+        params[:status].blank? || params[:status] == "open"
       end
 
       def status_counts(scoped)
