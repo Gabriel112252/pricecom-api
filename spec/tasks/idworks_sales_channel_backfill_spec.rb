@@ -79,12 +79,29 @@ RSpec.describe "idworks:backfill_sales_channel rake task" do
     expect(matching_order.real_freight_cost).to be_nil # não tocou frete
   end
 
-  it "skips a tenant that doesn't have exactly one idworks integration, without raising" do
+  it "skips a tenant that has no idworks integration, without raising" do
     ENV["APPLY"] = "1"
     ENV["TENANT_SLUG"] = tenant.slug
     ENV["FROM"] = "2026-08-01"
     ENV["TO"] = "2026-08-02"
 
     expect { invoke }.to output(/PULADO/).to_stdout
+  end
+
+  it "processes tenants with more than one idworks integration" do
+    integration
+    tenant.integrations.create!(
+      provider: "idworks", name: "idworks Anasol", status: "connected",
+      credentials: { base_url: "https://cliente.idworks.com.br/1.0", email: "anasol@example.com", password: "secret" }
+    )
+    stub_idworks_orders([ { "IDOrder" => 88001, "Order" => "555001", "SalesChannelLogoUrl" => "https://cdn.idworks.com.br/logo/shopee.png" } ])
+
+    ENV["APPLY"] = "1"
+    ENV["TENANT_SLUG"] = tenant.slug
+    ENV["FROM"] = "2026-08-01"
+    ENV["TO"] = "2026-08-02"
+
+    expect { invoke }.to output(/idworks Anasol/).to_stdout
+    expect(matching_order.reload.idworks_sales_channel).to eq("shopee")
   end
 end

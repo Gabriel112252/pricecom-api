@@ -28,12 +28,11 @@ namespace :idworks do
     puts apply ? "Modo: APLICANDO" : "Modo: DRY-RUN (nada será alterado — rode com APPLY=1 pra aplicar)"
 
     tenants.each do |tenant|
-      integrations = tenant.integrations.where(provider: "idworks")
-      if integrations.count != 1
-        puts "[#{tenant.slug}] PULADO — #{integrations.count} integration(s) idworks (esperado exatamente 1); rodar manualmente."
+      integrations = tenant.integrations.where(provider: "idworks").to_a
+      if integrations.empty?
+        puts "[#{tenant.slug}] PULADO — nenhuma integration idworks encontrada."
         next
       end
-      integration = integrations.first
 
       from = ENV["FROM"].presence ? Time.zone.parse(ENV["FROM"]) : (tenant.orders.minimum(:ordered_at) || 30.days.ago)
       to   = ENV["TO"].presence ? Time.zone.parse(ENV["TO"]) : Time.current
@@ -43,52 +42,54 @@ namespace :idworks do
         next
       end
 
-      adapter  = Integrations::IdworksAdapter.new(integration.credentials)
-      adapter.authenticate
-      resolver = Integrations::Idworks::OrderResolver.new(tenant: tenant, integration: integration)
+      integrations.each do |integration|
+        adapter  = Integrations::IdworksAdapter.new(integration.credentials)
+        adapter.authenticate
+        resolver = Integrations::Idworks::OrderResolver.new(tenant: tenant, integration: integration)
 
-      received_count = 0
-      matched_count = 0
-      unmatched_count = 0
-      no_channel_in_payload_count = 0
-      updated_count = 0
+        received_count = 0
+        matched_count = 0
+        unmatched_count = 0
+        no_channel_in_payload_count = 0
+        updated_count = 0
 
-      window_start = from
-      while window_start < to
-        window_end = [ window_start + window_days.days, to ].min
+        window_start = from
+        while window_start < to
+          window_end = [ window_start + window_days.days, to ].min
 
-        adapter.fetch_orders(from: window_start, to: window_end).each do |raw_order|
-          received_count += 1
-          resolution = resolver.resolve(raw_order)
+          adapter.fetch_orders(from: window_start, to: window_end).each do |raw_order|
+            received_count += 1
+            resolution = resolver.resolve(raw_order)
 
-          unless resolution[:order]
-            unmatched_count += 1
-            next
+            unless resolution[:order]
+              unmatched_count += 1
+              next
+            end
+
+            matched_count += 1
+            order = resolution[:order]
+            slug = raw_order[:sales_channel_slug]
+
+            if slug.blank?
+              no_channel_in_payload_count += 1
+              next
+            end
+
+            next if order.idworks_sales_channel == slug
+
+            updated_count += 1
+            order.update_column(:idworks_sales_channel, slug) if apply
           end
 
-          matched_count += 1
-          order = resolution[:order]
-          slug = raw_order[:sales_channel_slug]
-
-          if slug.blank?
-            no_channel_in_payload_count += 1
-            next
-          end
-
-          next if order.idworks_sales_channel == slug
-
-          updated_count += 1
-          order.update_column(:idworks_sales_channel, slug) if apply
+          window_start = window_end
+          sleep(sleep_between_windows) if sleep_between_windows.positive? && window_start < to
         end
 
-        window_start = window_end
-        sleep(sleep_between_windows) if sleep_between_windows.positive? && window_start < to
+        puts "[#{tenant.slug}/#{integration.name}] janela #{from.to_date}..#{to.to_date} — recebidos: #{received_count}, " \
+             "casados com pedido Pricecom: #{matched_count}, não casados: #{unmatched_count}, " \
+             "sem canal no payload: #{no_channel_in_payload_count}, " \
+             "#{apply ? 'atualizados' : 'a atualizar'}: #{updated_count}"
       end
-
-      puts "[#{tenant.slug}] janela #{from.to_date}..#{to.to_date} — recebidos: #{received_count}, " \
-           "casados com pedido Pricecom: #{matched_count}, não casados: #{unmatched_count}, " \
-           "sem canal no payload: #{no_channel_in_payload_count}, " \
-           "#{apply ? 'atualizados' : 'a atualizar'}: #{updated_count}"
     end
   end
 end
