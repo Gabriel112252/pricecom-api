@@ -100,8 +100,10 @@ Rails.application.routes.draw do
       # Integration Sync Logs (read-only)
       resources :integration_sync_logs, only: [ :index, :show ]
 
-      # Audit Conflicts
-      resources :audit_conflicts, only: [ :index, :show, :update ]
+      # Audit Conflicts + ações operacionais específicas.
+      resources :audit_conflicts, only: [ :index, :show, :update ] do
+        post :reprocess, on: :member
+      end
 
       # Financial Sources
       resources :financial_sources, only: [ :index, :show ]
