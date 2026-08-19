@@ -19,7 +19,6 @@ module Customers
             GREATEST(
               COALESCE(o.gross_value, 0)
               - COALESCE(o.discount, 0)
-              - COALESCE(o.freight, 0)
               - COALESCE(o.refund_amount, 0),
               0
             )::numeric AS net_product_value
