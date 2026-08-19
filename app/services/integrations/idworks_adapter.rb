@@ -15,9 +15,11 @@ module Integrations
   #     bare array, common wrappers such as Data/Items/Records/Results, and
   #     nested paginated objects, while logging the real envelope safely in
   #     IntegrationSyncLog metadata for confirmation.
-  #   - DateFrom/DateTo's exact format/timezone for GET /orders — assumed
-  #     full ISO8601 timestamps (a date-only filter would be useless for
-  #     OrderSyncService's 2-hour polling window).
+  # RESOLVED 2026-08-19: GET /orders expects DateFrom/DateTo as plain
+  # YYYY-MM-DD values. Sending full ISO8601 timestamps is accepted with HTTP
+  # 200 but causes the endpoint to ignore the filter and return huge pages
+  # from the whole history, which made the sales-channel backfill appear
+  # stuck.
   #   - every field name in #normalize_order (Order/IDOrder/ValueShipping/
   #     etc.) — same as the sku field below, these came from the Swagger
   #     spec, never checked against a real /orders payload. Given the sku
@@ -229,7 +231,7 @@ module Integrations
 
       loop do
         body = with_rate_limit_retry do
-          client.get("orders", "Page" => page, "DateFrom" => from.iso8601, "DateTo" => to.iso8601)
+          client.get("orders", "Page" => page, "DateFrom" => from.to_date.iso8601, "DateTo" => to.to_date.iso8601)
         end
         collection = extract_collection(body)
         items = collection[:items]

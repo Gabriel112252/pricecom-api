@@ -125,7 +125,7 @@ RSpec.describe Integrations::IdworksAdapter do
       stub_signin
       # Same 0-indexed Page param as #fetch_products.
       stub_request(:get, orders_url)
-        .with(query: hash_including("Page" => "0", "DateFrom" => "2026-06-01T00:00:00Z", "DateTo" => "2026-06-01T02:00:00Z"))
+        .with(query: hash_including("Page" => "0", "DateFrom" => "2026-06-01", "DateTo" => "2026-06-01"))
         .to_return(status: 200, body: orders_fixture, headers: { "Content-Type" => "application/json" })
       stub_request(:get, orders_url).with(query: hash_including("Page" => "1"))
         .to_return(status: 200, body: { "Data" => [] }.to_json, headers: { "Content-Type" => "application/json" })
@@ -134,6 +134,17 @@ RSpec.describe Integrations::IdworksAdapter do
     it "requests the first page as Page=0, not Page=1" do
       adapter.fetch_orders(from: Time.utc(2026, 6, 1, 0, 0, 0), to: Time.utc(2026, 6, 1, 2, 0, 0))
       expect(WebMock).to have_requested(:get, orders_url).with(query: hash_including("Page" => "0"))
+    end
+
+    it "uses plain dates so idworks applies the server-side period filter" do
+      adapter.fetch_orders(from: Time.utc(2026, 6, 1, 0, 0, 0), to: Time.utc(2026, 6, 1, 2, 0, 0))
+
+      expect(WebMock).to have_requested(:get, orders_url).with(
+        query: hash_including("Page" => "0", "DateFrom" => "2026-06-01", "DateTo" => "2026-06-01")
+      )
+      expect(WebMock).not_to have_requested(:get, orders_url).with(
+        query: hash_including("DateFrom" => "2026-06-01T00:00:00Z")
+      )
     end
 
     it "returns order_ref/idworks_order_id/value_shipping and related value fields" do
@@ -152,7 +163,7 @@ RSpec.describe Integrations::IdworksAdapter do
     describe "sales_channel_slug (SalesChannelLogoUrl)" do
       def orders_with_logo_url(url)
         stub_request(:get, orders_url)
-          .with(query: hash_including("Page" => "0", "DateFrom" => "2026-06-01T00:00:00Z", "DateTo" => "2026-06-01T02:00:00Z"))
+          .with(query: hash_including("Page" => "0", "DateFrom" => "2026-06-01", "DateTo" => "2026-06-01"))
           .to_return(status: 200, body: [ { "IDOrder" => 1, "Order" => "N1", "SalesChannelLogoUrl" => url } ].to_json, headers: { "Content-Type" => "application/json" })
 
         adapter.fetch_orders(from: Time.utc(2026, 6, 1, 0, 0, 0), to: Time.utc(2026, 6, 1, 2, 0, 0)).first[:sales_channel_slug]
