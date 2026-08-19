@@ -6,7 +6,12 @@ module Integrations
       queue_as :integrations
 
       retry_on Integrations::Tiktok::FinancialSyncLock::LockLostError, wait: 1.minute, attempts: 5
-      retry_on Integrations::Tiktok::FinancialSyncLock::LockBusyError, wait: 2.minutes, attempts: 10
+      # LockBusyError is an expected coordination signal: another financial
+      # sync for the same credential already owns the Redis lock. Retrying it
+      # here only creates a retry storm (and, after ActiveJob exhausts its
+      # attempts, hands the same exception to Sidekiq's retry mechanism).
+      # perform rescues it below and exits cleanly instead.
+      #
       # Rede de segurança mínima: no caminho normal, RateLimitError não
       # escapa mais de PendingFinancialSyncService#call — quem reagenda a
       # continuação do batch é schedule_pending_continuation, abaixo, via
@@ -47,6 +52,11 @@ module Integrations
           run_id: run_id || job_id,
           wait_seconds: pending_wait_seconds(result.metadata)
         ) if result.metadata.to_h["pending_count"].to_i.positive?
+      rescue Integrations::Tiktok::FinancialSyncLock::LockBusyError => e
+        Rails.logger.info(
+          "[TikTok] pending financial sync skipped credential=#{channel_credential_id} job_id=#{job_id}: #{e.message}"
+        )
+        nil
       end
 
       private
