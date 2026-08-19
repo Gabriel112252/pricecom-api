@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "set"
+
 module OperationalAlerts
   class YampiIdworksIssuesSyncJob < ApplicationJob
     queue_as :integrations
