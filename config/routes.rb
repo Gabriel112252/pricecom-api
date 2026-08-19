@@ -189,6 +189,7 @@ Rails.application.routes.draw do
         collection do
           get :overview
           get :rfm
+          get :cohorts
           get :export
         end
       end
