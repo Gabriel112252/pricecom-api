@@ -9,6 +9,11 @@ module Api
       # mas nao entram na fila aberta padrao nem nos seus contadores.
       DISABLED_DEFAULT_CONFLICT_TYPES = %w[missing_cost].freeze
 
+      # Alertas de comportamento pertencem a Operacao, nao a tela de Auditoria.
+      # Internamente reaproveitam AuditConflict para ciclo open/resolved e
+      # historico sem exigir uma segunda infraestrutura de alertas.
+      OPERATIONAL_ONLY_CONFLICT_TYPES = %w[order_volume_drop sku_volume_drop].freeze
+
       SEVERITY_ORDER_SQL = <<~SQL.squish
         CASE audit_conflicts.severity
           WHEN 'critical' THEN 0
@@ -71,8 +76,11 @@ module Api
         scope = scope.where(status:        params[:status])        if params[:status].present? && !except.include?(:status)
         scope = scope.where(conflict_type: params[:conflict_type]) if params[:conflict_type].present?
 
-        if params[:conflict_type].blank? && active_queue_request?
-          scope = scope.where.not(conflict_type: DISABLED_DEFAULT_CONFLICT_TYPES)
+        if params[:conflict_type].blank?
+          excluded_types = []
+          excluded_types.concat(DISABLED_DEFAULT_CONFLICT_TYPES) if active_queue_request?
+          excluded_types.concat(OPERATIONAL_ONLY_CONFLICT_TYPES) unless operational_queue_request?
+          scope = scope.where.not(conflict_type: excluded_types) if excluded_types.any?
         end
 
         scope = scope.where(severity:   params[:severity])   if params[:severity].present?
@@ -101,6 +109,10 @@ module Api
 
       def active_queue_request?
         params[:status].blank? || params[:status] == "open"
+      end
+
+      def operational_queue_request?
+        params[:operational_queue].to_s == "true"
       end
 
       def status_counts(scoped)
@@ -137,7 +149,9 @@ module Api
           actual_value:     conflict.actual_value,
           difference:       conflict.difference,
           source:           conflict.source,
+          metadata:         conflict.metadata,
           created_at:       conflict.created_at,
+          updated_at:       conflict.updated_at,
           resolved_at:      conflict.resolved_at,
           resolved_by_id:   conflict.resolved_by_id,
           resolved_by_name: conflict.resolved_by&.name
@@ -147,7 +161,6 @@ module Api
       def show_json(conflict)
         index_json(conflict).merge(
           notes:    conflict.notes,
-          metadata: conflict.metadata,
           order:    order_summary(conflict.order),
           product:  product_summary(conflict.product)
         )
