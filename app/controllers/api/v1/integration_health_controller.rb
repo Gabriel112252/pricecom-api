@@ -18,6 +18,7 @@ module Api
                          .where(integration_id: integration.id)
 
         last_event_at         = events_scope.maximum(:created_at)
+        last_event_error_at   = events_scope.where(status: "error").maximum(:updated_at)
         last_success_at       = logs_scope.where(status: "success").maximum(:finished_at)
         last_error_at         = logs_scope.where(status: "error").maximum(:finished_at)
         events_pending_count  = events_scope.where(status: "pending").count
@@ -28,31 +29,40 @@ module Api
                                           .where("created_at >= ?", since_24h).count
 
         {
-          id:                   integration.id,
-          provider:             integration.provider,
-          name:                 integration.name,
-          status:               integration.status,
-          channel_id:           integration.channel_id,
-          channel_name:         integration.channel&.name,
-          last_synced_at:       integration.last_synced_at,
-          last_event_at:        last_event_at,
-          last_success_at:      last_success_at,
-          last_error_at:        last_error_at,
-          events_pending_count: events_pending_count,
-          events_error_count:   events_error_count,
+          id:                    integration.id,
+          provider:              integration.provider,
+          name:                  integration.name,
+          status:                integration.status,
+          channel_id:            integration.channel_id,
+          channel_name:          integration.channel&.name,
+          last_synced_at:        integration.last_synced_at,
+          last_event_at:         last_event_at,
+          last_event_error_at:   last_event_error_at,
+          last_success_at:       last_success_at,
+          last_error_at:         last_error_at,
+          events_pending_count:  events_pending_count,
+          events_error_count:    events_error_count,
           logs_success_last_24h: logs_success_last_24h,
           logs_error_last_24h:   logs_error_last_24h,
-          health_status:        resolve_health_status(
-            logs_error_last_24h:  logs_error_last_24h,
-            events_error_count:   events_error_count,
+          health_status:         resolve_health_status(
             events_pending_count: events_pending_count,
-            last_success_at:      last_success_at
+            last_success_at:      last_success_at,
+            last_error_at:        last_error_at,
+            last_event_error_at:  last_event_error_at
           )
         }
       end
 
-      def resolve_health_status(logs_error_last_24h:, events_error_count:, events_pending_count:, last_success_at:)
-        return "error"   if logs_error_last_24h > 0 || events_error_count > 0
+      # Um erro histórico não mantém a integração vermelha para sempre.
+      # O estado é "error" somente quando a falha mais recente aconteceu
+      # depois do último sync bem-sucedido (ou quando nunca houve sucesso).
+      def resolve_health_status(events_pending_count:, last_success_at:, last_error_at:, last_event_error_at:)
+        latest_failure_at = [ last_error_at, last_event_error_at ].compact.max
+
+        if latest_failure_at.present? && (last_success_at.blank? || latest_failure_at > last_success_at)
+          return "error"
+        end
+
         return "pending" if events_pending_count > 0
         return "healthy" if last_success_at.present?
         "idle"
