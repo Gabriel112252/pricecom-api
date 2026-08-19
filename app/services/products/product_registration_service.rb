@@ -208,7 +208,7 @@ module Products
     def parse_price_cents(value)
       return nil if value.blank?
 
-      parsed = Integer(value, 10)
+      parsed = value.is_a?(Integer) ? value : Integer(value.to_s, 10)
       raise ValidationError, [ "Preço inválido." ] if parsed.negative?
 
       parsed
