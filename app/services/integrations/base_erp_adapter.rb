@@ -26,10 +26,10 @@ module Integrations
       raise NotImplementedError, "#{self.class} must implement #fetch_products"
     end
 
-    # Returns an Array of { order_ref:, idworks_order_id:, value_shipping:,
-    # value_product:, value_order:, value_paid: } for orders in [from, to] —
-    # the ERP's real shipping cost per order (see
-    # Integrations::Idworks::OrderSyncService).
+    # Returns an Array of { order_ref:, idworks_order_id:, recorded_at:,
+    # value_shipping:, value_product:, value_order:, value_paid: } for orders
+    # in [from, to] — the ERP's real shipping cost per order and independent
+    # comparison snapshot (see Integrations::Idworks::OrderSyncService).
     def fetch_orders(from:, to:)
       raise NotImplementedError, "#{self.class} must implement #fetch_orders"
     end

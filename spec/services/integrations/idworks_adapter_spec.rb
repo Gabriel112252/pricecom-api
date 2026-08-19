@@ -152,8 +152,24 @@ RSpec.describe Integrations::IdworksAdapter do
 
       raw_keys = %w[IDOrder Order ValueProduct ValueOrder ValueShipping ValuePaid]
       expect(orders).to contain_exactly(
-        { order_ref: "555001", idworks_order_id: "88001", value_shipping: BigDecimal("15.30"), value_product: BigDecimal("180.00"), value_order: BigDecimal("199.90"), value_paid: BigDecimal("199.90"), sales_channel_slug: nil, raw_keys: raw_keys },
-        { order_ref: "555999-NOT-IN-PRICECOM", idworks_order_id: "88002", value_shipping: BigDecimal("0"), value_product: BigDecimal("29.90"), value_order: BigDecimal("29.90"), value_paid: BigDecimal("29.90"), sales_channel_slug: nil, raw_keys: raw_keys }
+        { order_ref: "555001", idworks_order_id: "88001", recorded_at: nil, status_order: nil, id_status_order: nil, value_shipping: BigDecimal("15.30"), value_product: BigDecimal("180.00"), value_order: BigDecimal("199.90"), value_paid: BigDecimal("199.90"), sales_channel_slug: nil, raw_keys: raw_keys },
+        { order_ref: "555999-NOT-IN-PRICECOM", idworks_order_id: "88002", recorded_at: nil, status_order: nil, id_status_order: nil, value_shipping: BigDecimal("0"), value_product: BigDecimal("29.90"), value_order: BigDecimal("29.90"), value_paid: BigDecimal("29.90"), sales_channel_slug: nil, raw_keys: raw_keys }
+      )
+    end
+
+    it "extracts the IDWorks record timestamp and status fields" do
+      stub_request(:get, orders_url)
+        .with(query: hash_including("Page" => "0", "DateFrom" => "2026-06-01", "DateTo" => "2026-06-01"))
+        .to_return(status: 200, body: [
+          { "IDOrder" => 88001, "Order" => "555001", "Recordtimestamp" => "2026-06-01T12:34:56.000Z", "IDStatusOrder" => 1, "StatusOrder" => "Fechado" }
+        ].to_json, headers: { "Content-Type" => "application/json" })
+
+      order = adapter.fetch_orders(from: Time.utc(2026, 6, 1), to: Time.utc(2026, 6, 1, 2)).first
+
+      expect(order).to include(
+        recorded_at: Time.utc(2026, 6, 1, 12, 34, 56),
+        status_order: "Fechado",
+        id_status_order: 1
       )
     end
 

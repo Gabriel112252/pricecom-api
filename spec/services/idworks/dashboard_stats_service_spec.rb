@@ -42,6 +42,30 @@ RSpec.describe Idworks::DashboardStatsService do
     end
   end
 
+  describe "the independent IDWorks comparison source" do
+    it "includes ERP orders that have no corresponding Pricecom order" do
+      now = Time.utc(2026, 8, 3, 12)
+      IdworksOrder.create!(
+        tenant: tenant, integration: hidrabene_integration, external_id: "88001",
+        order_number: "ERP-ONLY-1", recorded_at: now, sales_channel_slug: "mercadolivre",
+        value_order: 200, last_seen_at: now
+      )
+      IdworksOrder.create!(
+        tenant: tenant, integration: hidrabene_integration, external_id: "88002",
+        order_number: "ERP-ONLY-2", recorded_at: now + 1.hour, sales_channel_slug: "shopee",
+        value_order: 100, last_seen_at: now
+      )
+
+      result = call_service
+
+      expect(result.orders_count).to eq(0)
+      expect(result.idworks_orders_count).to eq(2)
+      expect(result.idworks_revenue_total).to eq(300.0)
+      expect(result.idworks_average_ticket).to eq(150.0)
+      expect(result.idworks_channel_breakdown.map { |row| row[:channel] }).to contain_exactly("Mercado Livre", "Shopee")
+    end
+  end
+
   describe "loja filter" do
     it "narrows orders to only those whose items include a product from that loja's integration" do
       hidrabene_product = tenant.products.create!(sku: "HID-1", name: "Produto Hidrabene", integration: hidrabene_integration)

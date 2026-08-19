@@ -25,7 +25,7 @@ module Idworks
     UNMAPPED_LOJA_KEY = "nao_identificado".freeze
     TOP_PRODUCTS_LIMIT = 10
 
-    # channel_breakdown (só nesta aba — as outras continuam via
+    # Pricecom's channel_breakdown (só nesta aba — as outras continuam via
     # channels.platform, a integração própria do Pricecom, que não cobre
     # canal sem integração direta como Mercado Livre) agrupa por
     # orders.idworks_sales_channel em vez de channels.name. Esse campo vem
@@ -56,6 +56,8 @@ module Idworks
     Result = Struct.new(
       :revenue_total, :orders_count, :average_ticket, :revenue_by_loja,
       :orders_timeseries, :top_products, :channel_breakdown, :real_skus_sold,
+      :idworks_revenue_total, :idworks_orders_count, :idworks_average_ticket,
+      :idworks_revenue_by_loja, :idworks_orders_timeseries, :idworks_channel_breakdown,
       keyword_init: true
     )
 
@@ -79,7 +81,13 @@ module Idworks
         orders_timeseries: orders_timeseries,
         top_products:      top_products,
         channel_breakdown: channel_breakdown,
-        real_skus_sold:    real_skus_sold
+        real_skus_sold:    real_skus_sold,
+        idworks_revenue_total: idworks_revenue_total,
+        idworks_orders_count: idworks_orders_count,
+        idworks_average_ticket: idworks_average_ticket,
+        idworks_revenue_by_loja: idworks_revenue_by_loja,
+        idworks_orders_timeseries: idworks_orders_timeseries,
+        idworks_channel_breakdown: idworks_channel_breakdown
       )
     end
 
@@ -91,6 +99,17 @@ module Idworks
       tenant.orders
         .where(ordered_at: period_from.beginning_of_day..period_to.end_of_day)
         .merge(Order.sales_and_refunds)
+    end
+
+    # The IDWorks side is intentionally independent from Pricecom::Order.
+    # An ERP order can exist without an imported marketplace order or mapping;
+    # it still belongs in the comparison dashboard.
+    def idworks_orders_scope
+      scope = tenant.idworks_orders.where(recorded_at: period_from.beginning_of_day..period_to.end_of_day)
+      return scope if loja.blank?
+
+      integration = integration_for_loja(loja)
+      integration ? scope.where(integration_id: integration.id) : scope.none
     end
 
     # Orders scope narrowed to `loja` (blank = every order in the period).
@@ -150,6 +169,36 @@ module Idworks
       count.positive? ? (revenue_total / count).round(2) : nil
     end
 
+    def idworks_revenue_total
+      @idworks_revenue_total ||= idworks_orders_scope.sum(Arel.sql(idworks_revenue_sql)).to_f.round(2)
+    end
+
+    def idworks_orders_count
+      @idworks_orders_count ||= idworks_orders_scope.count
+    end
+
+    def idworks_average_ticket
+      count = idworks_orders_count
+      count.positive? ? (idworks_revenue_total / count).round(2) : nil
+    end
+
+    def idworks_revenue_by_loja
+      rows = tenant.idworks_orders
+        .where(recorded_at: period_from.beginning_of_day..period_to.end_of_day)
+        .group(:integration_id)
+        .pluck(:integration_id, Arel.sql("SUM(#{idworks_revenue_sql})"))
+      revenue_by_integration_id = rows.each_with_object({}) do |(integration_id, revenue), hash|
+        hash[integration_id] = revenue.to_f.round(2)
+      end
+
+      result = LOJAS.index_with do |loja_key|
+        integration = integration_for_loja(loja_key)
+        integration ? (revenue_by_integration_id[integration.id] || 0.0) : 0.0
+      end
+      result[UNMAPPED_LOJA_KEY] = revenue_by_integration_id[nil] || 0.0
+      result
+    end
+
     # Sempre a repartição completa (ignora o filtro `loja`) — é o que os
     # cards "por loja" mostram independente do que está selecionado.
     def revenue_by_loja
@@ -180,6 +229,15 @@ module Idworks
         .count
 
       rows.map { |(date, channel), count| { date: date.to_date.iso8601, channel: channel, count: count } }
+        .sort_by { |row| row[:date] }
+    end
+
+    def idworks_orders_timeseries
+      rows = idworks_orders_scope
+        .group(Arel.sql("DATE(idworks_orders.recorded_at)"), Arel.sql(idworks_channel_key_sql_for_idworks))
+        .count
+
+      rows.map { |(date, channel), count| { date: date.to_date.iso8601, channel: channel_display_name(channel), count: count } }
         .sort_by { |row| row[:date] }
     end
 
@@ -310,7 +368,9 @@ module Idworks
 
     # Canal nativo do idworks (orders.idworks_sales_channel), não
     # channels.name/Pricecom — ver o comentário de IDWORKS_CHANNEL_DISPLAY_NAMES
-    # acima pra por quê. Ainda precisa de .joins(:channel) só porque
+    # acima pra por quê. O comparativo direto do ERP usa idworks_orders e
+    # fica exposto em idworks_channel_breakdown. O lado Pricecom ainda
+    # precisa de .joins(:channel) só porque
     # effective_revenue_sql (compartilhado com o resto do dashboard, não
     # duplicado aqui) depende de channels.platform pra saber se é TikTok.
     # Todo pedido cai em algum grupo (ELSE do CASE), nunca fica de fora da
@@ -342,6 +402,32 @@ module Idworks
       end.sort_by { |row| -row[:net_revenue] }
     end
 
+    def idworks_channel_breakdown
+      rows = idworks_orders_scope
+        .group(Arel.sql(idworks_channel_key_sql_for_idworks))
+        .pluck(
+          Arel.sql(idworks_channel_key_sql_for_idworks),
+          Arel.sql("COUNT(*)"),
+          Arel.sql("COALESCE(SUM(#{idworks_revenue_sql}), 0)")
+        )
+
+      total_revenue = rows.sum { |_, _, revenue| revenue.to_f }
+
+      rows.filter_map do |key, count, revenue|
+        count_i = count.to_i
+        next if count_i.zero?
+
+        revenue_f = revenue.to_f.round(2)
+        {
+          channel: channel_display_name(key),
+          orders_count: count_i,
+          net_revenue: revenue_f,
+          average_ticket: (revenue_f / count_i).round(2),
+          share_percentage: total_revenue.positive? ? (revenue_f / total_revenue * 100).round(2) : 0
+        }
+      end.sort_by { |row| -row[:net_revenue] }
+    end
+
     # Chave crua de agrupamento — "shopify" antes do corte, "yampi" a
     # partir dele (inclusive), os outros 3 slugs conhecidos como vieram,
     # qualquer coisa fora disso (nil, slug desconhecido) cai no bucket
@@ -356,6 +442,24 @@ module Idworks
         "WHEN orders.idworks_sales_channel = 'shopify' AND orders.ordered_at >= #{quoted_cutoff} THEN 'yampi' " \
         "WHEN orders.idworks_sales_channel IN (#{known_slugs}) THEN orders.idworks_sales_channel " \
         "ELSE #{ActiveRecord::Base.connection.quote(UNMAPPED_CHANNEL_KEY)} END"
+    end
+
+    def idworks_revenue_sql
+      "COALESCE(idworks_orders.value_order, idworks_orders.value_paid, idworks_orders.value_product, 0)"
+    end
+
+    def idworks_channel_key_sql_for_idworks
+      quoted_cutoff = ActiveRecord::Base.connection.quote(SHOPIFY_TO_YAMPI_CUTOFF.beginning_of_day)
+      known_slugs = (IDWORKS_CHANNEL_DISPLAY_NAMES.keys - [ "yampi" ]).map { |slug| ActiveRecord::Base.connection.quote(slug) }.join(", ")
+
+      "CASE " \
+        "WHEN idworks_orders.sales_channel_slug = 'shopify' AND idworks_orders.recorded_at >= #{quoted_cutoff} THEN 'yampi' " \
+        "WHEN idworks_orders.sales_channel_slug IN (#{known_slugs}) THEN idworks_orders.sales_channel_slug " \
+        "ELSE #{ActiveRecord::Base.connection.quote(UNMAPPED_CHANNEL_KEY)} END"
+    end
+
+    def channel_display_name(key)
+      IDWORKS_CHANNEL_DISPLAY_NAMES.fetch(key, UNMAPPED_CHANNEL_DISPLAY_NAME)
     end
   end
 end

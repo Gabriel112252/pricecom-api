@@ -25,7 +25,13 @@ module Api
           orders_timeseries:  result.orders_timeseries,
           top_products:       result.top_products,
           channel_breakdown:  result.channel_breakdown,
-          real_skus_sold:     result.real_skus_sold
+          real_skus_sold:     result.real_skus_sold,
+          idworks_revenue_total: result.idworks_revenue_total,
+          idworks_orders_count: result.idworks_orders_count,
+          idworks_average_ticket: result.idworks_average_ticket,
+          idworks_revenue_by_loja: result.idworks_revenue_by_loja,
+          idworks_orders_timeseries: result.idworks_orders_timeseries,
+          idworks_channel_breakdown: result.idworks_channel_breakdown
         }
       rescue ArgumentError
         render json: { errors: [ "Datas inválidas" ] }, status: :unprocessable_entity

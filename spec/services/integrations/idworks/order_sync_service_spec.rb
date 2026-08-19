@@ -40,6 +40,7 @@ RSpec.describe Integrations::Idworks::OrderSyncService do
       expect(result.success?).to eq(true)
       expect(result.synced_count).to eq(1) # only 1 of 2 idworks orders matches a real Pricecom order
       expect(matching_order.reload.real_freight_cost).to eq(BigDecimal("15.30"))
+      expect(IdworksOrder.count).to eq(2) # the comparison source stores unmatched ERP orders too
     end
 
     it "recalculates margin using the newly-filled real_freight_cost" do
@@ -102,13 +103,15 @@ RSpec.describe Integrations::Idworks::OrderSyncService do
   end
 
   context "when freight is NOT configured to idworks" do
-    it "is skipped entirely — no idworks call is even made" do
+    it "stores the IDWorks snapshot even when freight is configured to another source" do
       DataSourceConfig.ensure_default!(tenant, "freight", "pagarme")
+      stub_idworks
 
       result = described_class.call(integration)
 
       expect(result.skipped?).to eq(true)
       expect(matching_order.reload.real_freight_cost).to be_nil
+      expect(IdworksOrder.count).to eq(2)
     end
   end
 

@@ -77,6 +77,7 @@ RSpec.describe "idworks:backfill_sales_channel rake task" do
     matching_order.reload
     expect(matching_order.idworks_sales_channel).to eq("mercadolivre")
     expect(matching_order.real_freight_cost).to be_nil # não tocou frete
+    expect(IdworksOrder.count).to eq(1)
   end
 
   it "skips a tenant that has no idworks integration, without raising" do

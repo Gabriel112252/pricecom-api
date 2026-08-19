@@ -19,6 +19,11 @@ RSpec.describe "Idworks Dashboard", type: :request do
         gross_value: 100, ordered_at: Date.new(2026, 8, 3), idworks_sales_channel: "shopee"
       )
       order.order_items.create!(product: product, sku: product.sku, name: product.name, quantity: 2, unit_price: 50)
+      IdworksOrder.create!(
+        tenant: tenant, integration: integration, external_id: "88001", order_number: "ERP-ONLY",
+        recorded_at: Time.utc(2026, 8, 4), sales_channel_slug: "mercadolivre", value_order: 250,
+        last_seen_at: Time.current
+      )
 
       get "/api/v1/idworks_dashboard",
         params: { start_date: "2026-08-01", end_date: "2026-08-07", loja: "hidrabene" },
@@ -31,6 +36,9 @@ RSpec.describe "Idworks Dashboard", type: :request do
       expect(body["loja"]).to eq("hidrabene")
       expect(body["orders_count"]).to eq(1)
       expect(body["revenue_total"]).to eq(100.0)
+      expect(body["idworks_orders_count"]).to eq(1)
+      expect(body["idworks_revenue_total"]).to eq(250.0)
+      expect(body["idworks_channel_breakdown"].first["channel"]).to eq("Mercado Livre")
       expect(body["top_products"]).to eq([ { "sku" => "HID-1", "name" => "Produto Hidrabene", "quantity" => 2.0, "revenue" => 100.0 } ])
       expect(body["channel_breakdown"].first["channel"]).to eq("Shopee")
       expect(body["revenue_by_loja"]).to include("hidrabene" => 100.0, "anasol" => 0.0)

@@ -355,6 +355,9 @@ module Integrations
       {
         order_ref:          first_present(raw, "Order", "order", "OrderNumber", "orderNumber", "ExternalOrder", "externalOrder")&.to_s,
         idworks_order_id:   first_present(raw, "IDOrder", "IDORDER", "idOrder", "id_order", "OrderId", "orderId")&.to_s,
+        recorded_at:        parse_timestamp(first_present(raw, "Recordtimestamp", "recordtimestamp")),
+        status_order:       first_present(raw, "StatusOrder", "statusOrder")&.to_s,
+        id_status_order:    first_present(raw, "IDStatusOrder", "IDSTATUSORDER", "idStatusOrder")&.to_i,
         value_shipping:     to_decimal(first_present(raw, "ValueShipping", "valueShipping", "ShippingValue", "shippingValue", "FreightValue", "freightValue")),
         value_product:      to_decimal(first_present(raw, "ValueProduct", "valueProduct")),
         value_order:        to_decimal(first_present(raw, "ValueOrder", "valueOrder")),
@@ -362,6 +365,14 @@ module Integrations
         sales_channel_slug: extract_channel_slug(first_present(raw, "SalesChannelLogoUrl")),
         raw_keys:           raw.is_a?(Hash) ? raw.keys : []
       }
+    end
+
+    def parse_timestamp(value)
+      return nil if value.blank?
+
+      Time.iso8601(value.to_s)
+    rescue ArgumentError, TypeError
+      nil
     end
 
     # SalesChannelLogoUrl — CONFIRMED 2026-08-17 against real order payload:

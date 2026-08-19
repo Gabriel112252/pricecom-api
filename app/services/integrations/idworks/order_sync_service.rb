@@ -15,12 +15,10 @@ module Integrations
     # ProductCostSyncService's class comment) — tax_amount is never
     # touched here, and stays nil/0 until a real tax data source exists.
     #
-    # Only applies when DataSourceConfig has "freight" pointed at "idworks"
-    # for this tenant — which also means Order#idworks_sales_channel
-    # (piggybacked here, see #apply_sales_channel) only gets tagged for
-    # tenants with freight->idworks configured. Same coupling shape as
-    # Product#integration_id being tagged from the cost sync — there's no
-    # other place today that walks idworks' raw per-order payload.
+    # The raw IDWorks order snapshot is always stored. Applying real freight
+    # and the legacy Order#idworks_sales_channel enrichment remains gated by
+    # DataSourceConfig("freight" => "idworks"). This keeps the comparison
+    # source independent from the financial source configuration.
     class OrderSyncService
       DEFAULT_WINDOW = 2.hours
 
@@ -43,18 +41,25 @@ module Integrations
       end
 
       def call
+        log = start_log
+        adapter = IdworksAdapter.new(integration.credentials)
+        adapter.authenticate
+        orders = adapter.fetch_orders(from: from, to: to)
+        @response_debug = adapter.order_response_debug
+        @received_count = orders.size
+        @stored_count = OrderSnapshotService.persist!(integration, orders)
+
         unless freight_sync_enabled?
-          log = start_log
-          metadata = count_metadata.merge(reason: "freight não está configurado para idworks")
+          integration.update!(status: "connected", last_synced_at: Time.current)
+          metadata = count_metadata.merge(
+            reason: "freight não está configurado para idworks",
+            idworks_orders_stored_count: stored_count
+          )
           finish_log(log, status: "skipped", metadata: metadata, errors: [])
           return Result.new(outcome: :skipped, synced_count: 0, error_message: nil, metadata: metadata)
         end
 
-        log     = start_log
-        adapter = IdworksAdapter.new(integration.credentials)
-        adapter.authenticate
-
-        sync_all(adapter)
+        sync_all(adapter, orders: orders)
 
         integration.update!(status: "connected", last_synced_at: Time.current)
         finish_log(log, status: item_errors.empty? ? "success" : "error", metadata: count_metadata, errors: item_errors)
@@ -87,6 +92,7 @@ module Integrations
       attr_reader :integration, :tenant, :from, :to, :resolver
 
       def received_count = @received_count ||= 0
+      def stored_count = @stored_count ||= 0
       def found_count = @found_count ||= 0
       def updated_count = @updated_count ||= 0
       def recalculated_count = @recalculated_count ||= 0
@@ -101,10 +107,7 @@ module Integrations
         DataSourceConfig.source_for(tenant, "freight") == "idworks"
       end
 
-      def sync_all(adapter)
-        orders = adapter.fetch_orders(from: from, to: to)
-        @response_debug = adapter.order_response_debug
-        @received_count = orders.size
+      def sync_all(_adapter, orders:)
 
         orders.each do |raw_order|
           resolution = resolver.resolve(raw_order)
@@ -205,6 +208,7 @@ module Integrations
       def count_metadata
         {
           received_count: received_count,
+          idworks_orders_stored_count: stored_count,
           found_count: found_count,
           updated_count: updated_count,
           recalculated_count: recalculated_count,

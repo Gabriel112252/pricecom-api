@@ -11,6 +11,7 @@ class Integration < ApplicationRecord
   validates :name, uniqueness: { scope: [:tenant_id, :provider] }
 
   has_many :integration_mappings,  dependent: :destroy
+  has_many :idworks_orders,       dependent: :destroy
   has_many :integration_sync_logs, dependent: :nullify
   has_many :integration_events,    dependent: :nullify
   has_many :order_refunds,         dependent: :nullify

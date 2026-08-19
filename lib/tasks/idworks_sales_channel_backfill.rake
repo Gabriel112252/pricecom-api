@@ -1,10 +1,12 @@
-# Backfill LEVE de orders.idworks_sales_channel pro histórico — não passa
+# Backfill do snapshot independente de pedidos do IDWorks + compatibilidade
+# com orders.idworks_sales_channel pro histórico — não passa
 # por Integrations::Idworks::OrderSyncService de propósito (essa classe
 # recalcula frete + margem de todo pedido tocado, o que é um risco
 # desnecessário só pra taguear um campo de exibição). Aqui é só GET no
 # idworks (Integrations::IdworksAdapter#fetch_orders, o mesmo client já
-# testado) + Integrations::Idworks::OrderResolver (mesma lógica de match
-# do OrderSyncService, extraída pra ser reutilizável) + update_column —
+# testado) + Integrations::Idworks::OrderSnapshotService, que armazena
+# TODOS os pedidos do ERP, mesmo sem correspondente no Pricecom. O resolver
+# e update_column continuam apenas para o campo legado dos pedidos casados —
 # nunca toca freight/margin/qualquer outro campo do pedido.
 #
 # Roda em janelas de WINDOW_DAYS (default 7) com uma pausa entre elas —
@@ -18,7 +20,7 @@
 #   TENANT_SLUG=hidrabene FROM=2025-01-01 TO=2026-08-17 rails idworks:backfill_sales_channel
 #   WINDOW_DAYS=14 SLEEP_BETWEEN_WINDOWS=1 rails idworks:backfill_sales_channel
 namespace :idworks do
-  desc "Backfill leve (só leitura na API + update_column) de orders.idworks_sales_channel pro histórico"
+  desc "Armazena o snapshot IDWorks e preenche o canal legado dos pedidos casados"
   task backfill_sales_channel: :environment do
     apply = ENV["APPLY"] == "1"
     window_days = (ENV["WINDOW_DAYS"].presence || 7).to_i
@@ -52,12 +54,14 @@ namespace :idworks do
         unmatched_count = 0
         no_channel_in_payload_count = 0
         updated_count = 0
+        stored_count = 0
 
         window_start = from
         while window_start < to
           window_end = [ window_start + window_days.days, to ].min
 
           raw_orders = adapter.fetch_orders(from: window_start, to: window_end)
+          stored_count += Integrations::Idworks::OrderSnapshotService.persist!(integration, raw_orders) if apply
           resolutions = resolver.resolve_many(raw_orders)
 
           raw_orders.zip(resolutions).each do |raw_order, resolution|
@@ -90,7 +94,8 @@ namespace :idworks do
         puts "[#{tenant.slug}/#{integration.name}] janela #{from.to_date}..#{to.to_date} — recebidos: #{received_count}, " \
              "casados com pedido Pricecom: #{matched_count}, não casados: #{unmatched_count}, " \
              "sem canal no payload: #{no_channel_in_payload_count}, " \
-             "#{apply ? 'atualizados' : 'a atualizar'}: #{updated_count}"
+             "#{apply ? 'atualizados no Pricecom' : 'a atualizar no Pricecom'}: #{updated_count}, " \
+             "#{apply ? 'armazenados no IDWorks' : 'a armazenar no IDWorks'}: #{stored_count}"
       end
     end
   end

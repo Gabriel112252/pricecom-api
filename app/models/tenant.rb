@@ -11,6 +11,7 @@ class Tenant < ApplicationRecord
   has_many :imports, dependent: :destroy
   has_many :integrations,          dependent: :destroy
   has_many :integration_mappings,  dependent: :destroy
+  has_many :idworks_orders,       dependent: :destroy
   has_many :integration_sync_logs, dependent: :destroy
   has_many :integration_events,    dependent: :destroy
   has_many :audit_conflicts, dependent: :destroy
