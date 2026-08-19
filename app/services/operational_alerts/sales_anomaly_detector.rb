@@ -33,9 +33,20 @@ module OperationalAlerts
       baseline_order_counts = baseline_ranges.map { |range| order_counts_by_channel(range) }
       order_alerts = detect_order_volume(current_order_counts, baseline_order_counts)
 
-      current_sku_counts = sku_unit_counts(current_range)
-      baseline_sku_counts = baseline_ranges.map { |range| sku_unit_counts(range) }
-      sku_alerts = detect_sku_volume(current_sku_counts, baseline_sku_counts)
+      # SKU continua sendo detectado pelo total da loja para nao multiplicar
+      # alertas por canal. Ao mesmo tempo guardamos o detalhamento por canal
+      # no metadata, porque o mesmo SKU pode vender em Yampi, TikTok etc. e o
+      # operador precisa saber de onde a queda veio.
+      current_sku_channel_counts = sku_unit_counts_by_channel(current_range)
+      baseline_sku_channel_counts = baseline_ranges.map { |range| sku_unit_counts_by_channel(range) }
+      current_sku_counts = aggregate_sku_counts(current_sku_channel_counts)
+      baseline_sku_counts = baseline_sku_channel_counts.map { |counts| aggregate_sku_counts(counts) }
+      sku_alerts = detect_sku_volume(
+        current_sku_counts,
+        baseline_sku_counts,
+        current_sku_channel_counts,
+        baseline_sku_channel_counts
+      )
 
       { order_alerts: order_alerts, sku_alerts: sku_alerts }
     end
@@ -57,14 +68,22 @@ module OperationalAlerts
       sales_scope(range).group(:channel_id).count.transform_values(&:to_f)
     end
 
-    def sku_unit_counts(range)
+    def sku_unit_counts_by_channel(range)
       sales_scope(range)
         .joins(:order_items)
         .where(order_items: { is_gift: false })
         .where("order_items.sku IS NOT NULL AND order_items.sku <> ''")
-        .group("order_items.sku")
+        .group("orders.channel_id", "order_items.sku")
         .sum("order_items.quantity")
-        .transform_values(&:to_f)
+        .each_with_object({}) do |((channel_id, sku), quantity), result|
+          result[[channel_id, sku]] = quantity.to_f
+        end
+    end
+
+    def aggregate_sku_counts(channel_counts)
+      channel_counts.each_with_object(Hash.new(0.0)) do |((_channel_id, sku), quantity), result|
+        result[sku] += quantity.to_f
+      end
     end
 
     def detect_order_volume(current_counts, baseline_counts)
@@ -103,7 +122,7 @@ module OperationalAlerts
       triggered_scope_keys.length
     end
 
-    def detect_sku_volume(current_counts, baseline_counts)
+    def detect_sku_volume(current_counts, baseline_counts, current_channel_counts, baseline_channel_counts)
       triggered_skus = []
       baseline_skus = baseline_counts.flat_map(&:keys).uniq
       products_by_sku = tenant.products.where(sku: baseline_skus).index_by(&:sku)
@@ -113,12 +132,47 @@ module OperationalAlerts
         current = current_counts.fetch(sku, 0).to_f
         next unless anomaly?(current: current, samples: samples, min_expected: MIN_EXPECTED_SKU_UNITS, min_gap: MIN_SKU_GAP)
 
-        upsert_sku_alert(product: products_by_sku[sku], sku: sku, current: current, samples: samples)
+        channel_breakdown = sku_channel_breakdown(
+          sku,
+          current_channel_counts,
+          baseline_channel_counts
+        )
+
+        upsert_sku_alert(
+          product: products_by_sku[sku],
+          sku: sku,
+          current: current,
+          samples: samples,
+          channel_breakdown: channel_breakdown
+        )
         triggered_skus << sku
       end
 
       resolve_untriggered("sku_volume_drop", triggered_skus) { |conflict| conflict.metadata.to_h["sku"] }
       triggered_skus.length
+    end
+
+    def sku_channel_breakdown(sku, current_counts, baseline_counts)
+      channels.filter_map do |channel_id, channel_name, platform|
+        samples = baseline_counts.map { |counts| counts.fetch([ channel_id, sku ], 0).to_f }
+        current = current_counts.fetch([ channel_id, sku ], 0).to_f
+        expected = median(samples)
+        next if expected <= 0 && current <= 0
+
+        {
+          channel_id: channel_id,
+          channel_name: channel_name.presence || platform.to_s,
+          current: current.round(2),
+          expected: expected.round(2),
+          drop_pct: drop_pct(current, expected),
+          affected: anomaly?(
+            current: current,
+            samples: samples,
+            min_expected: MIN_EXPECTED_SKU_UNITS,
+            min_gap: MIN_SKU_GAP
+          )
+        }
+      end.sort_by { |row| [ row[:affected] ? 0 : 1, -row[:expected].to_f ] }
     end
 
     def anomaly?(current:, samples:, min_expected:, min_gap:)
@@ -181,7 +235,7 @@ module OperationalAlerts
       conflict.save!
     end
 
-    def upsert_sku_alert(product:, sku:, current:, samples:)
+    def upsert_sku_alert(product:, sku:, current:, samples:, channel_breakdown:)
       expected = median(samples)
       conflict = tenant.audit_conflicts
         .open
@@ -200,6 +254,7 @@ module OperationalAlerts
         metadata: {
           sku: sku,
           product_name: product&.name,
+          channel_breakdown: channel_breakdown,
           window_minutes: (WINDOW / 1.minute).to_i,
           baseline_weeks: BASELINE_WEEKS,
           baseline_samples: samples.map { |value| value.round(2) },
