@@ -57,9 +57,11 @@ namespace :idworks do
         while window_start < to
           window_end = [ window_start + window_days.days, to ].min
 
-          adapter.fetch_orders(from: window_start, to: window_end).each do |raw_order|
+          raw_orders = adapter.fetch_orders(from: window_start, to: window_end)
+          resolutions = resolver.resolve_many(raw_orders)
+
+          raw_orders.zip(resolutions).each do |raw_order, resolution|
             received_count += 1
-            resolution = resolver.resolve(raw_order)
 
             unless resolution[:order]
               unmatched_count += 1
