@@ -6,6 +6,8 @@ module OperationalAlerts
   class WhatsappNotifier
     ANOMALY_TYPES = %w[order_volume_drop sku_volume_drop].freeze
     NOTIFIABLE_SEVERITIES = %w[high critical].freeze
+    MAX_SKUS_IN_SUMMARY = 5
+    RECENT_INTEGRATION_FAILURE_WINDOW = 24.hours
     DEDUP_TTL = 90.days.to_i
     CLAIM_TTL = 5.minutes.to_i
 
@@ -48,22 +50,46 @@ module OperationalAlerts
         .uniq
     end
 
+    # Anomalias de venda costumam acontecer em conjunto: uma queda global de
+    # pedidos naturalmente derruba varios SKUs ao mesmo tempo. A Operacao
+    # continua mostrando cada anomalia individual para diagnostico, mas o
+    # WhatsApp recebe um unico resumo por conjunto ativo de anomalias, em vez
+    # de uma mensagem por SKU/canal. Alertas medium continuam visiveis na UI,
+    # mas nao geram push — o WhatsApp fica reservado para high/critical.
     def notify_audit_conflicts
-      scope = tenant.audit_conflicts.open
-        .where.not(conflict_type: "missing_cost")
-        .where(
-          "severity IN (:severities) OR conflict_type IN (:anomalies)",
-          severities: NOTIFIABLE_SEVERITIES,
-          anomalies: ANOMALY_TYPES
-        )
+      anomalies = tenant.audit_conflicts.open
+        .where(conflict_type: ANOMALY_TYPES, severity: NOTIFIABLE_SEVERITIES)
+        .includes(:product)
+        .to_a
+
+      delivered = notify_anomaly_summary(anomalies)
+
+      other_conflicts = tenant.audit_conflicts.open
+        .where(severity: NOTIFIABLE_SEVERITIES)
+        .where.not(conflict_type: [ "missing_cost", *ANOMALY_TYPES ])
         .includes(:product)
 
-      scope.sum do |conflict|
+      delivered + other_conflicts.sum do |conflict|
         deliver_event(
           event_key: "audit:#{conflict.id}",
           text: audit_message(conflict)
         )
       end
+    end
+
+    def notify_anomaly_summary(anomalies)
+      return 0 if anomalies.empty?
+
+      # O ID do conflito e estavel enquanto a mesma anomalia permanece aberta.
+      # Assim, atualizacoes de leitura a cada 15 min nao reenviam a mesma
+      # mensagem; se surgir ou sumir uma anomalia relevante, o conjunto muda
+      # e um novo resumo pode ser enviado.
+      fingerprint = Digest::SHA256.hexdigest(anomalies.map(&:id).sort.join(","))[0, 20]
+
+      deliver_event(
+        event_key: "anomaly-summary:#{fingerprint}",
+        text: anomaly_summary_message(anomalies)
+      )
     end
 
     def notify_stock_alerts
@@ -95,6 +121,7 @@ module OperationalAlerts
         ].compact.max
 
         next 0 if latest_failure.blank?
+        next 0 if latest_failure < RECENT_INTEGRATION_FAILURE_WINDOW.ago
         next 0 if last_success.present? && latest_failure <= last_success
 
         deliver_event(
@@ -134,47 +161,70 @@ module OperationalAlerts
       "pricecom:whatsapp:operational:#{tenant.id}:#{event_key}:#{recipient_hash}"
     end
 
-    def audit_message(conflict)
-      metadata = conflict.metadata.to_h.with_indifferent_access
+    def anomaly_summary_message(anomalies)
+      order_anomalies = anomalies.select { |conflict| conflict.conflict_type == "order_volume_drop" }
+      sku_anomalies = anomalies.select { |conflict| conflict.conflict_type == "sku_volume_drop" }
 
-      case conflict.conflict_type
-      when "order_volume_drop"
-        <<~TEXT.strip
-          🚨 *Pricecom — Queda anormal de pedidos*
-          #{tenant.name}
-          Canal: #{metadata[:channel_name].presence || "Todos os canais"}
-          Últimos #{metadata[:window_minutes] || 60} min: *#{number(conflict.actual_value)} pedidos*
-          Esperado: ~#{number(conflict.expected_value)}
-          Queda: *#{number(metadata[:drop_pct])}%*
-          #{operation_url}
-        TEXT
-      when "sku_volume_drop"
-        <<~TEXT.strip
-          ⚠️ *Pricecom — Queda anormal de SKU*
-          #{tenant.name}
-          SKU: *#{metadata[:sku] || conflict.product&.sku || "-"}*
-          Produto: #{metadata[:product_name].presence || conflict.product&.name || "-"}
-          Últimos #{metadata[:window_minutes] || 60} min: *#{number(conflict.actual_value)} un.*
-          Esperado: ~#{number(conflict.expected_value)} un.
-          Queda: *#{number(metadata[:drop_pct])}%*
-          #{operation_url}
-        TEXT
-      else
-        <<~TEXT.strip
-          🚨 *Pricecom — Pendência operacional #{severity_label(conflict.severity)}*
-          #{tenant.name}
-          Tipo: #{conflict.conflict_type}
-          Esperado: #{number(conflict.expected_value)}
-          Atual: #{number(conflict.actual_value)}
-          #{operation_url}
-        TEXT
+      global = order_anomalies.find { |conflict| metadata_for(conflict)[:scope_key] == "all" }
+      channels = order_anomalies.reject { |conflict| conflict == global }
+        .sort_by { |conflict| -metadata_for(conflict)[:drop_pct].to_f }
+      top_skus = sku_anomalies
+        .sort_by { |conflict| [ -severity_rank(conflict.severity), -conflict.expected_value.to_f ] }
+        .first(MAX_SKUS_IN_SUMMARY)
+
+      critical = anomalies.any? { |conflict| conflict.severity == "critical" }
+      lines = []
+      lines << "#{critical ? '🚨' : '⚠️'} *#{tenant.name} — Anomalia de vendas*"
+
+      if global
+        lines << "Pedidos: *#{number(global.actual_value)}* vs ~#{number(global.expected_value)} esperados (*-#{number(metadata_for(global)[:drop_pct])}%*)"
       end
+
+      if channels.any?
+        lines << ""
+        lines << "*Por canal:*"
+        channels.each do |conflict|
+          metadata = metadata_for(conflict)
+          lines << "• #{metadata[:channel_name].presence || 'Canal'}: #{number(conflict.actual_value)} vs ~#{number(conflict.expected_value)} (*-#{number(metadata[:drop_pct])}%*)"
+        end
+      end
+
+      if sku_anomalies.any?
+        lines << ""
+        if global
+          lines << "*#{sku_anomalies.length} SKU(s) também abaixo do padrão* — provável reflexo da queda geral:"
+        else
+          lines << "*SKUs abaixo do padrão:*"
+        end
+
+        top_skus.each do |conflict|
+          metadata = metadata_for(conflict)
+          sku = metadata[:sku].presence || conflict.product&.sku || "-"
+          lines << "• #{sku}: #{number(conflict.actual_value)} vs ~#{number(conflict.expected_value)} un. (*-#{number(metadata[:drop_pct])}%*)"
+        end
+
+        remaining = sku_anomalies.length - top_skus.length
+        lines << "• +#{remaining} outro(s) na Operação" if remaining.positive?
+      end
+
+      lines << ""
+      lines << operation_url if operation_url.present?
+      lines.compact.join("\n")
+    end
+
+    def audit_message(conflict)
+      <<~TEXT.strip
+        🚨 *#{tenant.name} — Pendência operacional #{severity_label(conflict.severity)}*
+        Tipo: #{conflict.conflict_type}
+        Esperado: #{number(conflict.expected_value)}
+        Atual: #{number(conflict.actual_value)}
+        #{operation_url}
+      TEXT
     end
 
     def stock_message(alert)
       <<~TEXT.strip
-        📦 *Pricecom — Alerta de estoque*
-        #{tenant.name}
+        📦 *#{tenant.name} — Alerta de estoque*
         SKU: *#{alert.product&.sku || "-"}*
         Produto: #{alert.product&.name || "-"}
         Reserva disponível: *#{number(alert.qty_at_trigger)} un.*
@@ -186,8 +236,7 @@ module OperationalAlerts
 
     def integration_message(integration, latest_failure, last_success)
       <<~TEXT.strip
-        🔴 *Pricecom — Falha de integração*
-        #{tenant.name}
+        🔴 *#{tenant.name} — Falha de integração*
         Integração: *#{integration.name}* (#{integration.provider})
         Falha mais recente: #{format_time(latest_failure)}
         Último sucesso: #{last_success ? format_time(last_success) : "nenhum registrado"}
@@ -195,9 +244,17 @@ module OperationalAlerts
       TEXT
     end
 
+    def metadata_for(conflict)
+      conflict.metadata.to_h.with_indifferent_access
+    end
+
     def operation_url
       base = ENV.fetch("FRONTEND_URL", "").to_s.sub(%r{/+\z}, "")
       base.present? ? "Operação: #{base}/operacao" : ""
+    end
+
+    def severity_rank(severity)
+      { "critical" => 4, "high" => 3, "medium" => 2, "low" => 1 }.fetch(severity.to_s, 0)
     end
 
     def severity_label(severity)
