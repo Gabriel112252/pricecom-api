@@ -112,14 +112,16 @@ module OperationalAlerts
 
     def deliver_once(event_key:, recipient:, text:)
       key = redis_key(event_key, recipient)
-      claimed = Sidekiq.redis { |redis| redis.set(key, "sending", nx: true, ex: CLAIM_TTL) }
+      claimed = Sidekiq.redis do |redis|
+        redis.call("SET", key, "sending", "NX", "EX", CLAIM_TTL)
+      end
       return false unless claimed
 
       client.send_text(to: recipient, text: text)
-      Sidekiq.redis { |redis| redis.set(key, "sent", ex: DEDUP_TTL) }
+      Sidekiq.redis { |redis| redis.call("SET", key, "sent", "EX", DEDUP_TTL) }
       true
     rescue => e
-      Sidekiq.redis { |redis| redis.del(key) } if key
+      Sidekiq.redis { |redis| redis.call("DEL", key) } if key
       Rails.logger.error(
         "[OperationalAlerts::WhatsappNotifier] tenant=#{tenant.id} event=#{event_key} " \
         "failed=#{e.class}: #{e.message}"
