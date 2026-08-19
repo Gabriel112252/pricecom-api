@@ -25,31 +25,11 @@ module Audits
 
     attr_reader :order, :tenant
 
+    # Custo ainda nao e uma pendencia operacional acionavel neste momento.
+    # Nao cria novos conflitos e fecha automaticamente os missing_cost antigos
+    # quando o pedido passar pela deteccao/reconciliacao novamente.
     def detect_missing_cost
-      triggered_product_ids = []
-
-      order.order_items.non_gifts.includes(:product).find_each do |item|
-        product = item.product
-        next unless cost_missing?(item.unit_cost) && cost_missing?(product&.cost_price)
-
-        triggered_product_ids << product&.id
-        upsert_conflict(
-          conflict_type: "missing_cost",
-          product: product,
-          severity: "high",
-          expected_value: 0,
-          actual_value: 0,
-          difference: 0,
-          metadata: {
-            sku: item.sku,
-            item_name: item.name,
-            unit_cost: item.unit_cost.to_f,
-            product_cost_price: product&.cost_price.to_f
-          }
-        )
-      end
-
-      resolve_stale(conflict_type: "missing_cost", keep_product_ids: triggered_product_ids)
+      resolve_stale(conflict_type: "missing_cost", keep_product_ids: [])
     end
 
     def detect_gift_costing_error
@@ -132,10 +112,6 @@ module Audits
       else
         resolve_stale(conflict_type: "refund_without_cancellation", keep_product_ids: [])
       end
-    end
-
-    def cost_missing?(value)
-      value.nil? || value.zero?
     end
 
     def upsert_conflict(conflict_type:, severity:, expected_value:, actual_value:, difference:, metadata:, product: nil)
