@@ -30,8 +30,7 @@ module OperationalAlerts
       end
 
       message = <<~TEXT.strip
-        ✅ *Pricecom — Teste de alerta WhatsApp*
-        #{tenant.name}
+        ✅ *#{tenant.name} — Teste de alerta WhatsApp*
         O canal de alertas operacionais está funcionando.
         Sessão: #{ENV.fetch("WAHA_SESSION", "default")}
         Enviado em: #{Time.current.in_time_zone("America/Sao_Paulo").strftime("%d/%m/%Y %H:%M:%S")}
