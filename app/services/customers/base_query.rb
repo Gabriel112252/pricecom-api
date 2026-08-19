@@ -1,7 +1,7 @@
 module Customers
   class BaseQuery
     DEFAULT_PER_PAGE = 50
-    MAX_PER_PAGE = 100
+    MAX_PER_PAGE = 1_000
 
     SORTS = {
       "total_spent" => "total_spent",
@@ -75,7 +75,6 @@ module Customers
             GREATEST(
               COALESCE(o.gross_value, 0)
               - COALESCE(o.discount, 0)
-              - COALESCE(o.freight, 0)
               - COALESCE(o.refund_amount, 0),
               0
             )::numeric AS net_product_value,
