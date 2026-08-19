@@ -9,6 +9,7 @@ module OperationalAlerts
     NOTIFIABLE_SEVERITIES = %w[high critical].freeze
     MAX_SKUS_IN_SUMMARY = 5
     MAX_ORDERS_IN_SUMMARY = 5
+    UNINTEGRATED_SUMMARY_TTL = 1.hour.to_i
     RECENT_INTEGRATION_FAILURE_WINDOW = 24.hours
     DEDUP_TTL = 90.days.to_i
     CLAIM_TTL = 5.minutes.to_i
@@ -61,8 +62,7 @@ module OperationalAlerts
     #
     # Pedidos Yampi sem IDWorks seguem a mesma regra de agrupamento: cada
     # pedido continua acionavel individualmente na Operacao, mas o WhatsApp
-    # recebe um resumo unico para evitar uma rajada quando varios falham pelo
-    # mesmo problema de SKU/configuracao.
+    # recebe no maximo um resumo por hora enquanto o incidente continuar.
     def notify_audit_conflicts
       anomalies = tenant.audit_conflicts.open
         .where(conflict_type: ANOMALY_TYPES, severity: NOTIFIABLE_SEVERITIES)
@@ -107,11 +107,14 @@ module OperationalAlerts
     def notify_unintegrated_orders_summary(conflicts)
       return 0 if conflicts.empty?
 
-      fingerprint = Digest::SHA256.hexdigest(conflicts.map(&:id).sort.join(","))[0, 20]
-
+      # Chave propositalmente estavel: durante uma falha sistemica novos
+      # pedidos podem cruzar a janela de 2h a cada poucos minutos. Usar o
+      # conjunto de IDs como fingerprint reenviaria a cada crescimento da
+      # lista. Com TTL de 1h recebemos um resumo periódico, não uma rajada.
       deliver_event(
-        event_key: "unintegrated-orders-summary:#{fingerprint}",
-        text: unintegrated_orders_summary_message(conflicts)
+        event_key: "unintegrated-orders-active",
+        text: unintegrated_orders_summary_message(conflicts),
+        dedup_ttl: UNINTEGRATED_SUMMARY_TTL
       )
     end
 
@@ -154,13 +157,13 @@ module OperationalAlerts
       end
     end
 
-    def deliver_event(event_key:, text:)
+    def deliver_event(event_key:, text:, dedup_ttl: DEDUP_TTL)
       recipients.sum do |recipient|
-        deliver_once(event_key: event_key, recipient: recipient, text: text) ? 1 : 0
+        deliver_once(event_key: event_key, recipient: recipient, text: text, dedup_ttl: dedup_ttl) ? 1 : 0
       end
     end
 
-    def deliver_once(event_key:, recipient:, text:)
+    def deliver_once(event_key:, recipient:, text:, dedup_ttl: DEDUP_TTL)
       key = redis_key(event_key, recipient)
       claimed = Sidekiq.redis do |redis|
         redis.call("SET", key, "sending", "NX", "EX", CLAIM_TTL)
@@ -168,7 +171,7 @@ module OperationalAlerts
       return false unless claimed
 
       client.send_text(to: recipient, text: text)
-      Sidekiq.redis { |redis| redis.call("SET", key, "sent", "EX", DEDUP_TTL) }
+      Sidekiq.redis { |redis| redis.call("SET", key, "sent", "EX", dedup_ttl) }
       true
     rescue => e
       Sidekiq.redis { |redis| redis.call("DEL", key) } if key
