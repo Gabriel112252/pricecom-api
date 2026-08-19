@@ -62,7 +62,7 @@ module OperationalAlerts
         .joins(:order_items)
         .where(order_items: { is_gift: false })
         .where("order_items.sku IS NOT NULL AND order_items.sku <> ''")
-        .group("order_items.product_id", "order_items.sku")
+        .group("order_items.sku")
         .sum("order_items.quantity")
         .transform_values(&:to_f)
     end
@@ -105,18 +105,15 @@ module OperationalAlerts
 
     def detect_sku_volume(current_counts, baseline_counts)
       triggered_skus = []
-      baseline_keys = baseline_counts.flat_map(&:keys).uniq
-      product_ids = baseline_keys.map(&:first).compact.uniq
-      products_by_id = tenant.products.where(id: product_ids).index_by(&:id)
+      baseline_skus = baseline_counts.flat_map(&:keys).uniq
+      products_by_sku = tenant.products.where(sku: baseline_skus).index_by(&:sku)
 
-      baseline_keys.each do |key|
-        product_id, sku = key
-        samples = baseline_counts.map { |counts| counts.fetch(key, 0).to_f }
-        current = current_counts.fetch(key, 0).to_f
+      baseline_skus.each do |sku|
+        samples = baseline_counts.map { |counts| counts.fetch(sku, 0).to_f }
+        current = current_counts.fetch(sku, 0).to_f
         next unless anomaly?(current: current, samples: samples, min_expected: MIN_EXPECTED_SKU_UNITS, min_gap: MIN_SKU_GAP)
 
-        product = products_by_id[product_id]
-        upsert_sku_alert(product: product, sku: sku, current: current, samples: samples)
+        upsert_sku_alert(product: products_by_sku[sku], sku: sku, current: current, samples: samples)
         triggered_skus << sku
       end
 
