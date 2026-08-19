@@ -4,15 +4,22 @@ module Api
       PER_PAGE_DEFAULT = 50
       PER_PAGE_MAX     = 100
 
+      before_action :require_admin!, only: [ :reprocess ]
+
       # Tipos temporariamente desativados como pendencia operacional. Eles
       # continuam acessiveis quando filtrados explicitamente e no historico,
       # mas nao entram na fila aberta padrao nem nos seus contadores.
       DISABLED_DEFAULT_CONFLICT_TYPES = %w[missing_cost].freeze
 
-      # Alertas de comportamento pertencem a Operacao, nao a tela de Auditoria.
-      # Internamente reaproveitam AuditConflict para ciclo open/resolved e
-      # historico sem exigir uma segunda infraestrutura de alertas.
-      OPERATIONAL_ONLY_CONFLICT_TYPES = %w[order_volume_drop sku_volume_drop].freeze
+      # Alertas de comportamento e de integracao operacional pertencem a
+      # Operacao, nao a tela de Auditoria. Internamente reaproveitam
+      # AuditConflict para ciclo open/resolved e historico sem exigir uma
+      # segunda infraestrutura de alertas.
+      OPERATIONAL_ONLY_CONFLICT_TYPES = %w[
+        order_volume_drop
+        sku_volume_drop
+        yampi_order_not_integrated
+      ].freeze
 
       SEVERITY_ORDER_SQL = <<~SQL.squish
         CASE audit_conflicts.severity
@@ -66,6 +73,46 @@ module Api
         else
           render json: { errors: conflict.errors.full_messages }, status: :unprocessable_entity
         end
+      end
+
+      # Manual recovery for the specific incident exposed by the
+      # Yampi/IDWorks integrator. Pricecom never recreates the integration
+      # rules here; it asks the source service to revalidate and enqueue its
+      # own SyncYampiOrderToIdworksJob.
+      def reprocess
+        conflict = current_tenant.audit_conflicts.find(params[:id])
+
+        unless conflict.conflict_type == "yampi_order_not_integrated"
+          render json: { error: "Este conflito não suporta reprocessamento" }, status: :unprocessable_entity
+          return
+        end
+
+        upstream_id = conflict.metadata.to_h["webhook_event_id"] || conflict.metadata.to_h["id"]
+        if upstream_id.blank?
+          render json: { error: "Pendência sem identificador do integrador" }, status: :unprocessable_entity
+          return
+        end
+
+        result = Integrations::YampiIdworksIntegratorClient.new.reprocess(upstream_id)
+
+        if result["status"] == "already_resolved"
+          conflict.update!(status: "resolved", resolved_at: Time.current, resolved_by: nil)
+        elsif result["status"] == "queued"
+          conflict.update!(
+            metadata: conflict.metadata.to_h.merge(
+              "manual_reprocess_queued_at" => Time.current.iso8601,
+              "manual_reprocess_queued_by_id" => current_user.id
+            )
+          )
+        end
+
+        render json: {
+          success: true,
+          status: result["status"],
+          conflict: index_json(conflict.reload)
+        }
+      rescue Integrations::YampiIdworksIntegratorClient::Error => error
+        render json: { error: error.message }, status: :bad_gateway
       end
 
       private
