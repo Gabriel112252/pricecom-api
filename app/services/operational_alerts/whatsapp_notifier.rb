@@ -226,7 +226,9 @@ module OperationalAlerts
         top_skus.each do |conflict|
           metadata = metadata_for(conflict)
           sku = metadata[:sku].presence || conflict.product&.sku || "-"
-          lines << "• #{sku}: #{number(conflict.actual_value)} vs ~#{number(conflict.expected_value)} un. (*-#{number(metadata[:drop_pct])}%*)"
+          channel_names = sku_channel_names(metadata)
+          channel_suffix = channel_names.any? ? " — #{channel_names.join(', ')}" : ""
+          lines << "• #{sku}: #{number(conflict.actual_value)} vs ~#{number(conflict.expected_value)} un. (*-#{number(metadata[:drop_pct])}%*)#{channel_suffix}"
         end
 
         remaining = sku_anomalies.length - top_skus.length
@@ -293,6 +295,17 @@ module OperationalAlerts
         Último sucesso: #{last_success ? format_time(last_success) : "nenhum registrado"}
         #{operation_url}
       TEXT
+    end
+
+    def sku_channel_names(metadata)
+      breakdown = Array(metadata[:channel_breakdown]).map { |row| row.to_h.with_indifferent_access }
+      affected = breakdown.select { |row| ActiveModel::Type::Boolean.new.cast(row[:affected]) }
+      selected = affected.any? ? affected : breakdown
+
+      selected
+        .filter_map { |row| row[:channel_name].to_s.presence }
+        .uniq
+        .first(3)
     end
 
     def metadata_for(conflict)
