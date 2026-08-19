@@ -5,8 +5,10 @@ require "digest"
 module OperationalAlerts
   class WhatsappNotifier
     ANOMALY_TYPES = %w[order_volume_drop sku_volume_drop].freeze
+    UNINTEGRATED_ORDER_TYPE = "yampi_order_not_integrated".freeze
     NOTIFIABLE_SEVERITIES = %w[high critical].freeze
     MAX_SKUS_IN_SUMMARY = 5
+    MAX_ORDERS_IN_SUMMARY = 5
     RECENT_INTEGRATION_FAILURE_WINDOW = 24.hours
     DEDUP_TTL = 90.days.to_i
     CLAIM_TTL = 5.minutes.to_i
@@ -56,17 +58,27 @@ module OperationalAlerts
     # WhatsApp recebe um unico resumo por conjunto ativo de anomalias, em vez
     # de uma mensagem por SKU/canal. Alertas medium continuam visiveis na UI,
     # mas nao geram push — o WhatsApp fica reservado para high/critical.
+    #
+    # Pedidos Yampi sem IDWorks seguem a mesma regra de agrupamento: cada
+    # pedido continua acionavel individualmente na Operacao, mas o WhatsApp
+    # recebe um resumo unico para evitar uma rajada quando varios falham pelo
+    # mesmo problema de SKU/configuracao.
     def notify_audit_conflicts
       anomalies = tenant.audit_conflicts.open
         .where(conflict_type: ANOMALY_TYPES, severity: NOTIFIABLE_SEVERITIES)
         .includes(:product)
         .to_a
 
+      unintegrated_orders = tenant.audit_conflicts.open
+        .where(conflict_type: UNINTEGRATED_ORDER_TYPE, severity: NOTIFIABLE_SEVERITIES)
+        .to_a
+
       delivered = notify_anomaly_summary(anomalies)
+      delivered += notify_unintegrated_orders_summary(unintegrated_orders)
 
       other_conflicts = tenant.audit_conflicts.open
         .where(severity: NOTIFIABLE_SEVERITIES)
-        .where.not(conflict_type: [ "missing_cost", *ANOMALY_TYPES ])
+        .where.not(conflict_type: [ "missing_cost", UNINTEGRATED_ORDER_TYPE, *ANOMALY_TYPES ])
         .includes(:product)
 
       delivered + other_conflicts.sum do |conflict|
@@ -89,6 +101,17 @@ module OperationalAlerts
       deliver_event(
         event_key: "anomaly-summary:#{fingerprint}",
         text: anomaly_summary_message(anomalies)
+      )
+    end
+
+    def notify_unintegrated_orders_summary(conflicts)
+      return 0 if conflicts.empty?
+
+      fingerprint = Digest::SHA256.hexdigest(conflicts.map(&:id).sort.join(","))[0, 20]
+
+      deliver_event(
+        event_key: "unintegrated-orders-summary:#{fingerprint}",
+        text: unintegrated_orders_summary_message(conflicts)
       )
     end
 
@@ -208,6 +231,31 @@ module OperationalAlerts
       end
 
       lines << ""
+      lines << operation_url if operation_url.present?
+      lines.compact.join("\n")
+    end
+
+    def unintegrated_orders_summary_message(conflicts)
+      ordered = conflicts.sort_by { |conflict| -metadata_for(conflict)[:hours_waiting].to_f }
+      lines = []
+      lines << "🚨 *#{tenant.name} — Pedidos não integrados na IDWorks*"
+      lines << "*#{conflicts.length} pedido(s)* pagos há mais de 2h continuam sem pedido/mapeamento na IDWorks."
+      lines << ""
+
+      ordered.first(MAX_ORDERS_IN_SUMMARY).each do |conflict|
+        metadata = metadata_for(conflict)
+        identity = metadata[:yampi_number].presence || metadata[:yampi_id].presence || conflict.id
+        hours = metadata[:hours_waiting].to_f
+        error = metadata[:last_error].to_s.squish.presence
+        line = "• #{identity} — #{hours.positive? ? format('%.1fh', hours) : '>2h'}"
+        line += " — #{error.first(120)}" if error
+        lines << line
+      end
+
+      remaining = conflicts.length - MAX_ORDERS_IN_SUMMARY
+      lines << "• +#{remaining} outro(s) na Operação" if remaining.positive?
+      lines << ""
+      lines << "Abra a Operação para reprocessar individualmente."
       lines << operation_url if operation_url.present?
       lines.compact.join("\n")
     end
