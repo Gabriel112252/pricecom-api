@@ -14,6 +14,8 @@ class AuditConflict < ApplicationRecord
     missing_settlement
     fee_rate_mismatch
     order_qty_mismatch
+    order_volume_drop
+    sku_volume_drop
   ].freeze
 
   SEVERITIES = %w[low medium high critical].freeze
