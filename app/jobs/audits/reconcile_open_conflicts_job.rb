@@ -7,17 +7,13 @@ module Audits
   # pelos schedulers proprios em config/schedule.yml. Este job apenas fecha o
   # ciclo do alerta: detectou -> fonte atualizou -> revalida -> resolve se sumiu.
   #
-  # Excecoes:
-  # - missing_cost: o sync completo de custo da IDWorks roda normalmente a cada
-  #   6h. Enquanto existir conflito aberto desse tipo, permitimos uma checagem
-  #   extraordinaria no maximo 1x/h para capturar uma correcao manual no ERP.
-  # - order_qty_mismatch: mesma ideia para a reconciliacao Pricecom x IDWorks,
-  #   respeitando DataSourceConfig e limitando a 1x/h enquanto houver conflito.
+  # missing_cost esta temporariamente desativado como pendencia operacional.
+  # Os registros antigos desse tipo sao resolvidos em lote no inicio do job,
+  # sem reprocessar pedido por pedido nem disparar sync extraordinario de custo.
   class ReconcileOpenConflictsJob < ApplicationJob
     queue_as :integrations
 
     ORDER_CONFLICT_TYPES = %w[
-      missing_cost
       gift_costing_error
       nf_discount_mismatch
       nf_freight_mismatch
@@ -27,9 +23,10 @@ module Audits
     EXTERNAL_REFRESH_INTERVAL = 1.hour
 
     def perform
+      resolve_disabled_missing_cost_conflicts
+
       tenant_ids_with_open_conflicts.find_each do |tenant|
         reconcile_order_conflicts(tenant)
-        refresh_missing_cost_source(tenant)
         refresh_order_quantity_source(tenant)
       rescue => e
         Rails.logger.error(
@@ -39,6 +36,18 @@ module Audits
     end
 
     private
+
+    def resolve_disabled_missing_cost_conflicts
+      now = Time.current
+      resolved_count = AuditConflict
+        .open
+        .where(conflict_type: "missing_cost")
+        .update_all(status: "resolved", resolved_at: now, updated_at: now)
+
+      Rails.logger.info(
+        "[Audits::ReconcileOpenConflictsJob] resolved_disabled_missing_cost=#{resolved_count}"
+      ) if resolved_count.positive?
+    end
 
     def tenant_ids_with_open_conflicts
       Tenant
@@ -61,17 +70,6 @@ module Audits
         Rails.logger.error(
           "[Audits::ReconcileOpenConflictsJob] order=#{order.id} failed: #{e.class}: #{e.message}"
         )
-      end
-    end
-
-    def refresh_missing_cost_source(tenant)
-      return unless tenant.audit_conflicts.open.where(conflict_type: "missing_cost").exists?
-      return unless DataSourceConfig.source_for(tenant, "cost") == "idworks"
-
-      connected_idworks_integrations(tenant).find_each do |integration|
-        next if recent_success?(integration, "idworks_product_cost_sync")
-
-        Integrations::Idworks::ProductCostSyncJob.perform_later(integration.id)
       end
     end
 
