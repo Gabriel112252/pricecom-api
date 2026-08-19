@@ -155,6 +155,16 @@ operational_sales_anomaly_detection:
   class: "OperationalAlerts::SalesAnomalyDetectionJob"
   queue: integrations
 
+# Envia por WhatsApp apenas a transicao relevante: cada conflito/alerta de
+# estoque e cada falha nova de integracao e deduplicado no Redis. O cron e
+# frequente para aproximar o WhatsApp do tempo real sem transformar WAHA em
+# parte do caminho critico das integracoes; se o WAHA estiver fora, o erro e
+# isolado e os jobs de ingestao continuam normalmente.
+operational_whatsapp_notifications:
+  cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
+  class: "OperationalAlerts::WhatsappNotificationJob"
+  queue: integrations
+
 # Fecha o ciclo das pendencias operacionais: depois que os pollings acima
 # atualizam o estado local, revalida somente conflitos ainda abertos e resolve
 # automaticamente os que deixaram de existir. Roda deslocado dos minutos
