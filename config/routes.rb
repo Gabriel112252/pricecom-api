@@ -182,6 +182,17 @@ Rails.application.routes.draw do
       get "dashboard/products_search", to: "dashboard#products_search"
       get "dashboard/products_timeseries", to: "dashboard#products_timeseries"
 
+      # Clientes — módulo próprio, separado do Dashboard. A leitura é liberada
+      # para qualquer usuário autenticado do tenant; todos os dados continuam
+      # isolados por current_tenant no controller/service.
+      resources :customers, only: [ :index ] do
+        collection do
+          get :overview
+          get :rfm
+          get :export
+        end
+      end
+
       # Afiliados (TikTok Shop)
       get  "affiliates/overview",     to: "affiliates#overview"
       get  "affiliates/creators",     to: "affiliates#creators"
