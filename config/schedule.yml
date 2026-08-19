@@ -126,10 +126,8 @@ idworks_stock_sync_dispatch:
   queue: integrations
 
 # Compara quantidade vendida por SKU (Pricecom) x faturada (idworks NF) da
-# última semana corrida. Desligado por padrão via DataSourceConfig
-# ("order_reconciliation" não entra em DEFAULTS_BY_SOURCE) até o fetch real
-# de itens de NF ser implementado — ver
-# Integrations::Idworks::InvoicedQuantityFetcher.
+# última semana corrida. O fetch real de itens/NFs já está implementado; o
+# dispatcher continua condicionado ao DataSourceConfig "order_reconciliation".
 idworks_order_reconciliation_dispatch:
   cron: "0 6 * * 1"
   class: "Integrations::Idworks::ScheduleOrderReconciliationJob"
@@ -146,6 +144,16 @@ lucrofrete_orders_sync_dispatch:
 pagarme_payable_sync:
   cron: "*/30 * * * *"
   class: "Financials::PagarmePayableSyncJob"
+  queue: integrations
+
+# Fecha o ciclo das pendencias operacionais: depois que os pollings acima
+# atualizam o estado local, revalida somente conflitos ainda abertos e resolve
+# automaticamente os que deixaram de existir. Roda deslocado dos minutos
+# cheios para dar tempo dos syncs externos terminarem. Pendencias de custo e
+# reconciliacao IDWorks podem disparar refresh extraordinario, limitado a 1x/h.
+operational_conflicts_reconciliation:
+  cron: "7,37 * * * *"
+  class: "Audits::ReconcileOpenConflictsJob"
   queue: integrations
 
 # Safety net, not the primary trigger — see StockAlerts::ReconcileAlertsJob's
