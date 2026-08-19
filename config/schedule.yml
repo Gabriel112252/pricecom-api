@@ -155,6 +155,15 @@ operational_sales_anomaly_detection:
   class: "OperationalAlerts::SalesAnomalyDetectionJob"
   queue: integrations
 
+# Consulta a fonte de verdade do integrador Yampi->IDWorks. Só materializa
+# na Operação pedidos pagos há mais de 2h que continuam realmente sem
+# OrderMapping; esperas legítimas do WA Upsell ficam suprimidas na origem.
+# A ausência numa consulta completa resolve automaticamente a pendência.
+yampi_idworks_operational_issues:
+  cron: "1,16,31,46 * * * *"
+  class: "OperationalAlerts::YampiIdworksIssuesSyncJob"
+  queue: integrations
+
 # Envia por WhatsApp apenas a transicao relevante: cada conflito/alerta de
 # estoque e cada falha nova de integracao e deduplicado no Redis. O cron roda
 # a cada 5 min, deslocado dos minutos cheios e normalmente depois da deteccao/
