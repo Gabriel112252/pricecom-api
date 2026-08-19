@@ -146,6 +146,15 @@ pagarme_payable_sync:
   class: "Financials::PagarmePayableSyncJob"
   queue: integrations
 
+# Detecta queda anormal de pedidos e de unidades vendidas por SKU usando a
+# mesma janela de 60 minutos nas 4 semanas anteriores como baseline. Roda
+# alguns minutos depois dos pollings dos canais para reduzir falso positivo
+# por atraso de ingestao e fecha o alerta automaticamente quando normaliza.
+operational_sales_anomaly_detection:
+  cron: "4,19,34,49 * * * *"
+  class: "OperationalAlerts::SalesAnomalyDetectionJob"
+  queue: integrations
+
 # Fecha o ciclo das pendencias operacionais: depois que os pollings acima
 # atualizam o estado local, revalida somente conflitos ainda abertos e resolve
 # automaticamente os que deixaram de existir. Roda deslocado dos minutos
