@@ -36,6 +36,17 @@ Rails.application.routes.draw do
         end
       end
 
+      # Cadastro guiado de nova variação. Mantém o rascunho e o estado por
+      # canal separados do Product final para o mesmo serviço poder ser usado
+      # pela interface e, depois, pelas tools MCP.
+      resources :product_registrations, only: [ :index, :show, :create, :update ] do
+        member do
+          post :publish
+          post "images", to: "product_registrations#add_images"
+          delete "images/:attachment_id", to: "product_registrations#remove_image"
+        end
+      end
+
       # Channel stock writes (admin only — the controller performs the
       # remote update before changing the local listing quantity).
       resources :channel_product_listings, only: [ :update ] do
