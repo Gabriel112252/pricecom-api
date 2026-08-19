@@ -16,6 +16,7 @@ class AuditConflict < ApplicationRecord
     order_qty_mismatch
     order_volume_drop
     sku_volume_drop
+    yampi_order_not_integrated
   ].freeze
 
   SEVERITIES = %w[low medium high critical].freeze
