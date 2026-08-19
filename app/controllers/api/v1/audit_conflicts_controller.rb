@@ -196,13 +196,31 @@ module Api
           actual_value:     conflict.actual_value,
           difference:       conflict.difference,
           source:           conflict.source,
-          metadata:         conflict.metadata,
+          metadata:         presentation_metadata(conflict),
           created_at:       conflict.created_at,
           updated_at:       conflict.updated_at,
           resolved_at:      conflict.resolved_at,
           resolved_by_id:   conflict.resolved_by_id,
           resolved_by_name: conflict.resolved_by&.name
         }
+      end
+
+      # A tela de Operacao antiga ja renderiza metadata.sku diretamente. Para
+      # incluir o canal sem criar um alerta separado por canal (e sem aumentar
+      # o ruido), enriquecemos apenas a representacao JSON. O metadata salvo no
+      # banco continua com o SKU puro, usado pela deteccao/resolucao.
+      def presentation_metadata(conflict)
+        metadata = conflict.metadata.to_h.deep_dup
+        return metadata unless conflict.conflict_type == "sku_volume_drop"
+
+        breakdown = Array(metadata["channel_breakdown"])
+        affected = breakdown.select { |row| row.to_h["affected"] == true }
+        selected = affected.any? ? affected : breakdown
+        channel_names = selected.filter_map { |row| row.to_h["channel_name"].to_s.presence }.uniq
+        sku = metadata["sku"].to_s.presence
+
+        metadata["sku"] = "#{sku} [#{channel_names.join(', ')}]" if sku && channel_names.any?
+        metadata
       end
 
       def show_json(conflict)
