@@ -151,7 +151,7 @@ end
 FastMcp.mount_in_rails(
   Rails.application,
   name: "pricecom",
-  version: "1.0.0",
+  version: "1.1.0",
   path_prefix: "/mcp",
   messages_route: "messages",
   sse_route: "sse",
@@ -159,14 +159,21 @@ FastMcp.mount_in_rails(
   auth_token: ->(token) { User.find_by(mcp_api_key: token) }
 ) do |server|
   Rails.application.config.after_initialize do
+    # Fase atual: somente consultas. As tools de escrita continuam no código,
+    # mas ficam fora do registry até entrarmos na fase de ações com confirmação,
+    # permissões e auditoria específicas para IA.
     tools = [
+      CatalogoPricecomTool,
       ResumoFinanceiroTool,
-      BuscarProdutoTool,
       ListarPedidosTool,
+      ConsultarPedidoTool,
+      BuscarProdutoTool,
+      ConsultarProdutoDetalhadoTool,
+      ConsultarEstoqueTool,
       StatusSincronizacaoCanalTool,
-      CriarEditarCredencialCanalTool,
-      DispararSyncCanalTool,
-      AtivarDesativarUsuarioTool
+      ConsultarIntegracoesTool,
+      ConsultarOperacaoTool,
+      ConsultarCarrinhosTool
     ]
 
     server.register_tools(*tools)
