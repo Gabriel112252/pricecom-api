@@ -158,8 +158,10 @@ Rails.application.routes.draw do
       get "idworks_dashboard", to: "idworks_dashboard#index"
 
       # Dashboard
-      get "dashboard/summary",   to: "dashboard#summary"
-      get "dashboard/summary_extended", to: "dashboard#summary_extended"
+      # summary/summary_extended passam por uma camada de cache curto para
+      # não recalcular as mesmas agregações pesadas a cada refresh/navegação.
+      get "dashboard/summary",   to: "dashboard_cached#summary"
+      get "dashboard/summary_extended", to: "dashboard_cached#summary_extended"
       get "dashboard/financial", to: "dashboard#financial"
       get "dashboard/freight_orders", to: "dashboard#freight_orders"
       get "dashboard/tiktok_orders", to: "dashboard#tiktok_orders"
