@@ -4,7 +4,9 @@ class CreateProductRegistrations < ActiveRecord::Migration[7.2]
       t.references :tenant, null: false, foreign_key: true
       t.references :parent_product, null: false, foreign_key: { to_table: :products }
       t.references :product, null: true, foreign_key: true
-      t.references :created_by_user, null: true, foreign_key: { to_table: :users }
+      t.references :created_by_user,
+        null: true,
+        foreign_key: { to_table: :users, on_delete: :nullify }
       t.string :sku, null: false
       t.string :name, null: false
       t.integer :price_cents
