@@ -191,6 +191,9 @@ Rails.application.routes.draw do
       # Integration Health
       get "integration_health", to: "integration_health#index"
 
+      # Teste manual do canal de alertas operacionais via WhatsApp (admin only).
+      post "operational_notifications/whatsapp_test", to: "operational_notifications#whatsapp_test"
+
       # Public OAuth callback from TikTok Shop. TikTok redirects the browser
       # with GET, while the generic webhook receiver below is POST-only.
       get "webhooks/tiktok", to: "tiktok_oauth#callback"
