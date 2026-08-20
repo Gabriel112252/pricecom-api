@@ -1,6 +1,7 @@
 class Order < ApplicationRecord
   belongs_to :tenant
   belongs_to :channel
+  belongs_to :channel_credential, optional: true
   has_many :order_items,          dependent: :destroy
   has_many :order_refunds,        dependent: :destroy
   has_many :audit_conflicts,      dependent: :destroy
@@ -31,6 +32,7 @@ class Order < ApplicationRecord
   CANCELED_STATUS_ALIASES = %w[cancelado canceled cancelled cancelada].freeze
 
   validates :order_type, inclusion: { in: ORDER_TYPES }
+  validate :channel_credential_matches_order
 
   before_save :calculate_margin
 
@@ -103,5 +105,16 @@ class Order < ApplicationRecord
 
   def effective_tax_amount
     DataSourceConfig.source_for(tenant, "tax").present? ? tax_amount.to_f : 0.0
+  end
+
+  private
+
+  def channel_credential_matches_order
+    return unless channel_credential
+
+    errors.add(:channel_credential, "deve pertencer ao mesmo tenant") if channel_credential.tenant_id != tenant_id
+    if channel && channel_credential.channel != channel.platform
+      errors.add(:channel_credential, "deve ser do mesmo canal do pedido")
+    end
   end
 end
