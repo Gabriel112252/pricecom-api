@@ -31,6 +31,14 @@ module Integrations
       request(:get, path)
     end
 
+    def tracking_operational_issues
+      request(:get, "/api/v1/operational_issues/tracking")
+    end
+
+    def reconcile_tracking_operational_issues
+      request(:post, "/api/v1/operational_issues/reconcile_tracking")
+    end
+
     def reprocess(issue_id)
       request(:post, "/api/v1/operational_issues/#{issue_id}/reprocess")
     end
