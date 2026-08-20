@@ -20,6 +20,8 @@ class ChannelCredential < ApplicationRecord
 
   has_many :channel_product_listings, dependent: :nullify
   has_many :product_registration_publications, dependent: :nullify
+  has_many :orders, dependent: :nullify
+  has_many :integration_events, dependent: :nullify
 
   # fonte_estoque: this connection owns real stock.
   # consumidor_pedido: it only sends orders and deducts another connection.
