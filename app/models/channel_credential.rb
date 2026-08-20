@@ -1,72 +1,77 @@
 class ChannelCredential < ApplicationRecord
   # NOTE: "mercadolivre" (no underscore) deliberately matches
-  # Channel::PLATFORMS, not the MercadoLivreAdapter class/file name — the
-  # two are independent, and OrderStockDeductionService resolves a
-  # ChannelCredential by looking up `order.channel.platform`, so this
-  # string has to agree with Channel::PLATFORMS or that lookup silently
-  # fails to match.
-  # "lucrofrete" is NOT a sales channel (no Channel row, no orders, no
-  # stock) — it's a freight-quote service credential (see
-  # Integrations::LucrofreteClient). It lives here to reuse the encrypted
-  # credentials storage + the dynamic credential form, same as the others.
+  # Channel::PLATFORMS, not the MercadoLivreAdapter class/file name.
+  # "lucrofrete" is not a sales channel; it shares this encrypted credential
+  # store but does not create a Channel row.
   CHANNELS = %w[yampi shopify tiktok mercadolivre shopee lucrofrete].freeze
   STATUSES = %w[pending active error].freeze
 
-  # Required credential keys per channel — drives both validation and the
-  # frontend's dynamic credential form.
-  # webhook_secret (Yampi and Shopify) is generated on each platform's
-  # dedicated Webhooks screen — a different value from the API secret_key /
-  # access_token used for product sync — and is the only thing
-  # WebhookSignatureVerifier can check inbound webhooks against (see that
-  # class for details).
   REQUIRED_FIELDS = {
     "yampi"        => %w[alias token secret_key webhook_secret],
     "shopify"      => %w[shop_domain access_token webhook_secret],
     "tiktok"       => %w[app_key app_secret],
     "mercadolivre" => %w[user_id access_token],
-    # Shopee: só o par partner é digitado; shop_id, access_token,
-    # refresh_token e token_expires_at são campos gerenciados, gravados no
-    # mesmo JSONB pelo OAuth (ShopeeOauthController) e renovados pelo
-    # Integrations::Shopee::TokenRefreshJob — mesmo modelo do TikTok
-    # (app_key/app_secret digitados, tokens via OAuth).
     "shopee"       => %w[partner_id partner_key],
-    # LucrofreteClient also caches session state inside the same JSONB
-    # (access_token + token_expires_at, TikTok-style) — those are managed
-    # fields, not required user input, so they're not listed here.
     "lucrofrete"   => %w[email password]
   }.freeze
 
   belongs_to :tenant
   belongs_to :stock_source_channel, class_name: "ChannelCredential", optional: true
 
-  # fonte_estoque: this channel's ChannelProductListing is the real stock —
-  #   ProductSyncService syncs it normally.
-  # consumidor_pedido: this channel only sends orders; it never owns stock.
-  #   ProductSyncService skips it, and order stock deduction is redirected
-  #   to `stock_source_channel` (e.g. Yampi checkout backed by Shopify's
-  #   inventory — see Etapa 9b context).
-  # ambos: syncs its own catalog/stock AND is a valid deduction source for
-  #   other channels that point at it.
+  has_many :channel_product_listings, dependent: :nullify
+  has_many :product_registration_publications, dependent: :nullify
+
+  # fonte_estoque: this connection owns real stock.
+  # consumidor_pedido: it only sends orders and deducts another connection.
+  # ambos: it owns stock and may also be used as another connection's source.
   enum :role, { fonte_estoque: 0, consumidor_pedido: 1, ambos: 2 }, default: :ambos
 
   encrypts :credentials
 
-  validates :channel, presence: true, inclusion: { in: CHANNELS }, uniqueness: { scope: :tenant_id }
+  before_validation :normalize_name
+
+  validates :channel, presence: true, inclusion: { in: CHANNELS }
+  validates :name, presence: true, uniqueness: { scope: [ :tenant_id, :channel ] }
   validates :status, inclusion: { in: STATUSES }
   validate :credentials_include_required_fields
   validate :stock_source_required_when_consumidor_pedido
   validate :stock_source_is_valid
 
   scope :active, -> { where(status: "active") }
-  # Channels whose stock is real and syncable — either their own
-  # (fonte_estoque) or shared with others too (ambos).
   scope :stock_owning, -> { where(role: [ roles[:fonte_estoque], roles[:ambos] ]) }
+  scope :for_channel, ->(channel) { where(channel: channel) }
+
+  def self.default_name_for(channel)
+    return "Lucrofrete" if channel.to_s == "lucrofrete"
+
+    Channel::DEFAULT_NAMES.fetch(channel.to_s, channel.to_s.humanize)
+  end
+
+  # Compatibility helper for code paths that historically only knew a
+  # provider string. With one connection it behaves exactly as before; with
+  # multiple connections the caller must disambiguate by id or name.
+  def self.resolve_for(tenant:, channel:, id: nil, name: nil)
+    scope = tenant.channel_credentials.where(channel: channel)
+    return scope.find_by(id: id) if id.present?
+    return scope.find_by(name: name.to_s.strip) if name.present?
+
+    records = scope.order(:id).limit(2).to_a
+    records.one? ? records.first : nil
+  end
+
+  def display_name
+    name.presence || self.class.default_name_for(channel)
+  end
 
   def required_fields
     REQUIRED_FIELDS.fetch(channel, [])
   end
 
   private
+
+  def normalize_name
+    self.name = name.to_s.strip.presence || self.class.default_name_for(channel)
+  end
 
   def credentials_include_required_fields
     missing = required_fields.reject { |field| credential_value(field).present? }
