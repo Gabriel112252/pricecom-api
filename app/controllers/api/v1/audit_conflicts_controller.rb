@@ -19,6 +19,7 @@ module Api
         order_volume_drop
         sku_volume_drop
         yampi_order_not_integrated
+        yampi_tracking_not_synced
       ].freeze
 
       SEVERITY_ORDER_SQL = <<~SQL.squish
