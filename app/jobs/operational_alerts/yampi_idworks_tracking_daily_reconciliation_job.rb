@@ -6,7 +6,7 @@ module OperationalAlerts
 
     def perform
       client = Integrations::YampiIdworksIntegratorClient.new
-      response = client.reconcile_tracking_operational_issues
+      response = client.tracking_operational_issues
       reconciliation = response["last_reconciliation"].to_h
 
       Rails.logger.info(
