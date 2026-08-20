@@ -1,19 +1,6 @@
 module Integrations
   module Tiktok
-    # Fetches TikTok Shop returns/refunds (Search Returns 202309 — see
-    # TiktokAdapter#fetch_returns) and persists reason/status/amount onto the
-    # matching local order via the same Integrations::Orders::UpsertRefund
-    # shared by Yampi/Shopify/TikTok's statement-based refund sync
-    # (StatementFinancialBackfillService#persist_refund_from_statement).
-    #
-    # Runs either scoped to a set of order_ids (targeted re-check) or over a
-    # create_time window (scheduled sweep, see ReturnRefundSyncSchedulerJob).
-    #
-    # UpsertRefund keys order_refunds by the ORDER's own external_id (not the
-    # return's own return_id) — same constraint every channel's refund flow
-    # already lives with. If TikTok reports more than one return for the same
-    # order within a run, only the last one processed survives; that's an
-    # existing limitation of the shared upsert, not something new here.
+    # Fetches returns/refunds for one concrete TikTok store connection.
     class ReturnRefundSyncService
       DEFAULT_WINDOW_DAYS = 7
       PAGE_SIZE = 50
@@ -105,7 +92,10 @@ module Integrations
         normalized = Integrations::Normalizers::TiktokReturnRefundNormalizer.call(raw)
         return if normalized[:external_id].blank?
 
-        order = channel.orders.find_by(external_id: normalized[:external_id])
+        order = tenant.orders.find_by(
+          channel_credential: channel_credential,
+          external_id: normalized[:external_id]
+        )
         unless order
           @missing_count += 1
           return
@@ -113,8 +103,9 @@ module Integrations
 
         @matched_count += 1
         upsert = Integrations::Orders::UpsertRefund.call(
-          tenant:     tenant,
-          provider:   "tiktok",
+          tenant: tenant,
+          channel_credential: channel_credential,
+          provider: "tiktok",
           normalized: normalized.merge(order_number: order.order_number)
         )
 
@@ -136,16 +127,19 @@ module Integrations
 
       def start_log
         IntegrationSyncLog.create!(
-          tenant:      tenant,
-          direction:   "inbound",
-          action:      "tiktok_return_refund_sync",
-          status:      "pending",
-          started_at:  started_at,
+          tenant: tenant,
+          channel_credential: channel_credential,
+          direction: "inbound",
+          action: "tiktok_return_refund_sync",
+          status: "pending",
+          started_at: started_at,
           metadata: {
-            trigger:               trigger,
+            trigger: trigger,
+            channel: "tiktok",
             channel_credential_id: channel_credential.id,
-            order_ids:             order_ids,
-            window_days:           window_days
+            connection_name: channel_credential.display_name,
+            order_ids: order_ids,
+            window_days: window_days
           }
         )
       end
@@ -155,11 +149,11 @@ module Integrations
 
         finished_at = Time.current
         log.update!(
-          status:        status,
-          finished_at:   finished_at,
-          duration_ms:   ((finished_at - started_at) * 1000).round,
+          status: status,
+          finished_at: finished_at,
+          duration_ms: ((finished_at - started_at) * 1000).round,
           error_message: error_message,
-          metadata:      log.metadata.merge(count_metadata)
+          metadata: log.metadata.merge(count_metadata)
         )
       end
 
@@ -168,9 +162,9 @@ module Integrations
           returns_count: @returns_count,
           matched_count: @matched_count,
           missing_count: @missing_count,
-          synced_count:  @synced_count,
-          error_count:   error_count,
-          errors:        item_errors
+          synced_count: @synced_count,
+          error_count: error_count,
+          errors: item_errors
         }
       end
 
