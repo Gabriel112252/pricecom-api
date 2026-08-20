@@ -2,22 +2,20 @@
 
 class CriarEditarCredencialCanalTool < ApplicationTool
   description <<~DESC
-    Cria ou substitui a credencial de um canal de vendas (Yampi, Shopify, TikTok,
-    Mercado Livre, Shopee, Lucrofrete). AÇÃO SENSÍVEL — reconfigura a integração
-    inteira do canal. Exige confirmar: true, sem o qual nada é executado.
+    Cria ou substitui uma conexão de loja/canal (Yampi, Shopify, TikTok,
+    Mercado Livre, Shopee, Lucrofrete). Suporta várias lojas do mesmo canal
+    no tenant. AÇÃO SENSÍVEL — exige confirmar: true.
   DESC
 
-  # Mesmo shape de campos exigidos por canal já usado no formulário do
-  # frontend e em ChannelCredential::REQUIRED_FIELDS — não reexplicado aqui
-  # porque a tool aceita um Hash livre em `credenciais` e deixa a validação
-  # de presença pro model (mesmo caminho que a REST API usa).
   arguments do
     required(:canal).filled(:string).description("yampi, shopify, tiktok, mercadolivre, shopee ou lucrofrete")
-    required(:credenciais).filled(:hash).description("Campos da credencial (ex: {\"token\": \"...\", \"secret_key\": \"...\"})")
-    required(:confirmar).filled(:bool).description("Precisa ser true — confirma a intenção de sobrescrever a credencial do canal")
+    required(:credenciais).filled(:hash).description("Campos da credencial; nunca são devolvidos no resultado")
+    optional(:nome_loja).filled(:string).description("Nome da conexão, ex: Hidrabene ou Anasol")
+    optional(:credencial_id).filled(:integer).description("ID de uma conexão existente a editar")
+    required(:confirmar).filled(:bool).description("Precisa ser true para gravar a configuração")
   end
 
-  def call(canal:, credenciais:, confirmar:)
+  def call(canal:, credenciais:, confirmar:, nome_loja: nil, credencial_id: nil)
     admin_error = require_admin!
     return admin_error if admin_error
     return "Confirmação necessária: chame de novo com confirmar: true para prosseguir." unless confirmar
@@ -26,7 +24,9 @@ class CriarEditarCredencialCanalTool < ApplicationTool
     tenant = current_tenant
     return "Usuário sem tenant associado." unless tenant
 
-    credential = tenant.channel_credentials.find_or_initialize_by(channel: canal)
+    credential = resolve_credential(tenant, canal, credencial_id: credencial_id, nome_loja: nome_loja)
+    return credential if credential.is_a?(String)
+
     credential.credentials = credenciais
     credential.status = "pending"
 
@@ -34,33 +34,52 @@ class CriarEditarCredencialCanalTool < ApplicationTool
       return "Não foi possível salvar: #{credential.errors.full_messages.join(', ')}"
     end
 
-    # Só o fato de ter mudado, nunca os valores — mesmo cuidado do
-    # ChannelCredentialsController#connect. source: "mcp" reaproveita a
-    # action já existente (channel_credential.updated) em vez de criar uma
-    # nova, decisão já tomada no levantamento anterior.
     log_activity!(
       action: "channel_credential.updated",
       target: credential,
-      metadata: { channel: credential.channel, source: "mcp" }
+      metadata: {
+        channel: credential.channel,
+        channel_credential_id: credential.id,
+        connection_name: credential.display_name,
+        source: "mcp"
+      }
     )
 
     authenticate_if_possible(credential)
 
     {
-      confirmacao: "Credencial do canal #{credential.channel} salva.",
+      confirmacao: "Conexão #{credential.display_name} (#{credential.channel}) salva.",
+      credencial_id: credential.id,
       canal: credential.channel,
-      status: credential.status
+      nome_loja: credential.display_name,
+      status: credential.status,
+      requer_oauth: %w[tiktok shopee].include?(credential.channel)
     }
   end
 
   private
 
-  # Mesma orquestração de ChannelCredentialsController#connect (Channel.
-  # ensure_for!, autenticação imediata pros canais que não dependem de
-  # OAuth) — duplicada aqui em vez de extraída pra um service porque o
-  # controller já é testado e não queria arriscar mexer nele por essa
-  # tool; se isso incomodar, uma extração futura pra
-  # Integrations::ConnectChannelCredential resolve os dois de uma vez.
+  def resolve_credential(tenant, canal, credencial_id:, nome_loja:)
+    scope = tenant.channel_credentials.where(channel: canal)
+
+    if credencial_id.present?
+      credential = scope.find_by(id: credencial_id)
+      return credential if credential
+
+      return "Credencial #{credencial_id} não encontrada para o canal #{canal}."
+    end
+
+    if nome_loja.present?
+      return scope.find_or_initialize_by(name: nome_loja.to_s.strip)
+    end
+
+    records = scope.order(:id).limit(2).to_a
+    return records.first if records.one?
+    return tenant.channel_credentials.new(channel: canal, name: ChannelCredential.default_name_for(canal)) if records.empty?
+
+    "Existem várias conexões para #{canal}. Informe credencial_id ou nome_loja para não sobrescrever a loja errada."
+  end
+
   def authenticate_if_possible(credential)
     if credential.channel == "lucrofrete"
       Integrations::LucrofreteClient.new(credential).authenticate!
@@ -76,9 +95,6 @@ class CriarEditarCredencialCanalTool < ApplicationTool
     credential.update!(status: "active")
   rescue Integrations::AuthenticationError, Integrations::ApiError, Integrations::RateLimitError => e
     credential.update!(status: "error")
-    # Não retorna erro pro caller — a credencial já foi salva (log já
-    # gravado); status: "error" no retorno acima já comunica que a
-    # autenticação falhou, mesmo comportamento de UX do endpoint REST.
-    Rails.logger.warn("[CriarEditarCredencialCanalTool] auth failed channel=#{credential.channel}: #{e.message}")
+    Rails.logger.warn("[CriarEditarCredencialCanalTool] auth failed channel_credential_id=#{credential.id}: #{e.message}")
   end
 end
