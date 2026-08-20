@@ -163,12 +163,11 @@ yampi_idworks_tracking_operational_issues:
   class: "OperationalAlerts::YampiIdworksTrackingIssuesSyncJob"
   queue: integrations
 
-# Garantia diária de rastreio: às 04:30 de São Paulo revalida os pedidos que
-# estão/estavam em Em transporte, busca novamente a IDWorks quando a Yampi
-# está sem track_code e corrige automaticamente quando ShippingId já existe.
-# O que continuar sem rastreio vira pendência crítica na aba Rastreio.
+# O integrador executa a varredura pesada às 04:30 de São Paulo. Quinze
+# minutos depois o Pricecom lê o resultado fechado, registra as contagens no
+# log e materializa o que restou como pendência crítica na aba Rastreio.
 yampi_idworks_tracking_daily_reconciliation:
-  cron: "30 4 * * * America/Sao_Paulo"
+  cron: "45 4 * * * America/Sao_Paulo"
   class: "OperationalAlerts::YampiIdworksTrackingDailyReconciliationJob"
   queue: integrations
 
