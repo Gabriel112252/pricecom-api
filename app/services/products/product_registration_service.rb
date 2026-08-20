@@ -37,7 +37,11 @@ module Products
 
       ProductRegistration.transaction do
         registration.save!
-        sync_publications!(registration, attrs[:channels])
+        sync_publications!(
+          registration,
+          channels: attrs[:channels],
+          channel_credential_ids: attrs[:channel_credential_ids]
+        )
         refresh_validation_state!(registration)
       end
 
@@ -61,7 +65,13 @@ module Products
         registration.price_cents = parse_price_cents(attrs[:price_cents]) if attrs.key?(:price_cents)
         registration.save!
 
-        sync_publications!(registration, attrs[:channels]) if attrs.key?(:channels)
+        if attrs.key?(:channels) || attrs.key?(:channel_credential_ids)
+          sync_publications!(
+            registration,
+            channels: attrs[:channels],
+            channel_credential_ids: attrs[:channel_credential_ids]
+          )
+        end
         refresh_validation_state!(registration)
       end
 
@@ -101,11 +111,11 @@ module Products
           lead_outlier: false
         )
 
-        registration.publications.find_each do |publication|
+        registration.publications.includes(:channel_credential).find_each do |publication|
           publication.update!(
             status: "waiting_connector",
             error_code: "publisher_not_configured",
-            error_message: "Publicação automática para #{channel_label(publication.channel)} ainda não está habilitada no Pricecom."
+            error_message: "Publicação automática para #{destination_label(publication)} ainda não está habilitada no Pricecom."
           )
         end
 
@@ -115,7 +125,8 @@ module Products
           validation_errors: [],
           metadata: registration.metadata.merge(
             "parent_product_id" => parent.id,
-            "local_product_created_at" => Time.current.iso8601
+            "local_product_created_at" => Time.current.iso8601,
+            "channel_credential_ids" => registration.publications.pluck(:channel_credential_id).compact
           )
         )
       end
@@ -153,13 +164,13 @@ module Products
       duplicate_scope = duplicate_scope.where.not(id: registration.product_id) if registration.product_id.present?
       messages << "Já existe um produto com este SKU no Pricecom." if registration.sku.present? && duplicate_scope.exists?
 
-      selected_channels = registration.publications.pluck(:channel)
-      messages << "Selecione ao menos um canal de destino." if selected_channels.empty?
+      publications = registration.publications.includes(:channel_credential).to_a
+      messages << "Selecione ao menos uma loja/canal de destino." if publications.empty?
 
-      parent_channels = registration.parent_product.channel_product_listings.distinct.pluck(:channel)
-      unavailable = selected_channels - parent_channels
-      unavailable.each do |channel|
-        messages << "A variação-base não está cadastrada em #{channel_label(channel)}."
+      publications.each do |publication|
+        next if parent_available_in_destination?(registration.parent_product, publication)
+
+        messages << "A variação-base não está cadastrada em #{destination_label(publication)}."
       end
 
       messages.uniq
@@ -169,19 +180,54 @@ module Products
 
     attr_reader :tenant, :user
 
-    def sync_publications!(registration, channels)
-      selected = Array(channels).map { |channel| channel.to_s.downcase.strip }.reject(&:blank?).uniq
-      invalid = selected - ProductRegistrationPublication::CHANNELS
-      raise ValidationError, invalid.map { |channel| "Canal inválido: #{channel}" } if invalid.any?
+    def sync_publications!(registration, channels:, channel_credential_ids:)
+      destinations = []
+
+      Array(channel_credential_ids).reject(&:blank?).uniq.each do |credential_id|
+        credential = tenant.channel_credentials.find(credential_id)
+        unless ProductRegistrationPublication::CHANNELS.include?(credential.channel)
+          raise ValidationError, [ "Canal inválido para publicação: #{credential.channel}" ]
+        end
+
+        destinations << { channel: credential.channel, channel_credential: credential }
+      end
+
+      Array(channels).map { |channel| channel.to_s.downcase.strip }.reject(&:blank?).uniq.each do |channel|
+        unless ProductRegistrationPublication::CHANNELS.include?(channel)
+          raise ValidationError, [ "Canal inválido: #{channel}" ]
+        end
+
+        credentials = tenant.channel_credentials.where(channel: channel).order(:id).limit(2).to_a
+        if credentials.many?
+          raise ValidationError, [
+            "Existem várias lojas em #{channel_label(channel)}. Informe channel_credential_ids para escolher a conexão correta."
+          ]
+        end
+
+        destinations << { channel: channel, channel_credential: credentials.first }
+      end
+
+      destinations.uniq! { |destination| [ destination[:channel], destination[:channel_credential]&.id ] }
+      desired_keys = destinations.map { |destination| [ destination[:channel], destination[:channel_credential]&.id ] }
 
       registration.publications.to_a.each do |publication|
-        next if selected.include?(publication.channel) || publication.status == "published"
+        key = [ publication.channel, publication.channel_credential_id ]
+        next if desired_keys.include?(key) || publication.status == "published"
 
         publication.destroy!
       end
 
-      selected.each do |channel|
-        publication = registration.publications.find_or_initialize_by(channel: channel)
+      destinations.each do |destination|
+        publication = if destination[:channel_credential]
+          registration.publications.find_or_initialize_by(channel_credential: destination[:channel_credential])
+        else
+          registration.publications.find_or_initialize_by(
+            channel: destination[:channel],
+            channel_credential_id: nil
+          )
+        end
+
+        publication.channel = destination[:channel]
         if registration.product_id.blank? && publication.status != "published"
           publication.status = "planned"
           publication.error_code = nil
@@ -189,6 +235,23 @@ module Products
         end
         publication.save!
       end
+    end
+
+    def parent_available_in_destination?(parent, publication)
+      if publication.channel_credential_id.present?
+        return true if parent.channel_product_listings.where(
+          channel_credential_id: publication.channel_credential_id
+        ).exists?
+
+        # Compatibility for a listing created before the multi-store migration.
+        single_connection = tenant.channel_credentials.where(channel: publication.channel).limit(2).count == 1
+        return single_connection && parent.channel_product_listings.where(
+          channel: publication.channel,
+          channel_credential_id: nil
+        ).exists?
+      end
+
+      parent.channel_product_listings.where(channel: publication.channel).exists?
     end
 
     def refresh_validation_state!(registration)
@@ -218,6 +281,13 @@ module Products
 
     def channel_label(channel)
       CHANNEL_LABELS.fetch(channel.to_s, channel.to_s.humanize)
+    end
+
+    def destination_label(publication)
+      credential = publication.channel_credential
+      return channel_label(publication.channel) unless credential
+
+      "#{channel_label(publication.channel)} — #{credential.display_name}"
     end
   end
 end
