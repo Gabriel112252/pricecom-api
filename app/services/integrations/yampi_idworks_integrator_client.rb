@@ -16,6 +16,7 @@ module Integrations
     end
 
     TIMEOUT = 15
+    RECONCILIATION_TIMEOUT = 600
 
     def configured?
       base_url.present? && token.present?
@@ -36,7 +37,7 @@ module Integrations
     end
 
     def reconcile_tracking_operational_issues
-      request(:post, "/api/v1/operational_issues/reconcile_tracking")
+      request(:post, "/api/v1/operational_issues/reconcile_tracking", timeout: RECONCILIATION_TIMEOUT)
     end
 
     def reprocess(issue_id)
@@ -45,12 +46,13 @@ module Integrations
 
     private
 
-    def request(method, path)
+    def request(method, path, timeout: TIMEOUT)
       raise Error, "Yampi/IDWorks integrator is not configured" unless configured?
 
       response = connection.public_send(method, path) do |request|
         request.headers["Accept"] = "application/json"
         request.headers["Authorization"] = "Bearer #{token}"
+        request.options.timeout = timeout
       end
 
       body = parse_body(response.body)
