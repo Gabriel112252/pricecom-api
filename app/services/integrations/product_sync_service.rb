@@ -1,9 +1,7 @@
 module Integrations
-  # Orchestrates a full product sync for one ChannelCredential: builds the
-  # right adapter, authenticates, fetches products, and upserts Product +
-  # ChannelProductListing per SKU by external_sku. The adapter interface is
-  # identical across channels, so this class never branches on `channel`
-  # itself.
+  # Orchestrates a full product sync for one concrete ChannelCredential.
+  # Multiple credentials may now exist for the same provider, so every
+  # synced listing is tied back to the exact store connection that produced it.
   class ProductSyncService
     ADAPTERS = {
       "yampi"        => YampiAdapter,
@@ -23,9 +21,6 @@ module Integrations
       new(channel_credential).call
     end
 
-    # Reused by StockAlerts::ReplenishmentExecutorService so a channel's
-    # write path resolves the adapter the exact same way its read/sync path
-    # does, instead of re-implementing the ADAPTERS lookup elsewhere.
     def self.adapter_for(channel_credential)
       klass = ADAPTERS.fetch(channel_credential.channel) do
         raise ArgumentError, "no adapter registered for channel #{channel_credential.channel}"
@@ -38,11 +33,6 @@ module Integrations
       @tenant = channel_credential.tenant
     end
 
-    # Channels whose role is "consumidor_pedido" never own real stock —
-    # they place orders against another channel's inventory (e.g. Yampi
-    # checkout backed by Shopify). Syncing their catalog would create a
-    # duplicate, disconnected ChannelProductListing that nothing ever
-    # deducts from, so we skip them entirely rather than sync-then-ignore.
     def call
       if channel_credential.consumidor_pedido?
         return Result.new(
@@ -110,8 +100,6 @@ module Integrations
       [ synced_count, item_errors ]
     end
 
-    # Matches by external_sku first: an existing local Product with that
-    # SKU is reused, otherwise a new Product is created automatically.
     def upsert_listing(normalized)
       product = tenant.products.find_or_initialize_by(sku: normalized[:external_sku])
       if product.new_record?
@@ -122,25 +110,18 @@ module Integrations
 
       listing = ChannelProductListing.find_or_initialize_by(
         tenant: tenant,
-        channel: channel_credential.channel,
+        channel_credential: channel_credential,
         external_id: normalized[:external_id]
       )
+      listing.channel                    = channel_credential.channel
       listing.product                    = product
       listing.external_sku               = normalized[:external_sku]
       listing.stock_qty                  = normalized[:stock_qty]
       listing.price                      = normalized[:price]
       listing.raw_payload                = normalized[:raw]
       listing.synced_at                  = Time.current
-      # Optional, channel-specific write-path identifiers (Shopify's
-      # inventory_item_id, TikTok's parent product_id — see each adapter's
-      # #normalize_product). Channels without an equivalent simply don't
-      # include the key, so it stays nil for them without any branching on
-      # `channel` here.
       listing.external_inventory_item_id = normalized[:external_inventory_item_id]
       listing.external_product_id        = normalized[:external_product_id]
-      # Fase 2 — normalized selling status/eligibility, same call that
-      # already fetches stock_qty (see each adapter's
-      # #normalize_selling_status). No separate poller needed.
       listing.remote_status              = normalized[:remote_status]
       listing.remote_status_reason       = normalized[:remote_status_reason]
       listing.remote_status_metadata     = normalized[:remote_status_metadata] || {}
@@ -171,13 +152,6 @@ module Integrations
       Rails.logger.error("[StockMovement] channel sync log failed for listing=#{listing.id}: #{e.message}")
     end
 
-    # Direct call at the end of the sync flow, same style as
-    # ProductCostSyncService calling apply_cost_to_orders right after
-    # saving — this codebase doesn't use callbacks/pub-sub for this kind of
-    # post-sync side effect. Rescued narrowly and separately from
-    # #sync_all's per-item rescue so a bug in alert evaluation is logged
-    # but never counted as "this SKU failed to sync" — the catalog sync
-    # itself already fully succeeded by this point.
     def evaluate_stock_alert(listing)
       StockAlerts::EvaluationService.call(listing.product)
     rescue => e
@@ -187,11 +161,16 @@ module Integrations
     def start_log
       IntegrationSyncLog.create!(
         tenant: tenant,
+        channel_credential: channel_credential,
         direction: "inbound",
         action: "product_sync",
         status: "pending",
         started_at: Time.current,
-        metadata: { channel: channel_credential.channel, channel_credential_id: channel_credential.id }
+        metadata: {
+          channel: channel_credential.channel,
+          channel_credential_id: channel_credential.id,
+          connection_name: channel_credential.display_name
+        }
       )
     end
 
