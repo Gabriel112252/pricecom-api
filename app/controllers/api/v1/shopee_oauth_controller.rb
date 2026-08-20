@@ -1,27 +1,26 @@
 module Api
   module V1
-    # OAuth de loja da Shopee, nos moldes do TiktokOauthController: o admin
-    # pede a authorize_url (autenticado), autoriza a loja no site da Shopee
-    # e ela redireciona o navegador de volta com GET para
-    # /api/v1/webhooks/shopee levando code + shop_id.
-    #
-    # A Shopee não tem um parâmetro `state` próprio: o tenant vai embutido
-    # como query param dentro da própria URL de redirect (a Shopee preserva
-    # os params existentes ao anexar code/shop_id), assinado com
-    # message_verifier igual ao fluxo do TikTok.
     class ShopeeOauthController < ApplicationController
       MISSING_CREDENTIALS_MESSAGE = "Cadastre Partner ID e Partner Key antes de autorizar".freeze
 
       skip_before_action :authenticate_request!, only: :callback
 
       def authorize_url
-        credential = current_tenant.channel_credentials.find_by(channel: "shopee")
+        credential = resolve_current_credential
+        unless credential
+          return render json: { error: credential_resolution_error }, status: :unprocessable_entity
+        end
+
         unless shopee_credentials_configured?(credential)
           return render json: { error: MISSING_CREDENTIALS_MESSAGE }, status: :unprocessable_entity
         end
 
-        authorize_url = auth_service(credential).authorize_url(redirect_url: shopee_callback_url)
-        render json: { authorize_url: authorize_url }
+        authorize_url = auth_service(credential).authorize_url(redirect_url: shopee_callback_url(credential))
+        render json: {
+          channel_credential_id: credential.id,
+          connection_name: credential.display_name,
+          authorize_url: authorize_url
+        }
       end
 
       def callback
@@ -29,15 +28,14 @@ module Api
         shop_id = params[:shop_id].to_s.strip
 
         return redirect_error("Callback sem código de autorização") if code.blank?
-        # main_account_id no lugar de shop_id = autorização por conta
-        # principal (multi-loja), fluxo que o modelo atual não suporta —
-        # mesma restrição de uma-loja-por-credencial do TikTok.
         return redirect_error("Callback sem shop_id (autorização por conta principal não é suportada)") if shop_id.blank?
 
-        tenant = resolve_tenant
+        state = verified_state
+        tenant = resolve_tenant(state)
         return redirect_error("Tenant não identificado no callback da Shopee") unless tenant
 
-        credential = tenant.channel_credentials.find_by(channel: "shopee")
+        credential = resolve_callback_credential(tenant, state)
+        return redirect_error(credential_resolution_error) unless credential
         return redirect_error(MISSING_CREDENTIALS_MESSAGE) unless shopee_credentials_configured?(credential)
 
         token_data = auth_service(credential).exchange_code(code: code, shop_id: shop_id)
@@ -45,8 +43,12 @@ module Api
         credential = upsert_credential(credential, token_data, shop_id: shop_id)
         Channel.ensure_for!(tenant, "shopee")
 
-        redirect_to frontend_redirect_url("connected", "Shopee conectada", credential_id: credential.id),
-          allow_other_host: true
+        redirect_to frontend_redirect_url(
+          "connected",
+          "Shopee conectada",
+          credential_id: credential.id,
+          connection_name: credential.display_name
+        ), allow_other_host: true
       rescue Integrations::AuthenticationError, Integrations::ApiError, Integrations::RateLimitError => e
         redirect_error(e.message)
       rescue ActiveRecord::RecordInvalid => e
@@ -55,18 +57,67 @@ module Api
 
       private
 
+      def resolve_current_credential
+        scope = current_tenant.channel_credentials.where(channel: "shopee")
+
+        if params[:channel_credential_id].present?
+          credential = scope.find_by(id: params[:channel_credential_id])
+          @credential_resolution_error = "Conexão Shopee não encontrada" unless credential
+          return credential
+        end
+
+        if params[:name].present?
+          credential = scope.find_by(name: params[:name].to_s.strip)
+          @credential_resolution_error = "Conexão Shopee '#{params[:name]}' não encontrada" unless credential
+          return credential
+        end
+
+        records = scope.order(:id).limit(2).to_a
+        return records.first if records.one?
+
+        @credential_resolution_error = if records.empty?
+          "Shopee ainda não está conectada"
+        else
+          "Existem várias conexões Shopee; informe channel_credential_id ou name"
+        end
+        nil
+      end
+
+      def resolve_callback_credential(tenant, state)
+        credential_id = state[:channel_credential_id] || state["channel_credential_id"]
+        if credential_id.present?
+          credential = tenant.channel_credentials.find_by(id: credential_id, channel: "shopee")
+          @credential_resolution_error = "Conexão Shopee do OAuth não encontrada" unless credential
+          return credential
+        end
+
+        # Compatibility with authorize URLs created before multi-store.
+        records = tenant.channel_credentials.where(channel: "shopee").order(:id).limit(2).to_a
+        return records.first if records.one?
+
+        @credential_resolution_error = "Não foi possível identificar qual conexão Shopee deve receber a autorização"
+        nil
+      end
+
+      def credential_resolution_error
+        @credential_resolution_error.presence || "Conexão Shopee não identificada"
+      end
+
       def auth_service(credential)
         Integrations::ShopeeAuthService.new(credential.credentials)
       end
 
-      def shopee_callback_url
+      def shopee_callback_url(credential)
         base = "#{request.base_url.sub(/\Ahttp:/, "https:")}/api/v1/webhooks/shopee"
-        "#{base}?#{{ state: oauth_state }.to_query}"
+        "#{base}?#{{ state: oauth_state(credential) }.to_query}"
       end
 
-      def oauth_state
+      def oauth_state(credential)
         Rails.application.message_verifier(:shopee_oauth_state)
-          .generate({ tenant_id: current_tenant.id }, expires_in: 10.minutes)
+          .generate(
+            { tenant_id: current_tenant.id, channel_credential_id: credential.id },
+            expires_in: 10.minutes
+          )
       end
 
       def shopee_credentials_configured?(credential)
@@ -79,8 +130,7 @@ module Api
         credentials[key].presence || credentials[key.to_sym].presence
       end
 
-      def resolve_tenant
-        state = verified_state
+      def resolve_tenant(state)
         tenant_id = state[:tenant_id] || state["tenant_id"]
         tenant_id.present? ? Tenant.find_by(id: tenant_id) : nil
       end
