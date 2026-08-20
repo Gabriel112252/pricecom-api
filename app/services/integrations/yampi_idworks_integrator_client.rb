@@ -25,6 +25,12 @@ module Integrations
       request(:get, "/api/v1/operational_issues")
     end
 
+    def daily_operational_issues(date: nil)
+      path = "/api/v1/operational_issues/daily"
+      path = "#{path}?date=#{date}" if date.present?
+      request(:get, path)
+    end
+
     def reprocess(issue_id)
       request(:post, "/api/v1/operational_issues/#{issue_id}/reprocess")
     end
