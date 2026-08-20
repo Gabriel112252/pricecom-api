@@ -1,31 +1,14 @@
 module Integrations
   module Shopee
-    # Polls Shopee orders for one ChannelCredential, mirroring
-    # Integrations::Tiktok::OrdersPollingService: 30-day backfill on the
-    # first run (orders_sync_cursor_at blank), incremental window with
-    # 10min overlap afterwards, guarded by a per-credential Redis lock and
-    # recorded in IntegrationSyncLog.
-    #
-    # Diferenças estruturais vs TikTok:
-    # - get_order_list limita cada request a uma janela de 15 dias, então
-    #   a janela efetiva (backfill de 30d ou incremental) é fatiada em
-    #   slices de <= 15 dias, cada uma paginada por cursor (more +
-    #   next_cursor) — ver ShopeeAdapter#fetch_orders_page.
-    # - a lista devolve só order_sn; os pedidos completos vêm em batch de
-    #   50 pelo get_order_detail antes de processar.
-    # Como no TikTok, o incremental filtra por update_time (pega criação E
-    # transição de status); reprocessar pedido inalterado é seguro
-    # (UpsertOrder é idempotente).
+    # Polls Shopee orders for one concrete ChannelCredential.
     class OrdersPollingService
       BACKFILL_DAYS = 30
       INCREMENTAL_OVERLAP = 10.minutes
       PAGE_SIZE = Integrations::ShopeeAdapter::ORDERS_PAGE_SIZE
       DETAIL_BATCH_SIZE = Integrations::ShopeeAdapter::ORDER_DETAIL_MAX_IDS
-      # Margem sob o limite de 15 dias do get_order_list — não fatiar
-      # exatamente no teto para nunca esbarrar em validação de borda.
       WINDOW_SLICE = 14.days
 
-      PollingEvent = Struct.new(:tenant, :payload, :event_type, :integration, keyword_init: true)
+      PollingEvent = Struct.new(:tenant, :payload, :event_type, :integration, :channel_credential, keyword_init: true)
 
       Result = Struct.new(:outcome, :error_message, :retry_after, :metadata, keyword_init: true) do
         def success? = outcome == :success
@@ -124,8 +107,6 @@ module Integrations
         @processed_examples = []
       end
 
-      # Backfill varre por create_time; incremental por update_time, pra
-      # capturar também transições de status de pedidos antigos.
       def time_range_field
         sync_mode == "incremental" ? "update_time" : "create_time"
       end
@@ -136,8 +117,6 @@ module Integrations
         end
       end
 
-      # [cursor_from, cursor_to] fatiado em janelas de <= 14 dias, na ordem
-      # cronológica — o limite de 15 dias é do get_order_list, não nosso.
       def window_slices
         slices = []
         from = cursor_from
@@ -168,17 +147,11 @@ module Integrations
           process_order_sns(entries.map { |entry| entry["order_sn"].to_s }.reject(&:blank?))
           lock.renew
 
-          # v2 documenta next_cursor; next_offset fica como fallback
-          # defensivo de shape antigo. Página vazia encerra mesmo com
-          # more=true — nunca perseguir cursor que não avança.
           cursor = page["next_cursor"].presence || page["next_offset"].presence
           break if entries.empty? || !page["more"] || cursor.blank?
         end
       end
 
-      # A lista só identifica pedidos; o dinheiro/itens vêm do detail em
-      # batches de 50. Dedup antes do fetch: um pedido atualizado duas
-      # vezes na janela só custa um detail.
       def process_order_sns(order_sns)
         fresh_sns = []
         order_sns.each do |sn|
@@ -213,7 +186,13 @@ module Integrations
         observe_cursor_timestamp(cursor_timestamp_for(raw_order))
 
         existing_order = find_existing_shopee_order(external_id)
-        event = PollingEvent.new(tenant: tenant, payload: raw_order, event_type: "order.polling", integration: integration)
+        event = PollingEvent.new(
+          tenant: tenant,
+          payload: raw_order,
+          event_type: "order.polling",
+          integration: integration,
+          channel_credential: channel_credential
+        )
         result = Integrations::Processors::ShopeeOrderProcessor.call(event)
 
         if result.outcome == :success
@@ -264,7 +243,7 @@ module Integrations
       end
 
       def find_existing_shopee_order(external_id)
-        tenant.orders.joins(:channel).find_by(external_id: external_id, channels: { platform: "shopee" })
+        tenant.orders.find_by(channel_credential: channel_credential, external_id: external_id)
       end
 
       def record_ignored(external_id, reason)
@@ -279,8 +258,6 @@ module Integrations
         processed_examples << { external_id: external_id, outcome: outcome }
       end
 
-      # Fase 4: espelho do PendingFinancialSyncJob do TikTok — puxa o
-      # escrow dos pedidos recém-ingeridos que ainda não têm financeiro.
       def enqueue_pending_escrow_sync
         Integrations::Shopee::PendingEscrowSyncJob.perform_later(channel_credential.id)
       rescue => e
@@ -291,6 +268,7 @@ module Integrations
         IntegrationSyncLog.create!(
           tenant: tenant,
           integration: integration,
+          channel_credential: channel_credential,
           direction: "inbound",
           action: "shopee_order_polling",
           status: "pending",
@@ -318,6 +296,7 @@ module Integrations
           trigger: trigger,
           channel: "shopee",
           channel_credential_id: channel_credential.id,
+          connection_name: channel_credential.display_name,
           sync_mode: sync_mode,
           window_from: cursor_from.iso8601,
           window_to: cursor_to.iso8601,
