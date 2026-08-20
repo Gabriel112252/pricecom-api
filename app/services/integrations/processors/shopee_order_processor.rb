@@ -1,7 +1,8 @@
 module Integrations
   module Processors
-    # Espelho do TiktokOrderProcessor para pedidos Shopee (polling ou, no
-    # futuro, push): normaliza e delega ao UpsertOrder channel-agnóstico.
+    # Espelho do TiktokOrderProcessor para pedidos Shopee (polling ou push):
+    # normaliza e delega ao UpsertOrder channel-agnóstico, preservando a
+    # conexão concreta da loja quando disponível.
     class ShopeeOrderProcessor
       PROVIDER = "shopee"
       Result   = Integrations::EventProcessor::Result
@@ -26,10 +27,11 @@ module Integrations
         end
 
         upsert = Integrations::Orders::UpsertOrder.call(
-          tenant:      @event.tenant,
-          normalized:  normalized,
-          integration: @event.integration,
-          provider:    PROVIDER
+          tenant:             @event.tenant,
+          normalized:         normalized,
+          integration:        @event.integration,
+          channel_credential: event_channel_credential,
+          provider:           PROVIDER
         )
 
         unless upsert.success?
@@ -50,6 +52,12 @@ module Integrations
             items_count:  upsert.order.order_items.size
           }
         )
+      end
+
+      private
+
+      def event_channel_credential
+        @event.channel_credential if @event.respond_to?(:channel_credential)
       end
     end
   end
