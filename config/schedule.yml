@@ -155,9 +155,19 @@ operational_sales_anomaly_detection:
   class: "OperationalAlerts::SalesAnomalyDetectionJob"
   queue: integrations
 
+# Garantia diária de fechamento: às 05:30 de São Paulo, valida 100% dos
+# order.paid do dia anterior contra OrderMapping.idworks_id. Qualquer pedido
+# sem IDWorks vira pendência crítica na Operação, independentemente do estado
+# antigo do WA Upsell. O integrador calcula a janela D-1 em America/Sao_Paulo.
+yampi_idworks_daily_reconciliation:
+  cron: "30 5 * * * America/Sao_Paulo"
+  class: "OperationalAlerts::YampiIdworksDailyReconciliationJob"
+  queue: integrations
+
 # Consulta a fonte de verdade do integrador Yampi->IDWorks. Só materializa
 # na Operação pedidos pagos há mais de 2h que continuam realmente sem
-# OrderMapping; esperas legítimas do WA Upsell ficam suprimidas na origem.
+# OrderMapping; esperas legítimas do WA Upsell ficam suprimidas na origem,
+# mas nunca por mais de 5h após o pagamento.
 # A ausência numa consulta completa resolve automaticamente a pendência.
 yampi_idworks_operational_issues:
   cron: "1,16,31,46 * * * *"
