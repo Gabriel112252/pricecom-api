@@ -155,6 +155,23 @@ operational_sales_anomaly_detection:
   class: "OperationalAlerts::SalesAnomalyDetectionJob"
   queue: integrations
 
+# Snapshot leve das pendencias de rastreio já detectadas pelo integrador.
+# Roda durante o dia para resolver rapidamente o alerta quando o rastreio
+# aparece ou quando o pedido deixa o status Em transporte.
+yampi_idworks_tracking_operational_issues:
+  cron: "6,21,36,51 * * * *"
+  class: "OperationalAlerts::YampiIdworksTrackingIssuesSyncJob"
+  queue: integrations
+
+# Garantia diária de rastreio: às 04:30 de São Paulo revalida os pedidos que
+# estão/estavam em Em transporte, busca novamente a IDWorks quando a Yampi
+# está sem track_code e corrige automaticamente quando ShippingId já existe.
+# O que continuar sem rastreio vira pendência crítica na aba Rastreio.
+yampi_idworks_tracking_daily_reconciliation:
+  cron: "30 4 * * * America/Sao_Paulo"
+  class: "OperationalAlerts::YampiIdworksTrackingDailyReconciliationJob"
+  queue: integrations
+
 # Garantia diária de fechamento: às 05:30 de São Paulo, valida 100% dos
 # order.paid do dia anterior contra OrderMapping.idworks_id. Qualquer pedido
 # sem IDWorks vira pendência crítica na Operação, independentemente do estado
