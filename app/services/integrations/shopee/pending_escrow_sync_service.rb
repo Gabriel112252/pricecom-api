@@ -1,12 +1,7 @@
 module Integrations
   module Shopee
-    # Varre pedidos Shopee já ingeridos sem financeiro (financial_synced_at
-    # nulo) e puxa o escrow de cada um — espelho enxuto do
-    # Tiktok::PendingFinancialSyncService, reusando as mesmas colunas de
-    # tracking do Order (financial_sync_attempts/_next_attempt_at/
-    # _pending_reason, que são channel-agnósticas). Enfileirado pelo
-    # OrdersPollingService após cada ingestão com criações/atualizações;
-    # não tem cron próprio (mesma decisão do TikTok).
+    # Varre pedidos da conexão Shopee específica sem financeiro e puxa o
+    # escrow de cada um. Nunca mistura pedidos de duas lojas Shopee do tenant.
     class PendingEscrowSyncService
       ACTION = "shopee_pending_escrow_sync".freeze
       DEFAULT_BATCH_SIZE = Integer(ENV.fetch("SHOPEE_PENDING_ESCROW_BATCH_SIZE", "100"))
@@ -15,10 +10,6 @@ module Integrations
       RECENT_BASE_DELAY = 30.minutes
       OLD_BASE_DELAY = 4.hours
       MAX_DELAY = 24.hours
-      # Escrow só existe depois que o pedido anda: unpaid/cancelado ficam
-      # fora; COMPLETED é quando a Shopee consolida o repasse, mas os
-      # intermediários já podem ter order_income parcial — o
-      # PendingEscrowError cobre os que ainda não têm.
       ELIGIBLE_STATUSES = %w[
         ready_to_ship processed retry_ship shipped
         to_confirm_receive completed
@@ -84,7 +75,8 @@ module Integrations
       end
 
       def pending_orders
-        channel.orders
+        tenant.orders
+          .where(channel_credential: channel_credential)
           .where(financial_synced_at: nil)
           .where("LOWER(COALESCE(orders.status, '')) IN (?)", ELIGIBLE_STATUSES)
           .where("COALESCE(orders.ordered_at, orders.created_at) >= ?", window_days.days.ago)
@@ -156,6 +148,7 @@ module Integrations
       def start_log
         IntegrationSyncLog.create!(
           tenant: tenant,
+          channel_credential: channel_credential,
           direction: "inbound",
           action: ACTION,
           status: "pending",
@@ -179,6 +172,7 @@ module Integrations
         {
           "channel" => "shopee",
           "channel_credential_id" => channel_credential.id,
+          "connection_name" => channel_credential.display_name,
           "batch_size" => batch_size,
           "window_days" => window_days,
           "processed_count" => @processed_count,
