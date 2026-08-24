@@ -4,12 +4,25 @@ module Api
     # (NF) matching. Separate from ChannelCredentialsController since
     # idworks isn't a sales channel; it's modeled as an Integration
     # (provider: "idworks"), same as the generic Integrations::* records.
+    #
+    # A tenant may have more than one idworks account (e.g. Hidrabene and
+    # Anasol). Each account is a separate Integration distinguished by name.
+    # Existing clients that omit name/integration_id keep using the original
+    # "idworks" integration for backward compatibility.
     class IdworksController < ApplicationController
       before_action :require_admin!
 
+      DEFAULT_INTEGRATION_NAME = "idworks".freeze
+
       # POST /api/v1/integrations/idworks/connect
+      # Params:
+      #   name: optional Integration name (defaults to "idworks")
+      #   credentials: idworks credentials hash
       def connect
-        integration = current_tenant.integrations.find_or_initialize_by(provider: "idworks", name: "idworks")
+        integration = current_tenant.integrations.find_or_initialize_by(
+          provider: "idworks",
+          name: requested_integration_name
+        )
         integration.credentials = credential_params
         integration.status = "disconnected"
 
@@ -37,6 +50,10 @@ module Api
       end
 
       # POST /api/v1/integrations/idworks/sync
+      # Accepts integration_id (preferred) or name. When both are omitted,
+      # falls back to the original "idworks" record so old clients continue
+      # to work unchanged.
+      #
       # Runs both the product cost pull and the order freight sync in one
       # call — the two are independent services internally
       # (Integrations::Idworks::ProductCostSyncService /
@@ -46,7 +63,7 @@ module Api
       # scheduled jobs (Idworks::ProductCostSyncJob / Idworks::OrderSyncJob)
       # use — see config/schedule.yml.
       def sync
-        integration = current_tenant.integrations.find_by(provider: "idworks")
+        integration = requested_idworks_integration
 
         if integration.nil? || integration.status != "connected"
           return render json: { error: "idworks ainda não está conectado" }, status: :unprocessable_entity
@@ -56,9 +73,11 @@ module Api
         order_result = Integrations::Idworks::OrderSyncService.call(integration, from: 24.hours.ago)
 
         render json: {
-          success:               !cost_result.error? && !order_result.error?,
-          products_synced_count: cost_result.synced_count,
-          orders_synced_count:   order_result.synced_count,
+          integration_id:         integration.id,
+          integration_name:       integration.name,
+          success:                !cost_result.error? && !order_result.error?,
+          products_synced_count:  cost_result.synced_count,
+          orders_synced_count:    order_result.synced_count,
           products_received_count: cost_result.metadata[:received_count] || cost_result.metadata["received_count"],
           products_found_by_sku_count: cost_result.metadata[:matched_count] || cost_result.metadata["matched_count"],
           products_updated_count: cost_result.metadata[:product_updated_count] || cost_result.metadata["product_updated_count"],
@@ -77,17 +96,18 @@ module Api
           order_freights_matched_examples: order_result.metadata[:matched_examples] || order_result.metadata["matched_examples"],
           orders_recalculated_count: (cost_result.metadata[:orders_recalculated_count] || cost_result.metadata["orders_recalculated_count"]).to_i +
             (order_result.metadata[:recalculated_count] || order_result.metadata["recalculated_count"]).to_i,
-          error_message:         [ cost_result.error_message, order_result.error_message ].compact.first
+          error_message:          [ cost_result.error_message, order_result.error_message ].compact.first
         }
       end
 
       # POST /api/v1/integrations/idworks/reconcile
-      # Gatilho manual do botão "Rodar agora" da aba Reconciliação idworks
-      # — não depende de DataSourceConfig (igual #sync), é uma ação
-      # explícita do usuário. threshold_pct e o próprio período pedido não
-      # são persistidos em lugar nenhum além do ReconciliationItem gerado.
+      # Gatilho manual do botão "Rodar agora" da aba Reconciliação idworks.
+      # integration_id/name are accepted for the connection gate so tenants
+      # with multiple idworks accounts don't depend on whichever row happens
+      # to be returned first. The reconciliation service itself remains
+      # tenant-wide and already compares all materialized idworks orders.
       def reconcile
-        integration = current_tenant.integrations.find_by(provider: "idworks")
+        integration = requested_idworks_integration
 
         if integration.nil? || integration.status != "connected"
           return render json: { error: "idworks ainda não está conectado" }, status: :unprocessable_entity
@@ -130,10 +150,27 @@ module Api
         params.require(:credentials).permit!.to_h
       end
 
+      def requested_integration_name
+        params[:name].presence || DEFAULT_INTEGRATION_NAME
+      end
+
+      def requested_idworks_integration
+        scope = current_tenant.integrations.where(provider: "idworks")
+
+        if params[:integration_id].present?
+          scope.find_by(id: params[:integration_id])
+        elsif params[:name].present?
+          scope.find_by(name: params[:name])
+        else
+          scope.find_by(name: DEFAULT_INTEGRATION_NAME) || scope.order(:created_at).first
+        end
+      end
+
       def integration_json(integration)
         {
           id:             integration.id,
           provider:       integration.provider,
+          name:           integration.name,
           status:         integration.status,
           last_synced_at: integration.last_synced_at
         }
