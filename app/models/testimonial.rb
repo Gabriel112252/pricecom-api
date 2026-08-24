@@ -1,5 +1,5 @@
 class Testimonial < ApplicationRecord
-  SOURCE_TYPES = %w[manual tiktok shopee].freeze
+  SOURCE_TYPES = %w[manual tiktok shopee mercadolivre].freeze
   STATUSES     = %w[draft approved published rejected].freeze
 
   # Upload manual aceita foto OU vídeo (curador escolhe) — antes desta
@@ -11,9 +11,10 @@ class Testimonial < ApplicationRecord
   ].freeze
 
   # Fluxo de curadoria: draft é sempre o ponto de entrada (manual, ou
-  # criado a partir de um import TikTok/Shopee); daí só anda pra frente
-  # (approved -> published) ou sai pro beco sem saída (rejected) — nunca
-  # volta pra draft nem pula etapa. Ver #status_transition_must_be_allowed.
+  # criado a partir de um import TikTok/Shopee/Mercado Livre); daí só anda
+  # pra frente (approved -> published) ou sai pro beco sem saída (rejected)
+  # — nunca volta pra draft nem pula etapa. Ver
+  # #status_transition_must_be_allowed.
   TRANSITIONS = {
     "draft"     => %w[approved rejected],
     "approved"  => %w[published rejected],
@@ -35,8 +36,9 @@ class Testimonial < ApplicationRecord
   has_many :testimonial_products, dependent: :destroy
   has_many :products, through: :testimonial_products
 
-  # source_type: manual (curador sobe texto/mídia direto) ou cache de um
-  # depoimento importado de TikTok/Shopee (ver tiktok_metadata/external_url).
+  # source_type identifica a origem real do conteúdo: manual, TikTok,
+  # Shopee ou Mercado Livre. external_url preserva o link público original
+  # quando a origem fornece um, sem precisar criar coluna nova por canal.
   has_one_attached :media
 
   # Sempre uma imagem (JPEG), nunca vídeo — gerado por
