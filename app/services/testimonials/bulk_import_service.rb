@@ -4,16 +4,17 @@ module Testimonials
   # Cria dezenas/centenas de Testimonial de uma vez a partir de um ZIP:
   # um CSV (sku, customer_name, rating, quote_text, image_filename) na raiz
   # + as imagens soltas, também na raiz, referenciadas pelo nome exato no
-  # CSV. Mesmo formato de progresso/relatório do Orders::ImportService
+  # CSV. image_filename pode ficar vazio quando a avaliação não tem foto.
+  # As colunas opcionais source_type e external_url preservam a origem real
+  # (ex: mercadolivre) e o link público do conteúdo importado.
+  #
+  # Mesmo formato de progresso/relatório do Orders::ImportService
   # (status/total_rows/processed_rows/error_rows/errors_log) — ver
   # Testimonials::ProcessBulkImportJob/Api::V1::TestimonialsController#bulk_import.
   #
-  # Diferença deliberada em relação ao Orders::ImportService: uma linha
-  # ruim (SKU inexistente, imagem faltando, rating fora de 1..5...) vira UM
-  # item em errors_log e o import CONTINUA — o pedido explícito desta
-  # feature é "não abortar o import inteiro por uma linha ruim". status só
-  # vira "failed" quando o ZIP/CSV inteiro é inutilizável (sem .csv, sem os
-  # cabeçalhos esperados) — não quando algumas linhas falham.
+  # Uma linha ruim (SKU inexistente, imagem referenciada mas faltando,
+  # rating fora de 1..5...) vira UM item em errors_log e o import CONTINUA.
+  # status só vira "failed" quando o ZIP/CSV inteiro é inutilizável.
   class BulkImportService
     REQUIRED_HEADERS = %w[sku customer_name rating quote_text image_filename].freeze
 
@@ -47,13 +48,6 @@ module Testimonials
         zip.each do |entry|
           next if entry.directory?
 
-          # Lê/escreve os bytes na mão (em vez de entry.extract) — o path
-          # que entry.extract monta é relativo a destination_directory via
-          # File.join, e um entry_path absoluto (o que dest é, vindo de um
-          # Dir.mktmpdir) não vira um "replace", vira concatenação: dava um
-          # path errado. Grava achatado (ignora qualquer subpasta do
-          # entry.name) pra casar 1:1 com o índice de #index_images, mesmo
-          # que o ZIP tenha sido gerado com estrutura de pastas por engano.
           dest = File.join(dir, File.basename(entry.name))
           File.binwrite(dest, entry.get_input_stream.read)
         end
@@ -73,9 +67,6 @@ module Testimonials
     end
 
     def process_csv(csv_path, images_index)
-      # bom|utf-8: aceita CSV exportado do Excel com BOM UTF-8 (comum em
-      # planilhas geradas no Windows) sem o BOM vazar pro nome da primeira
-      # coluna do header.
       table = CSV.read(csv_path, headers: true, encoding: "bom|utf-8")
 
       missing_headers = REQUIRED_HEADERS - table.headers.to_a
@@ -87,7 +78,7 @@ module Testimonials
       errors = []
 
       table.each_with_index do |row, index|
-        line_number = index + 2 # linha 1 é o header
+        line_number = index + 2
 
         begin
           import_row(row, images_index)
@@ -114,35 +105,37 @@ module Testimonials
       product = @tenant.products.find_by(sku: sku)
       raise RowError, "SKU não encontrado: #{sku}" if product.nil?
 
-      image_filename = row["image_filename"].to_s.strip
-      image_path = images_index[image_filename]
-      raise RowError, "Imagem não encontrada no ZIP: #{image_filename}" if image_path.nil?
+      source_type = row["source_type"].to_s.strip.presence || "manual"
+      unless Testimonial::SOURCE_TYPES.include?(source_type)
+        raise RowError, "Origem inválida: #{source_type}"
+      end
+
+      image_filename = row["image_filename"].to_s.strip.presence
+      image_path = image_filename && images_index[image_filename]
+      if image_filename && image_path.nil?
+        raise RowError, "Imagem não encontrada no ZIP: #{image_filename}"
+      end
 
       testimonial = @tenant.testimonials.new(
         customer_name: row["customer_name"].to_s.strip,
         rating: row["rating"].to_s.strip.presence&.to_i,
         quote_text: row["quote_text"].to_s.strip.presence,
-        source_type: "manual",
+        source_type: source_type,
+        external_url: row["external_url"].to_s.strip.presence,
         status: "draft"
       )
+      testimonial.product_ids = [ product.id ]
 
-      # O file handle precisa continuar aberto até testimonial.save! — num
-      # registro novo (ainda não persistido), Rails NÃO faz upload do blob
-      # na hora do .attach, só na hora do save (upload adiado até ter um
-      # record_id pra associar). Fechar o arquivo logo após o .attach
-      # (ex: com File.open(...) { |f| ... }) fecha o stream antes do save
-      # ler os bytes — daí o IOError "closed stream".
-      file = File.open(image_path, "rb")
-      begin
-        # Sem content_type: — ActiveStorage detecta via Marcel a partir do
-        # conteúdo/filename, mesma validação de formato do upload manual
-        # (Testimonial#media_content_type_must_be_allowed) reaproveitada
-        # abaixo pelo testimonial.save!.
-        testimonial.media.attach(io: file, filename: File.basename(image_path))
-        testimonial.product_ids = [ product.id ]
+      if image_path
+        file = File.open(image_path, "rb")
+        begin
+          testimonial.media.attach(io: file, filename: File.basename(image_path))
+          testimonial.save!
+        ensure
+          file.close
+        end
+      else
         testimonial.save!
-      ensure
-        file.close
       end
     end
 
