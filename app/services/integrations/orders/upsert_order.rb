@@ -5,20 +5,28 @@ module Integrations
         def success? = ok
       end
 
-      def self.call(tenant:, normalized:, integration: nil, provider: nil)
-        new(tenant: tenant, normalized: normalized, integration: integration, provider: provider).call
+      def self.call(tenant:, normalized:, integration: nil, channel_credential: nil, provider: nil)
+        new(
+          tenant: tenant,
+          normalized: normalized,
+          integration: integration,
+          channel_credential: channel_credential,
+          provider: provider
+        ).call
       end
 
-      def initialize(tenant:, normalized:, integration: nil, provider: nil)
-        @tenant      = tenant
-        @normalized  = normalized
-        @integration = integration
-        @provider    = provider
+      def initialize(tenant:, normalized:, integration: nil, channel_credential: nil, provider: nil)
+        @tenant             = tenant
+        @normalized         = normalized
+        @integration        = integration
+        @channel_credential = channel_credential
+        @provider           = provider
       end
 
       def call
         channel = resolve_channel
         return Result.new(ok: false, order: nil, error_message: "Canal não encontrado para provider '#{@provider}'") unless channel
+        return Result.new(ok: false, order: nil, error_message: "Conexão de loja inválida para este tenant/canal") unless valid_channel_credential?(channel)
 
         ActiveRecord::Base.transaction do
           order = upsert_order(channel)
@@ -40,37 +48,57 @@ module Integrations
       private
 
       def resolve_channel
+        if @channel_credential
+          return Channel.ensure_for!(@tenant, @channel_credential.channel)
+        end
         return @integration.channel if @integration&.channel
         return @tenant.channels.find_by(platform: @provider) if @provider
         nil
       end
 
+      def valid_channel_credential?(channel)
+        return true unless @channel_credential
+
+        @channel_credential.tenant_id == @tenant.id &&
+          @channel_credential.channel == channel.platform &&
+          (@provider.blank? || @channel_credential.channel == @provider)
+      end
+
       def upsert_order(channel)
-        order = @tenant.orders.find_or_initialize_by(channel: channel, external_id: @normalized[:external_id])
+        order = if @channel_credential
+          @tenant.orders.find_or_initialize_by(
+            channel_credential: @channel_credential,
+            external_id: @normalized[:external_id]
+          )
+        else
+          @tenant.orders.find_or_initialize_by(channel: channel, external_id: @normalized[:external_id])
+        end
+
         remember_tiktok_freight_margin_date(order, channel)
         attrs = {
-          channel:          channel,
-          order_number:     @normalized[:order_number],
-          status:           @normalized[:status],
-          payment_method:   @normalized[:payment_method],
-          customer_name:    @normalized[:customer_name],
-          customer_tag:     @normalized[:customer_tag],
-          state:            @normalized[:state],
-          order_type:       @normalized[:order_type] || "sale",
-          refund_amount:    @normalized[:refund_amount].to_f,
-          nf_number:        @normalized[:nf_number],
-          nf_gross_value:   @normalized[:nf_gross_value].to_f,
-          nf_discount:      @normalized[:nf_discount].to_f,
-          nf_freight:       @normalized[:nf_freight].to_f,
-          gross_value:      @normalized[:gross_value].to_f,
-          freight:          @normalized[:freight].to_f,
-          discount:         @normalized[:discount].to_f,
-          items_qty:        @normalized[:items].sum { |i| (i[:quantity] || 1).to_i },
-          ordered_at:       @normalized[:ordered_at] || Time.current,
+          channel:            channel,
+          channel_credential: @channel_credential || order.channel_credential,
+          order_number:       @normalized[:order_number],
+          status:             @normalized[:status],
+          payment_method:     @normalized[:payment_method],
+          customer_name:      @normalized[:customer_name],
+          customer_tag:       @normalized[:customer_tag],
+          state:              @normalized[:state],
+          order_type:         @normalized[:order_type] || "sale",
+          refund_amount:      @normalized[:refund_amount].to_f,
+          nf_number:          @normalized[:nf_number],
+          nf_gross_value:     @normalized[:nf_gross_value].to_f,
+          nf_discount:        @normalized[:nf_discount].to_f,
+          nf_freight:         @normalized[:nf_freight].to_f,
+          gross_value:        @normalized[:gross_value].to_f,
+          freight:            @normalized[:freight].to_f,
+          discount:           @normalized[:discount].to_f,
+          items_qty:          @normalized[:items].sum { |i| (i[:quantity] || 1).to_i },
+          ordered_at:         @normalized[:ordered_at] || Time.current,
           # Placeholders — recalculated after items are upserted
-          cost_price:       0,
-          commission:       0,
-          operational_cost: 0
+          cost_price:         0,
+          commission:         0,
+          operational_cost:   0
         }
         # Only Yampi's normalizer returns this key today — guard on
         # presence so a re-sync from a normalizer that doesn't (TikTok)
@@ -173,9 +201,11 @@ module Integrations
           status:         "active",
           last_synced_at: Time.current,
           metadata:       mapping.metadata.merge(
-            "provider"  => @provider,
-            "item_name" => item_data[:name]
-          )
+            "provider"              => @provider,
+            "item_name"             => item_data[:name],
+            "channel_credential_id" => @channel_credential&.id,
+            "connection_name"       => @channel_credential&.display_name
+          ).compact
         )
         mapping.save!
       end
@@ -227,9 +257,11 @@ module Integrations
           status:         "active",
           last_synced_at: Time.current,
           metadata:       mapping.metadata.merge(
-            "provider"     => @provider,
-            "order_number" => @normalized[:order_number]
-          )
+            "provider"              => @provider,
+            "order_number"          => @normalized[:order_number],
+            "channel_credential_id" => @channel_credential&.id,
+            "connection_name"       => @channel_credential&.display_name
+          ).compact
         )
         mapping.save!
       end

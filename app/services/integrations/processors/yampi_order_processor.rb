@@ -34,10 +34,11 @@ module Integrations
 
       def handle_refund(normalized)
         upsert = Integrations::Orders::UpsertRefund.call(
-          tenant:      @event.tenant,
-          normalized:  normalized,
-          integration: @event.integration,
-          provider:    PROVIDER
+          tenant:             @event.tenant,
+          normalized:         normalized,
+          integration:        @event.integration,
+          channel_credential: event_channel_credential,
+          provider:           PROVIDER
         )
 
         unless upsert.success?
@@ -62,10 +63,11 @@ module Integrations
 
       def handle_order(normalized)
         upsert = Integrations::Orders::UpsertOrder.call(
-          tenant:      @event.tenant,
-          normalized:  normalized,
-          integration: @event.integration,
-          provider:    PROVIDER
+          tenant:             @event.tenant,
+          normalized:         normalized,
+          integration:        @event.integration,
+          channel_credential: event_channel_credential,
+          provider:           PROVIDER
         )
 
         unless upsert.success?
@@ -86,6 +88,10 @@ module Integrations
             items_count:  upsert.order.order_items.size
           }
         )
+      end
+
+      def event_channel_credential
+        @event.channel_credential if @event.respond_to?(:channel_credential)
       end
     end
   end

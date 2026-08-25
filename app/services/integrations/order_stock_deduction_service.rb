@@ -1,17 +1,11 @@
 module Integrations
-  # Debits real stock for a sale order against the correct
-  # ChannelProductListing — "correct" meaning the order's channel's
-  # `stock_source_channel` when that channel's role is consumidor_pedido
-  # (e.g. a Yampi checkout order debits Shopify's inventory instead of
-  # creating a disconnected, phantom Yampi stock record), or the channel's
-  # own listing otherwise (fonte_estoque / ambos).
+  # Debits real stock for a sale order against the exact store connection
+  # that produced the order. If that connection is consumidor_pedido, the
+  # deduction is redirected to its configured stock_source_channel.
   #
-  # Reuses Products::ExplodeKit (Etapa 5) so a kit sale debits its real
-  # components, never the kit "product" itself.
-  #
-  # Idempotent via Order#stock_deducted_at: an order can be re-upserted many
-  # times (webhook retries, status-change events) but must only ever be
-  # debited once.
+  # Legacy orders without channel_credential_id still work while a provider
+  # has exactly one connection. Once there are multiple stores, this service
+  # refuses to guess rather than debit the wrong inventory.
   class OrderStockDeductionService
     Result = Struct.new(:outcome, :deducted, :error_message, :metadata, keyword_init: true) do
       def success? = outcome == :success
@@ -32,18 +26,34 @@ module Integrations
       return Result.new(outcome: :skipped, deducted: [], error_message: nil, metadata: { reason: "already processed" }) if order.stock_deducted_at.present?
       return skip("pedido não é uma venda (order_type=#{order.order_type})") unless order.order_type == "sale"
 
-      channel_credential = tenant.channel_credentials.find_by(channel: order.channel.platform)
-      return skip("canal '#{order.channel.platform}' não está conectado à sincronização de estoque") unless channel_credential
+      channel_credential = resolve_order_credential
+      unless channel_credential
+        connection_count = tenant.channel_credentials.where(channel: order.channel.platform).limit(2).count
+        if connection_count > 1
+          return error_result("pedido sem channel_credential_id e existem várias lojas para #{order.channel.platform}; baixa não executada")
+        end
+
+        return skip("canal '#{order.channel.platform}' não está conectado à sincronização de estoque")
+      end
 
       source = resolve_source(channel_credential)
-      return skip("canal consumidor de pedido sem stock_source_channel configurado") unless source
+      return error_result("canal consumidor de pedido sem stock_source_channel configurado") unless source
 
       deducted = apply_deductions(source, aggregate_real_quantities)
 
       order.update!(stock_deducted_at: Time.current)
       log_attempt(status: "success", source: source, deducted: deducted)
 
-      Result.new(outcome: :success, deducted: deducted, error_message: nil, metadata: { source_channel: source.channel })
+      Result.new(
+        outcome: :success,
+        deducted: deducted,
+        error_message: nil,
+        metadata: {
+          source_channel: source.channel,
+          source_channel_credential_id: source.id,
+          source_connection_name: source.display_name
+        }
+      )
     rescue => e
       log_attempt(status: "error", source: nil, deducted: [], error_message: e.message)
       Result.new(outcome: :error, deducted: [], error_message: e.message, metadata: {})
@@ -53,13 +63,16 @@ module Integrations
 
     attr_reader :order, :tenant
 
+    def resolve_order_credential
+      return order.channel_credential if order.channel_credential
+
+      ChannelCredential.resolve_for(tenant: tenant, channel: order.channel.platform)
+    end
+
     def resolve_source(channel_credential)
       channel_credential.consumidor_pedido? ? channel_credential.stock_source_channel : channel_credential
     end
 
-    # Sums real (post-kit-explosion) quantities per base Product across
-    # every line of the order. Gifts are included on purpose — a free item
-    # is still a physical unit leaving the shelf.
     def aggregate_real_quantities
       totals = Hash.new(0)
 
@@ -74,53 +87,43 @@ module Integrations
       totals
     end
 
-    # Deliberately does NOT clamp at zero: a negative resulting stock_qty
-    # is a real, honest signal that this SKU oversold on the source
-    # channel and needs attention, not something to silently hide.
     def apply_deductions(source, quantities)
       quantities.filter_map { |product, qty| apply_deduction_for(product, source, qty) }
     end
 
-    # Locks the Product row (not the listing) per product, in its own short
-    # transaction — deliberately NOT one transaction wrapping the whole
-    # order's multiple products: two concurrent orders sharing products A
-    # and B, each locking them in a different order, would deadlock. Locking
-    # one product at a time, released before moving to the next, can't
-    # produce that cycle.
-    #
-    # The lock's job is to serialize "decrement this product's channel
-    # stock, then decide whether an alert/replenishment fires" against any
-    # other order hitting the same product at the same time — without it,
-    # two near-simultaneous orders could both read Product#free_reserve
-    # before either write lands, and both independently decide to replenish
-    # (or neither would, each thinking the other still has headroom).
-    #
-    # StockAlerts::EvaluationService never makes an HTTP call itself — on a
-    # threshold crossing it only creates a "pending" StockReplenishmentExecution
-    # (see StockAlerts::CreateReplenishmentExecution) and enqueues
-    # StockAlerts::ExecuteReplenishmentJob, which does the actual remote
-    # write asynchronously, outside this lock entirely. That separation is
-    # what makes it safe to call EvaluationService from inside the lock at
-    # all — a Postgres row lock held for the duration of a live network
-    # round-trip to a channel API would serialize unrelated orders behind
-    # a slow/unresponsive channel, and this lock never needs to.
     def apply_deduction_for(product, source, qty)
       result = nil
 
       product.with_lock do
-        listing = ChannelProductListing.find_by(tenant: tenant, channel: source.channel, product: product)
+        listing = ChannelProductListing.find_by(
+          tenant: tenant,
+          channel_credential: source,
+          product: product
+        )
+
+        # Backward compatibility for a listing created before the migration.
+        if listing.nil? && tenant.channel_credentials.where(channel: source.channel).limit(2).count == 1
+          listing = ChannelProductListing.find_by(
+            tenant: tenant,
+            channel: source.channel,
+            channel_credential_id: nil,
+            product: product
+          )
+        end
         break unless listing
 
         previous_stock_qty = listing.stock_qty
         listing.update!(stock_qty: previous_stock_qty.to_f - qty.to_f)
-        result = { product_id: product.id, sku: product.sku, deducted_qty: qty.to_f, listing_id: listing.id, remaining_stock: listing.stock_qty.to_f }
+        result = {
+          product_id: product.id,
+          sku: product.sku,
+          deducted_qty: qty.to_f,
+          listing_id: listing.id,
+          channel_credential_id: source.id,
+          connection_name: source.display_name,
+          remaining_stock: listing.stock_qty.to_f
+        }
 
-        # Deliberately rescued narrowly and kept inside the lock, same
-        # reasoning as ProductSyncService#evaluate_stock_alert: a bug in
-        # logging or alert evaluation must never roll back the deduction
-        # above (`with_lock` wraps this whole block in one transaction — an
-        # unrescued raise here would silently undo a real, correct stock
-        # write because of an unrelated alerting bug).
         record_channel_movement(listing, previous_stock_qty)
         evaluate_stock_alert(product)
       end
@@ -154,9 +157,15 @@ module Integrations
       Result.new(outcome: :skipped, deducted: [], error_message: nil, metadata: { reason: reason })
     end
 
+    def error_result(message)
+      log_attempt(status: "error", source: nil, deducted: [], error_message: message)
+      Result.new(outcome: :error, deducted: [], error_message: message, metadata: {})
+    end
+
     def log_attempt(status:, source:, deducted:, error_message: nil)
       IntegrationSyncLog.create!(
         tenant: tenant,
+        channel_credential: source || order.channel_credential,
         direction: "inbound",
         action: "stock_deduction",
         status: status,
@@ -168,7 +177,11 @@ module Integrations
         metadata: {
           order_id: order.id,
           order_channel: order.channel.platform,
+          order_channel_credential_id: order.channel_credential_id,
+          order_connection_name: order.channel_credential&.display_name,
           source_channel: source&.channel,
+          source_channel_credential_id: source&.id,
+          source_connection_name: source&.display_name,
           deducted: deducted
         }
       )

@@ -5,17 +5,19 @@ module Integrations
     end
 
     def initialize(tenant:, provider:, event_type:, payload:,
-                   integration: nil, external_id: nil, external_type: nil,
+                   integration: nil, channel_credential: nil,
+                   external_id: nil, external_type: nil,
                    headers: {}, metadata: {})
-      @tenant        = tenant
-      @integration   = integration
-      @provider      = provider
-      @event_type    = event_type
-      @external_id   = external_id
-      @external_type = external_type
-      @payload       = payload
-      @headers       = headers
-      @metadata      = metadata
+      @tenant             = tenant
+      @integration        = integration
+      @channel_credential = channel_credential
+      @provider           = provider
+      @event_type         = event_type
+      @external_id        = external_id
+      @external_type      = external_type
+      @payload            = payload
+      @headers            = headers
+      @metadata           = metadata
     end
 
     def call
@@ -25,16 +27,17 @@ module Integrations
       end
 
       event = @tenant.integration_events.create!(
-        integration:   @integration,
-        provider:      @provider,
-        event_type:    @event_type,
-        external_id:   @external_id,
-        external_type: @external_type,
-        status:        "pending",
-        payload:       @payload,
-        headers:       @headers,
-        metadata:      @metadata,
-        received_at:   Time.current
+        integration:        @integration,
+        channel_credential: @channel_credential,
+        provider:           @provider,
+        event_type:         @event_type,
+        external_id:        @external_id,
+        external_type:      @external_type,
+        status:             "pending",
+        payload:            @payload,
+        headers:            @headers,
+        metadata:           event_metadata,
+        received_at:        Time.current
       )
 
       Result.new(true, event, nil)
@@ -50,7 +53,22 @@ module Integrations
       scope = @tenant.integration_events
         .where(event_type: @event_type, external_id: @external_id, external_type: @external_type)
       scope = scope.where(integration_id: @integration.id) if @integration
+      if @channel_credential
+        scope = scope.where(channel_credential_id: @channel_credential.id)
+      elsif @provider.present?
+        scope = scope.where(provider: @provider, channel_credential_id: nil)
+      end
       scope.first
+    end
+
+    def event_metadata
+      metadata = @metadata.to_h
+      return metadata unless @channel_credential
+
+      metadata.merge(
+        "channel_credential_id" => @channel_credential.id,
+        "connection_name" => @channel_credential.display_name
+      )
     end
 
     def bump_duplicate_attempt(event)

@@ -68,7 +68,7 @@ module Api
       def registration_scope
         ProductRegistration
           .where(tenant: current_tenant)
-          .includes(:parent_product, :product, :publications, images_attachments: :blob)
+          .includes(:parent_product, :product, { publications: :channel_credential }, images_attachments: :blob)
       end
 
       def set_registration
@@ -83,7 +83,14 @@ module Api
       end
 
       def registration_params
-        params.permit(:parent_product_id, :sku, :name, :price_cents, channels: [])
+        params.permit(
+          :parent_product_id,
+          :sku,
+          :name,
+          :price_cents,
+          channels: [],
+          channel_credential_ids: []
+        )
       end
 
       def registration_json(registration)
@@ -96,7 +103,7 @@ module Api
           validation_errors: registration.validation_errors,
           parent_product: product_reference_json(registration.parent_product, include_channels: true),
           product: product_reference_json(registration.product),
-          publications: registration.publications.sort_by(&:channel).map { |publication| publication_json(publication) },
+          publications: registration.publications.sort_by { |publication| [ publication.channel.to_s, publication.destination_name.to_s ] }.map { |publication| publication_json(publication) },
           images: registration.images.map { |image| image_json(image) },
           created_at: registration.created_at,
           updated_at: registration.updated_at
@@ -115,6 +122,9 @@ module Api
         {
           id: publication.id,
           channel: publication.channel,
+          channel_credential_id: publication.channel_credential_id,
+          connection_name: publication.channel_credential&.display_name,
+          destination_name: publication.destination_name,
           status: publication.status,
           external_product_id: publication.external_product_id,
           external_variant_id: publication.external_variant_id,

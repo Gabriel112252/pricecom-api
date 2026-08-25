@@ -1,42 +1,48 @@
 class ChannelProductListing < ApplicationRecord
-  # Fase 2 of the stock/alerts migration — normalized selling state, one
-  # vocabulary across Shopify/TikTok/Yampi's very different raw status
-  # strings. See each adapter's #normalize_selling_status for the mapping
-  # from raw channel status to this. "unknown" (the column default) means
-  # no sync has populated it yet, not a real channel state — never treated
-  # as eligible.
   SELLING_STATUSES = %w[selling draft inactive reviewing rejected platform_blocked deleted unknown].freeze
-
-  # How long remote_status can go un-refreshed before it's treated as
-  # untrustworthy for a real-time decision (replenishment eligibility).
-  # Every channel's product sync runs at least every 15min in the healthy
-  # case (config/schedule.yml) — 6h is a generous multiple of that,
-  # matching the "something is actually wrong" cadence this codebase
-  # already uses elsewhere for a slow-but-not-urgent signal (idworks'
-  # product_cost_sync_dispatch is also every 6h).
   STATUS_STALE_AFTER = 6.hours
 
   belongs_to :tenant
   belongs_to :product
+  belongs_to :channel_credential, optional: true
   has_many :stock_replenishment_executions, dependent: :destroy
 
   validates :channel, presence: true, inclusion: { in: ChannelCredential::CHANNELS }
-  validates :external_id, presence: true, uniqueness: { scope: [ :tenant_id, :channel ] }
-  # Lower = higher priority. Nullable (most listings have none set yet —
-  # see the migration) — see StockAlerts::EvaluationService#resolve_target
-  # for how this picks the channel a low-pool alert replenishes.
+  validates :external_id, presence: true
+  validates :external_id,
+    uniqueness: { scope: [ :tenant_id, :channel_credential_id ] },
+    if: -> { channel_credential_id.present? }
+  validates :external_id,
+    uniqueness: { scope: [ :tenant_id, :channel ] },
+    unless: -> { channel_credential_id.present? }
   validates :channel_priority, numericality: { only_integer: true, greater_than: 0 }, allow_nil: true
   validates :selling_status, presence: true, inclusion: { in: SELLING_STATUSES }
+  validate :channel_credential_matches_listing
 
   scope :for_channel, ->(channel) { where(channel: channel) }
+  scope :for_connection, ->(credential) { where(channel_credential: credential) }
   scope :stale, ->(before) { where("synced_at < ?", before) }
   scope :replenishment_eligible, -> { where(replenishment_eligible: true) }
 
-  # Deliberately computed on read, not a stored column: a persisted boolean
-  # here would itself need a background job just to stay accurate as time
-  # passes with no new sync — computing it from remote_status_synced_at
-  # can never go stale itself.
   def status_stale?
     remote_status_synced_at.nil? || remote_status_synced_at < STATUS_STALE_AFTER.ago
+  end
+
+  def connection_name
+    channel_credential&.display_name || channel.to_s.humanize
+  end
+
+  private
+
+  def channel_credential_matches_listing
+    return unless channel_credential
+
+    if channel_credential.tenant_id != tenant_id
+      errors.add(:channel_credential, "deve pertencer à mesma empresa")
+    end
+
+    if channel_credential.channel != channel
+      errors.add(:channel_credential, "deve ser do mesmo canal do anúncio")
+    end
   end
 end

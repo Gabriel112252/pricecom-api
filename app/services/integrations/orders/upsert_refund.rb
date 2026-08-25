@@ -5,20 +5,27 @@ module Integrations
         def success? = ok
       end
 
-      def self.call(tenant:, normalized:, integration: nil, provider: nil)
-        new(tenant: tenant, normalized: normalized, integration: integration, provider: provider).call
+      def self.call(tenant:, normalized:, integration: nil, channel_credential: nil, provider: nil)
+        new(
+          tenant: tenant,
+          normalized: normalized,
+          integration: integration,
+          channel_credential: channel_credential,
+          provider: provider
+        ).call
       end
 
-      def initialize(tenant:, normalized:, integration: nil, provider: nil)
-        @tenant      = tenant
-        @normalized  = normalized
-        @integration = integration
-        @provider    = provider
+      def initialize(tenant:, normalized:, integration: nil, channel_credential: nil, provider: nil)
+        @tenant             = tenant
+        @normalized         = normalized
+        @integration        = integration
+        @channel_credential = channel_credential
+        @provider           = provider
       end
 
       def call
         channel = resolve_channel
-        order = channel ? @tenant.orders.find_by(channel: channel, external_id: @normalized[:external_id]) : nil
+        order = find_order(channel)
 
         unless order
           return Result.new(
@@ -44,9 +51,28 @@ module Integrations
       private
 
       def resolve_channel
+        if @channel_credential
+          return nil unless @channel_credential.tenant_id == @tenant.id
+          return nil if @provider.present? && @channel_credential.channel != @provider
+
+          return Channel.ensure_for!(@tenant, @channel_credential.channel)
+        end
         return @integration.channel if @integration&.channel
         return @tenant.channels.find_by(platform: @provider) if @provider
         nil
+      end
+
+      def find_order(channel)
+        return nil unless channel
+
+        if @channel_credential
+          return @tenant.orders.find_by(
+            channel_credential: @channel_credential,
+            external_id: @normalized[:external_id]
+          )
+        end
+
+        @tenant.orders.find_by(channel: channel, external_id: @normalized[:external_id])
       end
 
       def resolve_refund_amount
@@ -69,9 +95,11 @@ module Integrations
           status:      @normalized[:status].presence || "processed",
           refunded_at: @normalized[:ordered_at] || Time.current,
           metadata:    (refund.metadata || {}).merge(@normalized[:metadata].to_h).merge(
-            "order_number" => @normalized[:order_number],
-            "provider"     => @provider
-          )
+            "order_number"          => @normalized[:order_number],
+            "provider"              => @provider,
+            "channel_credential_id" => @channel_credential&.id,
+            "connection_name"       => @channel_credential&.display_name
+          ).compact
         )
         refund.save!
         refund

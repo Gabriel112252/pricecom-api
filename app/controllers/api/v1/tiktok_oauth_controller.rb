@@ -7,23 +7,32 @@ module Api
       skip_before_action :authenticate_request!, only: :callback
 
       def authorize_url
-        credential = current_tenant.channel_credentials.find_by(channel: "tiktok")
+        credential = resolve_current_credential
+        unless credential
+          return render json: { error: credential_resolution_error }, status: :unprocessable_entity
+        end
+
         unless tiktok_credentials_configured?(credential)
           return render json: { error: MISSING_CREDENTIALS_MESSAGE }, status: :unprocessable_entity
         end
 
-        render json: { authorize_url: tiktok_authorize_url(credential) }
+        render json: {
+          channel_credential_id: credential.id,
+          connection_name: credential.display_name,
+          authorize_url: tiktok_authorize_url(credential)
+        }
       end
 
       def callback
         auth_code = params[:code].to_s.strip
-
         return redirect_error("Callback sem código de autorização") if auth_code.blank?
 
-        tenant = resolve_tenant
+        state = verified_state
+        tenant = resolve_tenant(state)
         return redirect_error("Tenant não identificado no callback do TikTok") unless tenant
 
-        credential = tenant.channel_credentials.find_by(channel: "tiktok")
+        credential = resolve_callback_credential(tenant, state)
+        return redirect_error(credential_resolution_error) unless credential
         return redirect_error(MISSING_CREDENTIALS_MESSAGE) unless tiktok_credentials_configured?(credential)
 
         token_data = Integrations::TiktokOauthTokenClient
@@ -41,8 +50,12 @@ module Api
         credential = upsert_credential(credential, token_data, selected_shop: selected_shop, authorized_shops: authorized_shops)
         Channel.ensure_for!(tenant, "tiktok")
 
-        redirect_to frontend_redirect_url("connected", "TikTok Shop conectado", credential_id: credential.id),
-          allow_other_host: true
+        redirect_to frontend_redirect_url(
+          "connected",
+          "TikTok Shop conectado",
+          credential_id: credential.id,
+          connection_name: credential.display_name
+        ), allow_other_host: true
       rescue Integrations::AuthenticationError, Integrations::ApiError, Integrations::RateLimitError => e
         redirect_error(e.message)
       rescue ActiveRecord::RecordInvalid => e
@@ -51,19 +64,68 @@ module Api
 
       private
 
+      def resolve_current_credential
+        scope = current_tenant.channel_credentials.where(channel: "tiktok")
+
+        if params[:channel_credential_id].present?
+          credential = scope.find_by(id: params[:channel_credential_id])
+          @credential_resolution_error = "Conexão TikTok não encontrada" unless credential
+          return credential
+        end
+
+        if params[:name].present?
+          credential = scope.find_by(name: params[:name].to_s.strip)
+          @credential_resolution_error = "Conexão TikTok '#{params[:name]}' não encontrada" unless credential
+          return credential
+        end
+
+        records = scope.order(:id).limit(2).to_a
+        return records.first if records.one?
+
+        @credential_resolution_error = if records.empty?
+          "TikTok ainda não está conectado"
+        else
+          "Existem várias conexões TikTok; informe channel_credential_id ou name"
+        end
+        nil
+      end
+
+      def resolve_callback_credential(tenant, state)
+        credential_id = state[:channel_credential_id] || state["channel_credential_id"]
+        if credential_id.present?
+          credential = tenant.channel_credentials.find_by(id: credential_id, channel: "tiktok")
+          @credential_resolution_error = "Conexão TikTok do OAuth não encontrada" unless credential
+          return credential
+        end
+
+        # Compatibility with an authorize URL generated before multi-store.
+        records = tenant.channel_credentials.where(channel: "tiktok").order(:id).limit(2).to_a
+        return records.first if records.one?
+
+        @credential_resolution_error = "Não foi possível identificar qual conexão TikTok deve receber a autorização"
+        nil
+      end
+
+      def credential_resolution_error
+        @credential_resolution_error.presence || "Conexão TikTok não identificada"
+      end
+
       def tiktok_authorize_url(credential)
         uri = URI.parse(AUTHORIZE_URL)
         uri.query = {
           app_key: tiktok_app_key(credential),
-          state: oauth_state,
+          state: oauth_state(credential),
           redirect_uri: tiktok_callback_url
         }.to_query
         uri.to_s
       end
 
-      def oauth_state
+      def oauth_state(credential)
         Rails.application.message_verifier(:tiktok_oauth_state)
-          .generate({ tenant_id: current_tenant.id }, expires_in: 10.minutes)
+          .generate(
+            { tenant_id: current_tenant.id, channel_credential_id: credential.id },
+            expires_in: 10.minutes
+          )
       end
 
       def tiktok_callback_url
@@ -87,8 +149,7 @@ module Api
         credentials[key].presence || credentials[key.to_sym].presence
       end
 
-      def resolve_tenant
-        state = verified_state
+      def resolve_tenant(state)
         tenant_id = state[:tenant_id] || state["tenant_id"]
         return Tenant.find_by(id: tenant_id) if tenant_id.present?
 
@@ -138,7 +199,7 @@ module Api
 
         if normalized_shops.many?
           raise Integrations::ApiError,
-            "TikTok OAuth: múltiplas lojas autorizadas retornadas; o modelo atual suporta uma loja TikTok por credencial"
+            "TikTok OAuth: múltiplas lojas retornadas; autorize apenas uma loja por conexão do Pricecom"
         end
 
         shop = normalized_shops.first

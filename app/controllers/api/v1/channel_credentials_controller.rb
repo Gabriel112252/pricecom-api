@@ -5,18 +5,31 @@ module Api
       before_action :require_admin!, only: [ :connect, :update_role, :backfill_orders ]
 
       # GET /api/v1/integrations/channels
+      # Keeps one top-level card per provider for frontend compatibility, but
+      # exposes every concrete store connection in `connections`.
       def index
-        credentials = current_tenant.channel_credentials.index_by(&:channel)
+        credentials_by_channel = current_tenant.channel_credentials.order(:id).group_by(&:channel)
         logs_by_channel = recent_logs_by_channel
 
         render json: ChannelCredential::CHANNELS.map { |channel|
-          channel_json(channel, credentials[channel], logs_by_channel[channel] || [])
+          credentials = credentials_by_channel[channel] || []
+          primary = credentials.first
+          channel_json(channel, primary, logs_by_channel[channel] || []).merge(
+            connections: credentials.map { |credential| connection_json(credential, recent_logs_for(credential)) }
+          )
         }
       end
 
       # POST /api/v1/integrations/:channel/connect
+      # Optional selectors:
+      #   channel_credential_id: edits one existing connection
+      #   name: creates/edits a named store connection (e.g. Hidrabene/Anasol)
+      # With neither selector, legacy behavior is preserved only while the
+      # provider has zero or one connection; multiple stores must be explicit.
       def connect
-        credential = current_tenant.channel_credentials.find_or_initialize_by(channel: params[:channel])
+        credential = resolve_credential(params[:channel], build: true)
+        return render_resolution_error unless credential
+
         credential.credentials = credential_params
         credential.status = "pending"
 
@@ -24,23 +37,16 @@ module Api
           return render json: { errors: credential.errors.full_messages }, status: :unprocessable_entity
         end
 
-        # Só o fato de ter mudado, nunca os valores — credentials é dado
-        # sensível (ver ActiveRecord::Encryption em ChannelCredential) e
-        # não deveria estar em texto plano nem no audit log.
-        log_activity!(action: "channel_credential.updated", target: credential, metadata: { channel: credential.channel })
+        log_activity!(
+          action: "channel_credential.updated",
+          target: credential,
+          metadata: {
+            channel: credential.channel,
+            channel_credential_id: credential.id,
+            connection_name: credential.display_name
+          }
+        )
 
-        # A ChannelCredential alone doesn't give Order#channel_id anything to
-        # point at — Channel is the older, separate table that's been driving
-        # orders/pricing/commission since Etapa 1. Without this, order
-        # ingestion (webhook or backfill) fails with "Canal não encontrado"
-        # even though the channel looks fully connected and syncing products
-        # fine. See Channel.ensure_for! and the one-off
-        # channels:backfill_missing rake task for tenants connected before
-        # this fix existed.
-        #
-        # lucrofrete is a freight-quote service, not a sales channel —
-        # Channel::PLATFORMS doesn't (and shouldn't) include it, so no
-        # Channel row is created and product-sync auth doesn't apply.
         if credential.channel == "lucrofrete"
           begin
             Integrations::LucrofreteClient.new(credential).authenticate!
@@ -50,21 +56,18 @@ module Api
             return render json: { errors: [ e.message ] }, status: :unprocessable_entity
           end
 
-          return render json: channel_json(credential.channel, credential, [])
+          return render json: connection_json(credential, [])
         end
 
+        # Channel remains provider-level for orders/pricing compatibility.
         Channel.ensure_for!(current_tenant, credential.channel)
 
-        # Canais OAuth: no connect só existem as chaves do app (TikTok
-        # app_key/app_secret, Shopee partner_id/partner_key) — não há
-        # access_token pra validar até a loja autorizar via authorize_url,
-        # então o authenticate imediato abaixo não se aplica.
+        # OAuth channels only persist app credentials here; the exact
+        # connection id is then carried through authorize_url/callback.
         if %w[tiktok shopee].include?(credential.channel)
-          return render json: channel_json(credential.channel, credential, [])
+          return render json: connection_json(credential, [])
         end
 
-        # Verify right away rather than making the user wait for the next
-        # scheduled sync to find out the credentials don't work.
         begin
           adapter_class = Integrations::ProductSyncService::ADAPTERS.fetch(credential.channel)
           adapter_class.new(credential.credentials).authenticate
@@ -74,24 +77,19 @@ module Api
           return render json: { errors: [ e.message ] }, status: :unprocessable_entity
         end
 
-        render json: channel_json(credential.channel, credential, [])
+        render json: connection_json(credential, [])
       end
 
       # PATCH /api/v1/integrations/:channel/role
-      # Configures whether this channel owns real stock (fonte_estoque /
-      # ambos) or only places orders against another channel's inventory
-      # (consumidor_pedido, e.g. Yampi checkout backed by Shopify).
       def update_role
-        credential = current_tenant.channel_credentials.find_by(channel: params[:channel])
-        unless credential
-          return render json: { error: "Canal ainda não conectado" }, status: :unprocessable_entity
-        end
+        credential = resolve_credential(params[:channel])
+        return render_resolution_error("Canal ainda não conectado") unless credential
 
         credential.role = params[:role] if params[:role].present?
-        credential.stock_source_channel = resolve_stock_source(params[:stock_source_channel])
+        credential.stock_source_channel = resolve_stock_source
 
         if credential.save
-          render json: channel_json(credential.channel, credential, recent_logs_for(credential))
+          render json: connection_json(credential, recent_logs_for(credential))
         else
           render json: { errors: credential.errors.full_messages }, status: :unprocessable_entity
         end
@@ -99,9 +97,10 @@ module Api
 
       # POST /api/v1/integrations/:channel/sync
       def sync
-        credential = current_tenant.channel_credentials.find_by(channel: params[:channel])
+        credential = resolve_credential(params[:channel])
+        return render_resolution_error("Canal ainda não conectado") unless credential
 
-        if credential.nil? || credential.status == "pending"
+        if credential.status == "pending"
           return render json: { error: "Canal ainda não conectado" }, status: :unprocessable_entity
         end
 
@@ -118,19 +117,23 @@ module Api
           success: result.success?,
           synced_count: result.synced_count,
           error_message: result.error_message,
-          channel: channel_json(credential.channel, credential, recent_logs_for(credential))
+          connection: connection_json(credential, recent_logs_for(credential))
         }
       end
 
       # POST /api/v1/integrations/yampi/backfill_orders
-      # Enqueues the same Yampi order polling job used by the scheduler.
-      # The first job execution performs the 30-day created_at backfill when
-      # orders_sync_cursor_at is blank; later executions use an incremental
-      # created_at window. The HTTP request never performs API pagination.
+      # Yampi is expected to remain the shared checkout. If it ever has more
+      # than one connection, the operation refuses to guess which one to use.
       def backfill_orders
-        credential = current_tenant.channel_credentials.find_by(channel: "yampi")
+        credential = ChannelCredential.resolve_for(tenant: current_tenant, channel: "yampi")
 
-        if credential.nil? || credential.status == "pending"
+        unless credential
+          count = current_tenant.channel_credentials.where(channel: "yampi").limit(2).count
+          message = count > 1 ? "Existem várias conexões Yampi; selecione a conexão explicitamente" : "Yampi ainda não está conectada"
+          return render json: { error: message }, status: :unprocessable_entity
+        end
+
+        if credential.status == "pending"
           return render json: { error: "Yampi ainda não está conectada" }, status: :unprocessable_entity
         end
 
@@ -140,7 +143,7 @@ module Api
             enqueued: false,
             already_running: true,
             message: "Sincronização de pedidos da Yampi já está em execução",
-            channel: channel_json(credential.channel, credential, recent_logs_for(credential))
+            connection: connection_json(credential, recent_logs_for(credential))
           }, status: :accepted
         end
 
@@ -150,7 +153,7 @@ module Api
           success: true,
           enqueued: true,
           job_id: job.job_id,
-          channel: channel_json(credential.channel, credential, recent_logs_for(credential))
+          connection: connection_json(credential, recent_logs_for(credential))
         }, status: :accepted
       end
 
@@ -166,10 +169,55 @@ module Api
         params.require(:credentials).permit!.to_h
       end
 
-      def resolve_stock_source(channel_param)
+      def resolve_credential(channel, build: false)
+        @credential_resolution_error = nil
+        scope = current_tenant.channel_credentials.where(channel: channel)
+
+        if params[:channel_credential_id].present?
+          credential = scope.find_by(id: params[:channel_credential_id])
+          @credential_resolution_error = "Conexão não encontrada para #{channel}" unless credential
+          return credential
+        end
+
+        connection_name = params[:name].to_s.strip.presence
+        if connection_name
+          return build ? scope.find_or_initialize_by(name: connection_name) : scope.find_by(name: connection_name).tap { |record|
+            @credential_resolution_error = "Conexão '#{connection_name}' não encontrada para #{channel}" unless record
+          }
+        end
+
+        records = scope.order(:id).limit(2).to_a
+        return records.first if records.one?
+
+        if records.empty?
+          return current_tenant.channel_credentials.new(
+            channel: channel,
+            name: ChannelCredential.default_name_for(channel)
+          ) if build
+
+          @credential_resolution_error = "Canal ainda não conectado"
+          return nil
+        end
+
+        @credential_resolution_error = "Existem várias conexões para #{channel}; informe channel_credential_id ou name"
+        nil
+      end
+
+      def render_resolution_error(fallback = nil)
+        render json: { error: @credential_resolution_error.presence || fallback || "Conexão não encontrada" },
+          status: :unprocessable_entity
+      end
+
+      def resolve_stock_source
+        credential_id = params[:stock_source_channel_credential_id]
+        if credential_id.present?
+          return current_tenant.channel_credentials.find_by(id: credential_id)
+        end
+
+        channel_param = params[:stock_source_channel]
         return nil if channel_param.blank?
 
-        current_tenant.channel_credentials.find_by(channel: channel_param)
+        ChannelCredential.resolve_for(tenant: current_tenant, channel: channel_param)
       end
 
       def recent_logs_by_channel
@@ -184,7 +232,11 @@ module Api
       def recent_logs_for(credential)
         IntegrationSyncLog
           .where(tenant: current_tenant, action: [ "product_sync", "yampi_order_polling" ])
-          .where("metadata->>'channel_credential_id' = ?", credential.id.to_s)
+          .where(
+            "channel_credential_id = :id OR metadata->>'channel_credential_id' = :id_string",
+            id: credential.id,
+            id_string: credential.id.to_s
+          )
           .order(created_at: :desc)
           .limit(5)
           .map { |l| log_json(l) }
@@ -192,19 +244,29 @@ module Api
 
       def channel_json(channel, credential, logs)
         {
-          id:                   credential&.id,
-          channel:              channel,
-          status:               credential&.status || "pending",
-          required_fields:      ChannelCredential::REQUIRED_FIELDS.fetch(channel),
+          id: credential&.id,
+          channel: channel,
+          name: credential&.display_name,
+          status: credential&.status || "pending",
+          required_fields: ChannelCredential::REQUIRED_FIELDS.fetch(channel),
           credentials_configured: credentials_configured?(channel, credential),
-          last_synced_at:       credential&.last_synced_at,
+          last_synced_at: credential&.last_synced_at,
           orders_sync_cursor_at: credential&.orders_sync_cursor_at,
-          polling_enabled:       credential&.polling_enabled,
+          polling_enabled: credential&.polling_enabled,
           orders_polling_running: yampi_order_polling_running?(credential),
-          role:                 credential&.role,
+          role: credential&.role,
           stock_source_channel: credential&.stock_source_channel&.channel,
-          recent_logs:          logs
+          stock_source_channel_credential_id: credential&.stock_source_channel_id,
+          stock_source_connection_name: credential&.stock_source_channel&.display_name,
+          recent_logs: logs
         }
+      end
+
+      def connection_json(credential, logs)
+        channel_json(credential.channel, credential, logs).merge(
+          channel_credential_id: credential.id,
+          connection_name: credential.display_name
+        )
       end
 
       def credentials_configured?(channel, credential)
@@ -218,19 +280,19 @@ module Api
 
       def log_json(log)
         {
-          id:            log.id,
-          status:        log.status,
+          id: log.id,
+          status: log.status,
           error_message: log.error_message,
-          action:        log.action,
-          synced_count:  log.metadata["synced_count"],
+          action: log.action,
+          synced_count: log.metadata["synced_count"],
           created_count: log.metadata["created_count"],
           updated_count: log.metadata["updated_count"],
           unchanged_count: log.metadata["unchanged_count"],
           ignored_count: log.metadata["ignored_count"],
-          error_count:   log.metadata["error_count"],
-          trigger:       log.metadata["trigger"],
-          started_at:    log.started_at,
-          finished_at:   log.finished_at
+          error_count: log.metadata["error_count"],
+          trigger: log.metadata["trigger"],
+          started_at: log.started_at,
+          finished_at: log.finished_at
         }
       end
 

@@ -1,22 +1,12 @@
 module Integrations
   module Tiktok
-    # Polls TikTok Shop orders for one ChannelCredential, mirroring
-    # Integrations::Yampi::OrdersPollingService: 30-day backfill on the
-    # first run (orders_sync_cursor_at blank), incremental window with
-    # overlap afterwards, guarded by a per-credential Redis lock and
-    # recorded in IntegrationSyncLog.
-    #
-    # Unlike Yampi (whose API only filters by creation date), TikTok's
-    # Get Order List supports update_time_ge/lt, so incremental runs filter
-    # by update time — catching both new orders and status transitions
-    # (paid → shipped → cancelled) without a created-at lookback window.
-    # Re-processing an unchanged order is safe: UpsertOrder is idempotent.
+    # Polls TikTok Shop orders for one concrete ChannelCredential.
     class OrdersPollingService
       BACKFILL_DAYS = 30
       INCREMENTAL_OVERLAP = 10.minutes
       PAGE_SIZE = Integrations::TiktokAdapter::ORDERS_PAGE_SIZE
 
-      PollingEvent = Struct.new(:tenant, :payload, :event_type, :integration, keyword_init: true)
+      PollingEvent = Struct.new(:tenant, :payload, :event_type, :integration, :channel_credential, keyword_init: true)
 
       Result = Struct.new(:outcome, :error_message, :retry_after, :metadata, keyword_init: true) do
         def success? = outcome == :success
@@ -144,24 +134,12 @@ module Integrations
         end
       end
 
-      # Advances orders_sync_cursor_at after every page instead of only once
-      # at the end of #call — if the process dies mid-run (network drop,
-      # restart), the next attempt resumes from here instead of redoing the
-      # whole window from previous_cursor_at. Reuses #next_cursor_at, which
-      # already clamps to cursor_to and never regresses below
-      # previous_cursor_at, so this is safe to call repeatedly with
-      # out-of-order pages. No-op (skipped) until at least one order with a
-      # usable timestamp has been observed, since next_cursor_at would
-      # otherwise just rewrite the same previous_cursor_at value.
       def persist_cursor_progress
         return unless @max_seen_cursor_at
 
         channel_credential.update!(orders_sync_cursor_at: next_cursor_at)
       end
 
-      # Backfill sweeps by creation time; incremental sweeps by update time
-      # so status transitions on older orders are also picked up. Bounds are
-      # Unix timestamps; *_lt is exclusive (doc: Get Order List 202309).
       def time_filters
         if sync_mode == "incremental"
           { update_time_ge: cursor_from.to_i, update_time_lt: cursor_to.to_i }
@@ -198,7 +176,13 @@ module Integrations
         seen_external_ids << external_id
 
         existing_order = find_existing_tiktok_order(external_id)
-        event = PollingEvent.new(tenant: tenant, payload: raw_order, event_type: "order.polling", integration: integration)
+        event = PollingEvent.new(
+          tenant: tenant,
+          payload: raw_order,
+          event_type: "order.polling",
+          integration: integration,
+          channel_credential: channel_credential
+        )
         result = Integrations::Processors::TiktokOrderProcessor.call(event)
 
         if result.outcome == :success
@@ -249,7 +233,7 @@ module Integrations
       end
 
       def find_existing_tiktok_order(external_id)
-        tenant.orders.joins(:channel).find_by(external_id: external_id, channels: { platform: "tiktok" })
+        tenant.orders.find_by(channel_credential: channel_credential, external_id: external_id)
       end
 
       def record_ignored(external_id, reason)
@@ -277,6 +261,7 @@ module Integrations
         IntegrationSyncLog.create!(
           tenant: tenant,
           integration: integration,
+          channel_credential: channel_credential,
           direction: "inbound",
           action: "tiktok_order_polling",
           status: "pending",
@@ -304,6 +289,7 @@ module Integrations
           trigger: trigger,
           channel: "tiktok",
           channel_credential_id: channel_credential.id,
+          connection_name: channel_credential.display_name,
           sync_mode: sync_mode,
           window_from: cursor_from.iso8601,
           window_to: cursor_to.iso8601,

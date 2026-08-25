@@ -4,9 +4,6 @@ module Integrations
       ACTION = "tiktok_pending_financial_sync".freeze
       DEFAULT_BATCH_SIZE = Integer(ENV.fetch("TIKTOK_PENDING_FINANCIAL_BATCH_SIZE", "100"))
       DEFAULT_WINDOW_DAYS = Integer(ENV.fetch("TIKTOK_PENDING_FINANCIAL_WINDOW_DAYS", "90"))
-      # Throttle preventivo entre chamadas de statement_transactions — sem
-      # isso, um batch_size alto bate no rate limit da Finance API do TikTok
-      # quase sempre (nenhum delay existia antes entre pedidos do mesmo run).
       PENDING_SYNC_SLEEP_SECONDS = Integer(ENV.fetch("TIKTOK_PENDING_FINANCIAL_SYNC_SLEEP_MS", "250")) / 1000.0
       RECENT_DAYS = 14
       RECENT_BASE_DELAY = 15.minutes
@@ -70,12 +67,6 @@ module Integrations
       rescue Integrations::AuthenticationError => e
         finish_log("error", e.message)
         result(:error, e.message)
-      # Rede de segurança: no caminho normal, RateLimitError é tratado dentro
-      # de process_order (não propaga mais até aqui) — isso só dispara se um
-      # rate limit acontecer fora do processamento de um pedido específico
-      # (ex.: no start_log/checkpoint). O retry_on genérico do job cobre esse
-      # caso residual; o caminho comum de recuperação é o
-      # schedule_pending_continuation do job, via pending_count > 0.
       rescue Integrations::RateLimitError
         finish_log("pending", "rate limited")
         raise
@@ -106,7 +97,8 @@ module Integrations
       end
 
       def pending_orders
-        scope = channel.orders
+        scope = tenant.orders
+          .where(channel_credential: channel_credential)
           .where(financial_synced_at: nil)
           .where("LOWER(COALESCE(orders.status, '')) IN (?)", ELIGIBLE_STATUSES)
           .where("COALESCE(orders.ordered_at, orders.created_at) >= ?", window_days.days.ago)
@@ -117,10 +109,6 @@ module Integrations
           scope = scope.where("orders.financial_next_attempt_at IS NULL OR orders.financial_next_attempt_at <= ?", Time.current)
         end
         if tracking_column?(:financial_pending_reason)
-          # NULL-safe de propósito: `where.not(col: valor)` vira `col !=
-          # 'valor'` e descarta as linhas NULL — que são exatamente os
-          # pedidos nunca tentados. Com a coluna recém-migrada, isso fazia a
-          # fila inteira parecer vazia.
           scope = scope.where(
             "orders.financial_pending_reason IS NULL OR orders.financial_pending_reason != ?",
             "authentication_invalid"
@@ -144,8 +132,6 @@ module Integrations
         clear_pending(order)
       rescue OrderFinancialSyncService::PendingStatementError => e
         @processed_count += 1
-        # pending_count é incrementado dentro de schedule_retry — somar aqui
-        # de novo dobrava a contagem reportada no IntegrationSyncLog.
         schedule_retry(order, "not_settled", e.message)
       rescue Integrations::AuthenticationError => e
         @processed_count += 1
@@ -164,10 +150,6 @@ module Integrations
           next_at: next_at
         )
         @pending_count += 1
-        # Não relança: o rate limit encerra o batch (ver rate_limit_hit? no
-        # find_each de #call) e deixa o job reagendar a continuação via
-        # schedule_pending_continuation, em vez de matar o job inteiro e
-        # depender do retry_on genérico do ActiveJob.
         @rate_limit_hit = true
       rescue Faraday::Error, Integrations::ApiError => e
         @processed_count += 1
@@ -228,6 +210,7 @@ module Integrations
       def start_log
         IntegrationSyncLog.create!(
           tenant: tenant,
+          channel_credential: channel_credential,
           direction: "inbound",
           action: ACTION,
           status: "pending",
@@ -256,7 +239,9 @@ module Integrations
 
       def metadata_snapshot(order = nil)
         {
+          "channel" => "tiktok",
           "channel_credential_id" => channel_credential.id,
+          "connection_name" => channel_credential.display_name,
           "run_id" => run_id,
           "batch_size" => batch_size,
           "window_days" => window_days,

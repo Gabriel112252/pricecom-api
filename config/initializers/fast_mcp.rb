@@ -2,21 +2,10 @@
 
 require "fast_mcp"
 
-# fast-mcp 1.6.0 (a versão mais recente publicada até este levantamento —
-# conferido em rubygems.org, sem versão mais nova) ships
-# AuthenticatedRackTransport com duas limitações, confirmadas lendo o
-# código de verdade da gem instalada
-# (lib/mcp/transports/authenticated_rack_transport.rb):
-#
-#   1. valid_token? faz `token == @auth_token` — comparação direta de
-#      string, então um auth_token lambda/proc sempre avalia falso.
-#
-#   2. Extração do token só lê o header Authorization; query param
-#      `?token=` não é suportado (necessário pro conector MCP do Claude.ai).
-#
-# Mesmo patch já em produção no ScrumFlow
-# (~/projetos/scrumflow/back/config/initializers/fast_mcp.rb) — reabrimos a
-# classe aqui em vez de mudar a gem.
+# fast-mcp 1.6.0 ships AuthenticatedRackTransport with two limitations for
+# this app: auth_token procs are not evaluated by the stock comparison and
+# query-param tokens are not accepted. The patch below keeps the same
+# behavior already used by Pricecom, resolving the MCP user into Current.
 module FastMcp
   module Transports
     class AuthenticatedRackTransport
@@ -53,22 +42,9 @@ module FastMcp
   end
 end
 
-# Rotas OAuth-like — não é OAuth de verdade (o "code" trocado em
-# /oauth/token É o mcp_api_key, gerado na hora do consentimento, não um
-# código descartável de curta duração). É só o suficiente pro handshake que
-# o conector MCP do Claude.ai/Claude Desktop espera antes de aceitar
-# conectar como "App". Mesmo shim do ScrumFlow, adaptado pro fluxo de
-# consentimento em /configuracoes (ver AcceptMcpConnection.vue no
-# frontend).
-#
-# Risco residual conhecido, herdado do mesmo shim do ScrumFlow:
-# redirect_uri não é validado contra um allowlist. A barreira real de
-# segurança é o usuário precisar estar logado no Pricecom E clicar
-# "Autorizar" na tela de consentimento — mas um redirect_uri malicioso
-# aceito sem checagem é uma superfície de phishing teórica caso alguém
-# convença um usuário autenticado a abrir um link de authorize forjado.
-# Não é diferente do que o ScrumFlow já roda em produção, mas vale revisão
-# futura (allowlist de host) se isso virar uma preocupação real.
+# OAuth-like compatibility endpoints used by MCP clients such as Claude.ai.
+# The existing Pricecom flow uses the user's mcp_api_key as the exchanged
+# code/token and requires the consent screen in the authenticated frontend.
 Rails.application.config.after_initialize do
   Rails.application.routes.prepend do
     get "/.well-known/oauth-authorization-server", to: ->(env) {
@@ -100,9 +76,6 @@ Rails.application.config.after_initialize do
       }.to_json]]
     }
 
-    # Claude.ai registra um "client" dinamicamente antes de iniciar o
-    # authorize — não guardamos nada disso (não há multi-client de
-    # verdade aqui), só respondemos no formato que o protocolo espera.
     post "/register", to: ->(env) {
       body = env["rack.input"].read
       redirect_uris = (JSON.parse(body)["redirect_uris"] rescue [])
@@ -113,11 +86,6 @@ Rails.application.config.after_initialize do
       }.to_json]]
     }
 
-    # Redireciona pro SPA — quem termina o consentimento (gera o
-    # mcp_api_key e redireciona de volta pro redirect_uri com ?code=) é o
-    # frontend, não este endpoint. Exige o usuário já estar logado no
-    # Pricecom; se não estiver, o próprio guard de rotas do SPA manda pro
-    # /login preservando esses query params via ?redirect=.
     get "/oauth/authorize", to: ->(env) {
       req = Rack::Request.new(env)
       redirect_uri = req.params["redirect_uri"]
@@ -127,10 +95,6 @@ Rails.application.config.after_initialize do
       [302, { "Location" => location, "Content-Type" => "text/html" }, []]
     }
 
-    # "code" é o mcp_api_key em si (a tela de consentimento gera um novo
-    # na hora de redirecionar de volta pro client) — não um código
-    # intermediário. Trocar por ele mesmo só confirma que é um mcp_api_key
-    # válido antes do client MCP passar a usá-lo como Bearer token.
     post "/oauth/token", to: ->(env) {
       req = Rack::Request.new(env)
       code = req.params["code"]
@@ -151,7 +115,7 @@ end
 FastMcp.mount_in_rails(
   Rails.application,
   name: "pricecom",
-  version: "1.1.0",
+  version: "1.2.0",
   path_prefix: "/mcp",
   messages_route: "messages",
   sse_route: "sse",
@@ -159,9 +123,10 @@ FastMcp.mount_in_rails(
   auth_token: ->(token) { User.find_by(mcp_api_key: token) }
 ) do |server|
   Rails.application.config.after_initialize do
-    # Fase atual: somente consultas. As tools de escrita continuam no código,
-    # mas ficam fora do registry até entrarmos na fase de ações com confirmação,
-    # permissões e auditoria específicas para IA.
+    # Read tools remain available to every authenticated MCP user. The write
+    # tools enabled here are deliberately limited to the product-registration
+    # flow and store-connection setup; each one applies require_admin!, an
+    # explicit confirmar:true gate and UserActivityLog auditing.
     tools = [
       CatalogoPricecomTool,
       ResumoFinanceiroTool,
@@ -173,7 +138,11 @@ FastMcp.mount_in_rails(
       StatusSincronizacaoCanalTool,
       ConsultarIntegracoesTool,
       ConsultarOperacaoTool,
-      ConsultarCarrinhosTool
+      ConsultarCarrinhosTool,
+      CriarEditarCredencialCanalTool,
+      CriarCadastroProdutoTool,
+      PublicarCadastroProdutoTool,
+      DesfazerCadastroProdutoTool
     ]
 
     server.register_tools(*tools)

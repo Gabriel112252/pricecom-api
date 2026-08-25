@@ -2,11 +2,12 @@ module Api
   module V1
     # Endpoint público — não requer JWT.
     # Tenant identificado via header X-Tenant-Slug ou query param tenant_slug.
-    # Assinatura HMAC verificada por provider antes de processar qualquer
-    # payload — ver Integrations::WebhookSignatureVerifier.
+    # Quando um provider tem várias lojas no mesmo tenant, a URL do webhook
+    # precisa carregar channel_credential_id para identificar a conexão exata.
     class WebhooksController < ApplicationController
       skip_before_action :authenticate_request!
       before_action :set_tenant_from_request!
+      before_action :set_channel_credential_from_request!
       before_action :verify_signature!
 
       def receive
@@ -20,26 +21,28 @@ module Api
         integration   = current_tenant.integrations.active.find_by(provider: provider)
 
         result = Integrations::EventRecorder.new(
-          tenant:        current_tenant,
-          integration:   integration,
-          provider:      provider,
-          event_type:    event_type,
-          external_id:   external_id,
-          external_type: external_type,
-          payload:       payload,
-          headers:       safe_headers,
-          metadata:      { source: "webhook", ip: request.remote_ip }
+          tenant:             current_tenant,
+          integration:        integration,
+          channel_credential: @webhook_channel_credential,
+          provider:           provider,
+          event_type:         event_type,
+          external_id:        external_id,
+          external_type:      external_type,
+          payload:            payload,
+          headers:            safe_headers,
+          metadata:           webhook_metadata
         ).call
 
         if result.success?
           Integrations::ProcessEventJob.perform_later(result.event.id)
 
           render json: {
-            id:           result.event.id,
-            status:       result.event.status,
-            provider:     result.event.provider,
-            event_type:   result.event.event_type,
-            external_id:  result.event.external_id
+            id:                    result.event.id,
+            status:                result.event.status,
+            provider:              result.event.provider,
+            event_type:            result.event.event_type,
+            external_id:           result.event.external_id,
+            channel_credential_id: result.event.channel_credential_id
           }, status: :accepted
         else
           render json: { error: result.error_message }, status: :unprocessable_entity
@@ -60,16 +63,44 @@ module Api
         end
       end
 
+      def set_channel_credential_from_request!
+        return if performed?
+
+        provider = params[:provider].to_s.downcase
+        return unless ChannelCredential::CHANNELS.include?(provider)
+
+        scope = current_tenant.channel_credentials.where(channel: provider)
+        requested_id = params[:channel_credential_id].presence || request.headers["X-Channel-Credential-Id"].presence
+
+        if requested_id.present?
+          @webhook_channel_credential = scope.find_by(id: requested_id)
+          unless @webhook_channel_credential
+            render json: { error: "Conexão #{provider} não encontrada para este tenant" }, status: :not_found
+          end
+          return
+        end
+
+        records = scope.order(:id).limit(2).to_a
+        @webhook_channel_credential = records.first if records.one?
+        return if records.size <= 1
+
+        render json: {
+          error: "Existem várias conexões #{provider}; configure este webhook com channel_credential_id na URL"
+        }, status: :unprocessable_entity
+      end
+
       # Reads the signature header straight off the request — NOT off
       # redacted_headers, which deliberately scrubs signature values before
-      # they're persisted for logging (see Integrations::HeaderRedactor).
+      # they're persisted for logging.
       def verify_signature!
+        return if performed?
+
         provider = params[:provider].to_s.downcase
         return unless Integrations::WebhookSignatureVerifier.verifiable?(provider)
 
         header_name  = Integrations::WebhookSignatureVerifier::SIGNATURE_HEADERS.fetch(provider)
         secret_field = Integrations::WebhookSignatureVerifier::SECRET_FIELDS.fetch(provider)
-        credential   = current_tenant.channel_credentials.find_by(channel: provider)
+        credential   = @webhook_channel_credential
 
         valid = Integrations::WebhookSignatureVerifier.verify?(
           provider:     provider,
@@ -79,6 +110,16 @@ module Api
         )
 
         render json: { error: "Assinatura inválida" }, status: :unauthorized unless valid
+      end
+
+      def webhook_metadata
+        metadata = { source: "webhook", ip: request.remote_ip }
+        return metadata unless @webhook_channel_credential
+
+        metadata.merge(
+          channel_credential_id: @webhook_channel_credential.id,
+          connection_name: @webhook_channel_credential.display_name
+        )
       end
 
       def parsed_json_payload
@@ -115,13 +156,6 @@ module Api
           SecureRandom.uuid
       end
 
-      # NOTE: Yampi's webhook envelope puts the full order object under
-      # "resource" ({event, time, merchant, resource: {...}} — see
-      # docs.yampi.com.br/api-reference/introduction-webhook), whereas this
-      # was originally written assuming "resource" holds a type name string
-      # (e.g. "order") like some other providers use it. Only treat it as a
-      # type name when it actually is a string, so a Yampi Hash falls
-      # through to inferring the type from the event name instead.
       def extract_external_type(payload, event_type = "")
         (payload["resource"] if payload["resource"].is_a?(String)) ||
           payload["entity"] ||

@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 class ConsultarIntegracoesTool < ApplicationTool
-  description "Consulta integrações e canais conectados do tenant, fontes de dados, últimos eventos e logs. Nunca retorna tokens, chaves ou credenciais sensíveis."
+  description "Consulta integrações e conexões de lojas do tenant, fontes de dados, últimos eventos e logs. Nunca retorna tokens, chaves ou credenciais sensíveis."
 
   RESULT_LIMIT = 50
 
@@ -23,13 +23,14 @@ class ConsultarIntegracoesTool < ApplicationTool
 
     credentials = tenant.channel_credentials
     credentials = credentials.where("LOWER(channel) = ?", provider.downcase) if provider.present?
+    credentials = credentials.where(status: status) if status.present?
 
     integrations = integrations.to_a
     credentials = credentials.to_a
 
     {
       integracoes: integrations.sort_by { |integration| [ integration.provider.to_s, integration.name.to_s ] }.map { |integration| integration_payload(integration) },
-      credenciais_de_canal: credentials.sort_by { |credential| credential.channel.to_s }.map { |credential| credential_payload(credential) },
+      conexoes_de_loja: credentials.sort_by { |credential| [ credential.channel.to_s, credential.display_name.to_s ] }.map { |credential| credential_payload(credential) },
       fontes_de_dados: tenant.data_source_configs.order(:data_type).map do |config|
         {
           tipo: config.data_type,
@@ -61,7 +62,9 @@ class ConsultarIntegracoesTool < ApplicationTool
   def credential_payload(credential)
     {
       id: credential.id,
+      credencial_canal_id: credential.id,
       canal: credential.channel,
+      nome_loja: credential.display_name,
       status: credential.status,
       role: credential.role,
       polling_habilitado: credential.polling_enabled,
