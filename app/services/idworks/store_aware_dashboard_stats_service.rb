@@ -139,5 +139,45 @@ module Idworks
       result[UNMAPPED_LOJA_KEY] = [ total - identified, 0.0 ].max.round(2)
       result
     end
+
+    # No histórico, muitos pedidos Pricecom não têm idworks_sales_channel
+    # preenchido, apesar de o próprio Channel já identificar TikTok/Yampi.
+    # O gráfico "Canais no Pricecom" deve preferir o canal vindo do IDWorks
+    # quando ele existe e usar channels.platform como fallback confiável.
+    def idworks_channel_key_sql
+      quoted_cutoff = ActiveRecord::Base.connection.quote(SHOPIFY_TO_YAMPI_CUTOFF.beginning_of_day)
+      known_slugs = IDWORKS_CHANNEL_DISPLAY_NAMES.keys
+        .map { |slug| ActiveRecord::Base.connection.quote(slug) }
+        .join(", ")
+      unmapped = ActiveRecord::Base.connection.quote(UNMAPPED_CHANNEL_KEY)
+
+      "CASE " \
+        "WHEN orders.idworks_sales_channel = 'shopify' AND orders.ordered_at >= #{quoted_cutoff} THEN 'yampi' " \
+        "WHEN orders.idworks_sales_channel IN (#{known_slugs}) THEN orders.idworks_sales_channel " \
+        "WHEN channels.platform IN (#{known_slugs}) THEN channels.platform " \
+        "ELSE #{unmapped} END"
+    end
+
+    # Mesma regra acima para o breakdown de componentes de kits, que roda em
+    # Ruby. Cacheamos os canais do tenant para não gerar N+1 ao fazer fallback.
+    def idworks_channel_display_name_for(order)
+      slug = order.idworks_sales_channel
+
+      if IDWORKS_CHANNEL_DISPLAY_NAMES.key?(slug)
+        key = if slug == "shopify" && order.ordered_at >= SHOPIFY_TO_YAMPI_CUTOFF.beginning_of_day
+          "yampi"
+        else
+          slug
+        end
+        return IDWORKS_CHANNEL_DISPLAY_NAMES.fetch(key)
+      end
+
+      platform = pricecom_channel_platform_by_id[order.channel_id]
+      IDWORKS_CHANNEL_DISPLAY_NAMES.fetch(platform, UNMAPPED_CHANNEL_DISPLAY_NAME)
+    end
+
+    def pricecom_channel_platform_by_id
+      @pricecom_channel_platform_by_id ||= tenant.channels.pluck(:id, :platform).to_h
+    end
   end
 end
