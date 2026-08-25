@@ -2,10 +2,11 @@
 
 class PublicarCadastroProdutoTool < ApplicationTool
   description <<~DESC
-    Publica um cadastro de produto já validado. Na Yampi, cria de fato a nova
-    variação/SKU no mesmo produto do SKU-base, registra os IDs externos e
-    devolve a URL de compra quando a API fornecer. Outros canais permanecem
-    waiting_connector até terem publisher. AÇÃO DE ESCRITA — exige confirmar: true.
+    Publica um cadastro já validado. Na Yampi, adiciona a variação/SKU ao
+    produto-base existente; se o mesmo SKU já existe no Pricecom em outro
+    canal, reutiliza esse Product. A publicação usa a imagem própria do SKU
+    resolvida no IDWorks, confirma que a Yampi recebeu imagem e devolve o
+    link de compra (purchase_url). AÇÃO DE ESCRITA — exige confirmar: true.
   DESC
 
   arguments do
@@ -45,6 +46,7 @@ class PublicarCadastroProdutoTool < ApplicationTool
         source: "mcp",
         sku: registration.sku,
         product_id: registration.product_id,
+        reused_existing_product: registration.metadata["reused_existing_product"],
         channel_credential_ids: registration.publications.pluck(:channel_credential_id).compact
       }
     )
@@ -65,9 +67,10 @@ class PublicarCadastroProdutoTool < ApplicationTool
   end
 
   def preview_payload(registration)
+    image_urls = Array(registration.metadata["source_image_urls"])
     {
       confirmacao_necessaria: true,
-      mensagem: "Revise o resumo e chame novamente com confirmar: true para publicar. Na Yampi o SKU nasce com estoque 0 e venda bloqueada para revisão segura.",
+      mensagem: "Revise o resumo e chame novamente com confirmar: true. O Pricecom não criará Product duplicado para SKU já existente e a Yampi só será publicada se houver imagem própria da variação.",
       cadastro_id: registration.id,
       status: registration.status,
       sku: registration.sku,
@@ -78,6 +81,16 @@ class PublicarCadastroProdutoTool < ApplicationTool
         sku: registration.parent_product.sku,
         nome: registration.parent_product.name
       },
+      produto_pricecom_atual: registration.product && {
+        id: registration.product.id,
+        sku: registration.product.sku,
+        nome: registration.product.name
+      },
+      imagem_idworks: {
+        encontrada: image_urls.any?,
+        idworks_id: registration.metadata["source_image_idworks_id"],
+        urls: image_urls
+      },
       validacao: registration.validation_errors,
       destinos: publication_payloads(registration)
     }
@@ -87,15 +100,22 @@ class PublicarCadastroProdutoTool < ApplicationTool
     {
       cadastro_id: registration.id,
       status: registration.status,
+      reutilizou_produto_pricecom: registration.metadata["reused_existing_product"] == true,
       produto_pricecom: registration.product && {
         id: registration.product.id,
         sku: registration.product.sku,
         nome: registration.product.name
       },
+      imagem_idworks: {
+        provider: registration.metadata["source_image_provider"],
+        idworks_id: registration.metadata["source_image_idworks_id"],
+        integracao: registration.metadata["source_image_integration_name"],
+        urls: Array(registration.metadata["source_image_urls"])
+      }.compact,
       destinos: publication_payloads(registration),
       observacao: external_status_message(registration),
       proximo_passo: registration.publications.any? { |publication| publication.status == "published" } ?
-        "Revise o cadastro externo. Se precisar reverter o que foi criado por este fluxo, use desfazer_cadastro_produto com este cadastro_id." :
+        "O link de compra da Yampi está em destinos[].url_compra. Se precisar reverter o SKU criado por este fluxo, use DesfazerCadastroProdutoTool com este cadastro_id." :
         nil
     }.compact
   end
@@ -111,6 +131,11 @@ class PublicarCadastroProdutoTool < ApplicationTool
         external_product_id: publication.external_product_id,
         external_variant_id: publication.external_variant_id,
         url_compra: publication.metadata["purchase_url"],
+        sku_remoto_criado_por_este_fluxo: publication.metadata["remote_sku_created_by_registration"],
+        produto_yampi_convertido_de_simples: publication.metadata["converted_product_from_simple"],
+        valor_variacao: publication.metadata["variation_value_name"],
+        imagens_confirmadas: publication.metadata["remote_images_verified"],
+        quantidade_imagens: publication.metadata["remote_image_count"],
         venda_bloqueada_para_revisao: publication.metadata["created_blocked_sale"],
         estoque_inicial: publication.metadata["created_stock_qty"],
         erro_codigo: publication.error_code,
@@ -121,7 +146,7 @@ class PublicarCadastroProdutoTool < ApplicationTool
 
   def external_status_message(registration)
     failed = registration.publications.select { |publication| publication.status == "failed" }
-    return "Houve falha em parte da publicação; nenhum destino com erro deve ser assumido como criado." if failed.any?
+    return "Houve falha em parte da publicação; nenhum destino com erro deve ser assumido como concluído." if failed.any?
 
     waiting = registration.publications.any? { |publication| publication.status == "waiting_connector" }
     return "A Yampi foi processada; há outros destinos aguardando implementação/configuração do publisher externo." if waiting
