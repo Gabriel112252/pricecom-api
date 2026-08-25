@@ -50,6 +50,7 @@ module Products
         name: registration.name
       )
       variation_value_id = variation_value["id"]
+      variation_value_name = variation_value["name"].presence || registration.name
       raise PublicationError.new("variation_value_missing_id", "A Yampi não retornou o ID do valor de variação.") if variation_value_id.blank?
 
       created_sku = nil
@@ -58,7 +59,7 @@ module Products
           sku_payload(
             parent_sku: parent_sku,
             product_id: product_id,
-            variation_value_id: variation_value_id
+            variation_value_name: variation_value_name
           )
         )
       rescue => e
@@ -81,6 +82,7 @@ module Products
           "purchase_url" => created_sku["purchase_url"],
           "variation_id" => variation_id,
           "variation_value_id" => variation_value_id,
+          "variation_value_name" => variation_value_name,
           "variation_value_created" => variation_value_created,
           "parent_external_variant_id" => listing.external_id.to_s,
           "created_blocked_sale" => true,
@@ -196,7 +198,7 @@ module Products
       raise PublicationError.new("variation_id_missing", "A Yampi não retornou o ID do eixo de variação do produto-base.")
     end
 
-    def sku_payload(parent_sku:, product_id:, variation_value_id:)
+    def sku_payload(parent_sku:, product_id:, variation_value_name:)
       required = %w[price_cost weight height width length quantity_managed]
       missing = required.select { |field| !parent_sku.key?(field) || parent_sku[field].nil? }
       if missing.any?
@@ -219,7 +221,9 @@ module Products
         availability: 0,
         availability_soldout: 0,
         blocked_sale: true,
-        variations_values_ids: [ variation_value_id ]
+        # A documentação Yampi tipa este campo como string[] e mostra os
+        # nomes dos valores (ex.: "Amarelo", "M"), apesar do sufixo _ids.
+        variations_values_ids: [ variation_value_name ]
       }
 
       if parent_sku.key?("allow_sell_without_customization")
