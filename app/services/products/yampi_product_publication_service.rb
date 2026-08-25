@@ -58,13 +58,22 @@ module Products
       variation_value_name = variation_value["name"].presence || registration.name
       raise PublicationError.new("variation_value_missing_id", "A Yampi não retornou o ID do valor de variação.") if variation_value_id.blank?
 
+      image_urls = registration_image_urls
+      if image_urls.empty?
+        raise PublicationError.new(
+          "variation_image_missing",
+          "A publicação foi bloqueada porque o cadastro não possui imagem própria da variação."
+        )
+      end
+
       created_sku = nil
       begin
         created_sku = client.create_sku(
           sku_payload(
             parent_sku: parent_sku,
             product_id: product_id,
-            variation_value_name: variation_value_name
+            variation_value_name: variation_value_name,
+            image_urls: image_urls
           )
         )
       rescue => e
@@ -75,20 +84,30 @@ module Products
       sku_id = created_sku["id"]
       raise PublicationError.new("created_sku_missing_id", "A Yampi criou o SKU, mas não retornou o ID externo.") if sku_id.blank?
 
+      # O create normalmente já devolve purchase_url, mas o GET por ID é a
+      # fonte oficial documentada para recuperar o link de compra. Fazemos a
+      # leitura imediatamente para entregar o checkout na mesma operação.
+      hydrated_sku = client.fetch_sku(sku_id)
+      created_sku = created_sku.merge(hydrated_sku) if hydrated_sku.is_a?(Hash)
+      purchase_url = created_sku["purchase_url"].presence
+
       # Persistir os IDs imediatamente após o POST reduz a janela em que um
       # retry poderia não saber que a Yampi já criou o SKU.
       publication.update!(
         external_product_id: product_id.to_s,
         external_variant_id: sku_id.to_s,
         metadata: publication.metadata.merge(
-          "purchase_url" => created_sku["purchase_url"],
+          "purchase_url" => purchase_url,
           "variation_id" => variation_id,
           "variation_value_id" => variation_value_id,
           "variation_value_name" => variation_value_name,
           "variation_value_created" => variation_value_created,
           "parent_external_variant_id" => listing.external_id.to_s,
           "created_blocked_sale" => true,
-          "created_stock_qty" => 0
+          "created_stock_qty" => 0,
+          "source_image_provider" => registration.metadata["source_image_provider"],
+          "source_image_urls" => image_urls,
+          "source_image_idworks_id" => registration.metadata["source_image_idworks_id"]
         ).compact
       )
 
@@ -124,6 +143,15 @@ module Products
       client = Integrations::YampiCatalogWriteClient.new(credential.credentials)
       delete_outcome = client.delete_sku(sku_id)
       previous_metadata = publication.metadata
+
+      # A listing foi criada por esta publicação; removê-la localmente não
+      # toca no Product compartilhado com TikTok/Shopify/outros canais.
+      ChannelProductListing.where(
+        tenant: registration.tenant,
+        channel: "yampi",
+        channel_credential: credential,
+        external_id: sku_id
+      ).destroy_all
 
       publication.update!(
         status: "planned",
@@ -230,7 +258,7 @@ module Products
       raise PublicationError.new("variation_id_missing", "A Yampi não retornou o ID do eixo de variação do produto-base.")
     end
 
-    def sku_payload(parent_sku:, product_id:, variation_value_name:)
+    def sku_payload(parent_sku:, product_id:, variation_value_name:, image_urls:)
       required = %w[price_cost weight height width length quantity_managed]
       missing = required.select { |field| !parent_sku.key?(field) || parent_sku[field].nil? }
       if missing.any?
@@ -255,28 +283,40 @@ module Products
         blocked_sale: true,
         # A documentação Yampi tipa este campo como string[] e mostra os
         # nomes dos valores (ex.: "Amarelo", "M"), apesar do sufixo _ids.
-        variations_values_ids: [ variation_value_name ]
+        variations_values_ids: [ variation_value_name ],
+        images: image_urls.map { |url| { url: url } }
       }
 
       if parent_sku.key?("allow_sell_without_customization")
         payload[:allow_sell_without_customization] = parent_sku["allow_sell_without_customization"]
       end
 
-      images = registration_image_urls
-      payload[:images] = images.map { |url| { url: url } } if images.any?
       payload
     end
 
     def registration_image_urls
-      return [] unless registration.images.attached?
+      urls = Array(registration.metadata["source_image_urls"])
+        .map { |url| normalized_https_url(url) }
+        .compact
 
-      base = URI.parse(ENV.fetch("APP_HOST", "https://pricecom-pricecom-api.dzxtro.easypanel.host"))
-      options = { host: base.host, protocol: base.scheme }
-      options[:port] = base.port unless [ 80, 443 ].include?(base.port)
+      if registration.images.attached?
+        base = URI.parse(ENV.fetch("APP_HOST", "https://pricecom-pricecom-api.dzxtro.easypanel.host"))
+        options = { host: base.host, protocol: base.scheme }
+        options[:port] = base.port unless [ 80, 443 ].include?(base.port)
 
-      registration.images.map do |image|
-        Rails.application.routes.url_helpers.rails_blob_url(image, **options)
+        urls.concat(registration.images.map do |image|
+          Rails.application.routes.url_helpers.rails_blob_url(image, **options)
+        end)
       end
+
+      urls.compact.uniq
+    end
+
+    def normalized_https_url(value)
+      url = value.to_s.strip
+      return nil unless url.match?(%r{\Ahttps://}i)
+
+      url
     end
 
     def compensate_variation_value(client, variation_id, variation_value_id)
