@@ -5,8 +5,7 @@ module Products
   # variação antes de criar o novo SKU. Quando o produto ainda é simples,
   # converte-o para o eixo "Quantidade" e transforma o SKU-base em
   # "1 unidade". A conversão preserva preço/estoque/dimensões do SKU-base e
-  # tenta voltar o produto para simple=true se a atualização do SKU-base
-  # falhar.
+  # possui compensação explícita se a criação do novo SKU falhar.
   class YampiVariationAxisService
     Result = Struct.new(
       :variation_id,
@@ -45,9 +44,7 @@ module Products
         )
       end
 
-      if axes.one?
-        return build_existing_axis_result(axes.first)
-      end
+      return build_existing_axis_result(axes.first) if axes.one?
 
       product ||= client.fetch_product(product_id)
       unless truthy_simple?(product["simple"])
@@ -57,7 +54,31 @@ module Products
         )
       end
 
-      convert_simple_product!(product)
+      convert_simple_product!
+    end
+
+    # Chamado pelo publisher se a conversão simple -> variação foi concluída,
+    # mas o POST do novo SKU falhou. Restaura o SKU-base e o produto para o
+    # formato simples. Os cadastros globais "Quantidade"/valores podem ficar
+    # na loja, pois removê-los seria arriscado se outra operação os adotou.
+    def rollback_conversion!(result)
+      return unless result&.converted_from_simple
+
+      begin
+        client.update_sku(parent_sku.fetch("id"), base_sku_update_payload([]))
+      rescue => e
+        Rails.logger.error(
+          "[YampiVariationAxisService] rollback base sku=#{parent_sku['id']} failed: #{e.message}"
+        )
+      end
+
+      begin
+        client.update_product(product_id, { simple: true, variations_ids: [] })
+      rescue => e
+        Rails.logger.error(
+          "[YampiVariationAxisService] rollback product=#{product_id} failed: #{e.message}"
+        )
+      end
     end
 
     private
@@ -74,7 +95,7 @@ module Products
       end
 
       variation_name = axis_name(axis).presence || QUANTITY_VARIATION_NAME
-      target_name = target_value_name(variation_name)
+      target_name = target_value_name
       target_value, created = client.find_or_create_variation_value(
         variation_id: variation_id,
         name: target_name
@@ -90,7 +111,7 @@ module Products
       )
     end
 
-    def convert_simple_product!(product)
+    def convert_simple_product!
       quantity = target_quantity!
       variation, _variation_created = client.find_or_create_variation(name: QUANTITY_VARIATION_NAME)
       variation_id = variation["id"]
@@ -124,17 +145,12 @@ module Products
 
       product_switched = false
       begin
-        # A API da Yampi documenta PUT parcial: campos não enviados são
-        # mantidos. Só mudamos o tipo e vinculamos o eixo de Quantidade.
         client.update_product(product_id, {
           simple: false,
           variations_ids: [ variation_id ]
         })
         product_switched = true
 
-        # O SKU que já existia precisa passar a representar a combinação
-        # "1 unidade". Mandamos os campos obrigatórios com os valores atuais,
-        # sem inventar estoque/preço/dimensões.
         client.update_sku(parent_sku.fetch("id"), base_sku_update_payload(base_name))
       rescue => e
         if product_switched
@@ -151,6 +167,8 @@ module Products
 
       verified = client.fetch_sku(parent_sku.fetch("id"))
       unless sku_has_variation_value?(verified, base_name)
+        result = Result.new(converted_from_simple: true)
+        rollback_conversion!(result)
         raise Products::YampiProductPublicationService::PublicationError.new(
           "base_variation_not_confirmed",
           "A Yampi não confirmou que o SKU-base passou a representar '1 unidade'. O novo SKU não foi criado."
@@ -169,7 +187,7 @@ module Products
       )
     end
 
-    def base_sku_update_payload(base_value_name)
+    def base_sku_update_payload(variation_values)
       required = %w[
         product_id sku price_cost price_sale weight height width length
         quantity_managed availability availability_soldout blocked_sale
@@ -195,7 +213,7 @@ module Products
         availability: parent_sku["availability"],
         availability_soldout: parent_sku["availability_soldout"],
         blocked_sale: parent_sku["blocked_sale"],
-        variations_values_ids: [ base_value_name ]
+        variations_values_ids: Array(variation_values)
       }
 
       %w[erp_id barcode allow_sell_without_customization price_discount order].each do |field|
@@ -205,13 +223,10 @@ module Products
       payload
     end
 
-    def target_value_name(variation_name)
+    def target_value_name
       quantity = target_quantity
       return quantity == 1 ? "1 unidade" : "#{quantity} unidades" if quantity
 
-      # Só usa o nome completo como fallback quando o eixo já existia e não
-      # é possível inferir quantidade pelo padrão SKU_BASE_N. Nunca cria o
-      # eixo Quantidade automaticamente sem conseguir inferir N.
       registration.name.to_s.strip.presence || registration.sku
     end
 
