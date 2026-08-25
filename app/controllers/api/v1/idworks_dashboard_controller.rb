@@ -2,13 +2,12 @@ module Api
   module V1
     # Leitura da aba "idworks" além da conciliação já existente (ver
     # ReconciliationOverviewController) — receita/pedidos/produtos/canal no
-    # período, com corte opcional por loja (Hidrabene x Anasol). Toda a
-    # agregação vive em Idworks::DashboardStatsService.
+    # período, com corte opcional por loja (Hidrabene x Anasol).
     class IdworksDashboardController < ApplicationController
       def index
         period_from, period_to = period_params
 
-        result = Idworks::DashboardStatsService.call(
+        result = Idworks::StoreAwareDashboardStatsService.call(
           tenant: current_tenant,
           period_from: period_from,
           period_to: period_to,
