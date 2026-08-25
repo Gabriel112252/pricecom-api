@@ -31,76 +31,70 @@ module Products
         error_message: nil
       )
 
-      listing = parent_listing!
+      parent_listing = parent_listing!
       client = Integrations::YampiCatalogWriteClient.new(credential.credentials)
+      return recover_existing_external!(client) if publication.external_variant_id.present?
 
-      # Se a chamada externa anterior concluiu mas a persistência local caiu
-      # depois, o ID externo já guardado permite retomar sem criar outro SKU.
-      return recover_existing_external!(client, listing) if publication.external_variant_id.present?
-
-      parent_sku = client.fetch_sku(listing.external_id)
-      product_id = remote_product_id(listing, parent_sku)
-
-      if client.find_sku_by_code(product_id: product_id, sku: registration.sku)
+      parent_sku = client.fetch_sku(parent_listing.external_id)
+      product_id = remote_product_id(parent_listing, parent_sku)
+      image_urls = registration_image_urls
+      if image_urls.empty?
         raise PublicationError.new(
-          "remote_sku_already_exists",
-          "Já existe o SKU #{registration.sku} neste produto da Yampi. Nada foi criado para evitar duplicidade."
+          "variation_image_missing",
+          "A publicação foi bloqueada porque não foi encontrada imagem própria da variação #{registration.sku}."
         )
       end
 
-      variation = single_variation!(parent_sku)
-      variation_id = variation.fetch("id")
-      variation_value, variation_value_created = client.find_or_create_variation_value(
-        variation_id: variation_id,
-        name: registration.name
+      # Mesmo SKU em outro canal é o mesmo Product do Pricecom. E se ele já
+      # existir também na Yampi, adotamos o SKU remoto em vez de inventar
+      # outro código ou duplicá-lo.
+      existing_remote = client.find_sku_by_code(product_id: product_id, sku: registration.sku)
+      return adopt_existing_remote!(client, existing_remote, product_id, image_urls) if existing_remote
+
+      axis = YampiVariationAxisService.new(
+        client: client,
+        registration: registration,
+        parent_sku: parent_sku,
+        product_id: product_id
+      ).call
+
+      created_sku = client.create_sku(
+        sku_payload(
+          parent_sku: parent_sku,
+          product_id: product_id,
+          variation_value_name: axis.target_value_name,
+          image_urls: image_urls
+        )
       )
-      variation_value_id = variation_value["id"]
-      variation_value_name = variation_value["name"].presence || registration.name
-      raise PublicationError.new("variation_value_missing_id", "A Yampi não retornou o ID do valor de variação.") if variation_value_id.blank?
-
-      created_sku = nil
-      begin
-        created_sku = client.create_sku(
-          sku_payload(
-            parent_sku: parent_sku,
-            product_id: product_id,
-            variation_value_name: variation_value_name
-          )
-        )
-      rescue => e
-        compensate_variation_value(client, variation_id, variation_value_id) if variation_value_created
-        raise e
-      end
 
       sku_id = created_sku["id"]
       raise PublicationError.new("created_sku_missing_id", "A Yampi criou o SKU, mas não retornou o ID externo.") if sku_id.blank?
 
-      # Persistir os IDs imediatamente após o POST reduz a janela em que um
-      # retry poderia não saber que a Yampi já criou o SKU.
+      # Guarda os IDs logo depois do POST. Se a etapa de imagem/leitura do
+      # link falhar, o retry recupera este mesmo SKU em vez de criar outro.
       publication.update!(
         external_product_id: product_id.to_s,
         external_variant_id: sku_id.to_s,
         metadata: publication.metadata.merge(
-          "purchase_url" => created_sku["purchase_url"],
-          "variation_id" => variation_id,
-          "variation_value_id" => variation_value_id,
-          "variation_value_name" => variation_value_name,
-          "variation_value_created" => variation_value_created,
-          "parent_external_variant_id" => listing.external_id.to_s,
+          "remote_sku_created_by_registration" => true,
+          "variation_id" => axis.variation_id,
+          "variation_name" => axis.variation_name,
+          "variation_value_id" => axis.target_value_id,
+          "variation_value_name" => axis.target_value_name,
+          "variation_value_created" => axis.target_value_created,
+          "converted_product_from_simple" => axis.converted_from_simple,
+          "base_variation_value_id" => axis.base_value_id,
+          "base_variation_value_name" => axis.base_value_name,
+          "parent_external_variant_id" => parent_listing.external_id.to_s,
           "created_blocked_sale" => true,
-          "created_stock_qty" => 0
+          "created_stock_qty" => 0,
+          "source_image_provider" => registration.metadata["source_image_provider"],
+          "source_image_urls" => image_urls,
+          "source_image_idworks_id" => registration.metadata["source_image_idworks_id"]
         ).compact
       )
 
-      persist_listing!(created_sku, product_id)
-      publication.update!(
-        status: "published",
-        error_code: nil,
-        error_message: nil,
-        published_at: Time.current
-      )
-
-      publication
+      finalize_remote!(client, created_sku, product_id)
     rescue PublicationError
       raise
     rescue Integrations::AuthenticationError => e
@@ -113,17 +107,27 @@ module Products
       raise PublicationError.new("pricecom_persistence_error", e.record.errors.full_messages.join(", "))
     end
 
-    # Desfaz somente o SKU que esta publicação criou. O valor da variação
-    # não é removido aqui: depois de publicado ele pode ter passado a ser
-    # usado por outro SKU, então apagá-lo automaticamente seria destrutivo.
+    # Remove da Yampi apenas SKUs que ESTE fluxo criou. Quando a publicação
+    # adotou um SKU remoto preexistente, desfazer remove só o vínculo local.
     def undo!
       validate_destination!
       sku_id = publication.external_variant_id.to_s
       return publication if sku_id.blank?
 
-      client = Integrations::YampiCatalogWriteClient.new(credential.credentials)
-      delete_outcome = client.delete_sku(sku_id)
+      created_by_registration = publication.metadata["remote_sku_created_by_registration"] != false
+      delete_outcome = if created_by_registration
+        Integrations::YampiCatalogWriteClient.new(credential.credentials).delete_sku(sku_id)
+      else
+        :kept_existing_remote
+      end
+
       previous_metadata = publication.metadata
+      ChannelProductListing.where(
+        tenant: registration.tenant,
+        channel: "yampi",
+        channel_credential: credential,
+        external_id: sku_id
+      ).destroy_all
 
       publication.update!(
         status: "planned",
@@ -180,26 +184,86 @@ module Products
       )
     end
 
-    def recover_existing_external!(client, parent_listing)
-      created_sku = client.fetch_sku(publication.external_variant_id)
-      product_id = publication.external_product_id.presence || created_sku["product_id"].presence
+    def adopt_existing_remote!(client, remote_sku, product_id, image_urls)
+      sku_id = remote_sku["id"]
+      raise PublicationError.new("existing_sku_missing_id", "A Yampi encontrou o SKU, mas não retornou o ID.") if sku_id.blank?
+
+      hydrated = client.fetch_sku(sku_id)
+      remote_sku = remote_sku.merge(hydrated) if hydrated.is_a?(Hash)
+
+      publication.update!(
+        external_product_id: product_id.to_s,
+        external_variant_id: sku_id.to_s,
+        metadata: publication.metadata.merge(
+          "remote_sku_created_by_registration" => false,
+          "remote_sku_adopted_at" => Time.current.iso8601,
+          "source_image_provider" => registration.metadata["source_image_provider"],
+          "source_image_urls" => image_urls,
+          "source_image_idworks_id" => registration.metadata["source_image_idworks_id"]
+        ).compact
+      )
+
+      finalize_remote!(client, remote_sku, product_id)
+    end
+
+    def recover_existing_external!(client)
+      remote_sku = client.fetch_sku(publication.external_variant_id)
+      product_id = publication.external_product_id.presence || remote_sku["product_id"].presence
       if product_id.blank?
         raise PublicationError.new("parent_product_id_missing", "O SKU já criado não retornou product_id na recuperação.")
       end
 
-      persist_listing!(created_sku, product_id)
+      finalize_remote!(client, remote_sku, product_id, recovered: true)
+    end
+
+    def finalize_remote!(client, sku, product_id, recovered: false)
+      sku_id = sku["id"] || publication.external_variant_id
+      raise PublicationError.new("remote_sku_missing_id", "A Yampi não retornou o ID do SKU.") if sku_id.blank?
+
+      image_count = ensure_remote_images!(client, sku_id)
+      hydrated = client.fetch_sku(sku_id)
+      sku = sku.merge(hydrated) if hydrated.is_a?(Hash)
+      purchase_url = sku["purchase_url"].presence
+
+      persist_listing!(sku, product_id)
       publication.update!(
         status: "published",
         external_product_id: product_id.to_s,
+        external_variant_id: sku_id.to_s,
         error_code: nil,
         error_message: nil,
         published_at: publication.published_at || Time.current,
         metadata: publication.metadata.merge(
-          "purchase_url" => publication.metadata["purchase_url"].presence || created_sku["purchase_url"],
-          "recovered_after_partial_persistence" => true
+          "purchase_url" => purchase_url,
+          "remote_images_verified" => true,
+          "remote_image_count" => image_count,
+          "recovered_after_partial_persistence" => recovered
         ).compact
       )
+
       publication
+    end
+
+    # O POST de criação de SKU aceita images, mas a Yampi também tem um
+    # endpoint próprio de imagens. Confirmamos a galeria e, se o create não
+    # tiver processado nenhuma, fazemos o upload por URL usando a mesma arte
+    # que veio do IDWorks. Só concluímos a publicação com pelo menos 1 imagem.
+    def ensure_remote_images!(client, sku_id)
+      images = client.sku_images(sku_id)
+      if images.empty?
+        source_urls = registration_image_urls
+        client.create_sku_images(sku_id: sku_id, urls: source_urls)
+        images = client.sku_images(sku_id)
+      end
+
+      if images.empty?
+        raise PublicationError.new(
+          "yampi_image_not_confirmed",
+          "O SKU existe na Yampi, mas nenhuma imagem foi confirmada. A publicação ficou pendente para retry."
+        )
+      end
+
+      images.size
     end
 
     def remote_product_id(listing, parent_sku)
@@ -209,29 +273,8 @@ module Products
       raise PublicationError.new("parent_product_id_missing", "Não foi possível identificar o product_id do produto-base na Yampi.")
     end
 
-    def single_variation!(parent_sku)
-      variations = Array(parent_sku["variations"])
-      if variations.empty?
-        raise PublicationError.new(
-          "parent_has_no_variation_axis",
-          "O produto-base da Yampi é simples e não possui eixo de variação. Nada foi criado."
-        )
-      end
-      if variations.size != 1
-        raise PublicationError.new(
-          "multiple_variation_axes_not_supported",
-          "O produto-base possui #{variations.size} eixos de variação. O cadastro MCP atual aceita somente um eixo para não adivinhar combinações."
-        )
-      end
-
-      variation = variations.first
-      return variation if variation["id"].present?
-
-      raise PublicationError.new("variation_id_missing", "A Yampi não retornou o ID do eixo de variação do produto-base.")
-    end
-
-    def sku_payload(parent_sku:, product_id:, variation_value_name:)
-      required = %w[price_cost weight height width length quantity_managed]
+    def sku_payload(parent_sku:, product_id:, variation_value_name:, image_urls:)
+      required = %w[price_cost weight height width length quantity_managed availability_soldout]
       missing = required.select { |field| !parent_sku.key?(field) || parent_sku[field].nil? }
       if missing.any?
         raise PublicationError.new(
@@ -240,7 +283,7 @@ module Products
         )
       end
 
-      payload = {
+      {
         product_id: product_id.to_i,
         sku: registration.sku,
         price_cost: parent_sku["price_cost"],
@@ -253,61 +296,63 @@ module Products
         availability: 0,
         availability_soldout: 0,
         blocked_sale: true,
-        # A documentação Yampi tipa este campo como string[] e mostra os
-        # nomes dos valores (ex.: "Amarelo", "M"), apesar do sufixo _ids.
-        variations_values_ids: [ variation_value_name ]
-      }
-
-      if parent_sku.key?("allow_sell_without_customization")
-        payload[:allow_sell_without_customization] = parent_sku["allow_sell_without_customization"]
+        variations_values_ids: [ variation_value_name ],
+        images: image_urls.map { |url| { url: url } }
+      }.tap do |payload|
+        if parent_sku.key?("allow_sell_without_customization")
+          payload[:allow_sell_without_customization] = parent_sku["allow_sell_without_customization"]
+        end
       end
-
-      images = registration_image_urls
-      payload[:images] = images.map { |url| { url: url } } if images.any?
-      payload
     end
 
     def registration_image_urls
-      return [] unless registration.images.attached?
+      urls = Array(registration.metadata["source_image_urls"])
+        .map { |url| normalized_https_url(url) }
+        .compact
 
-      base = URI.parse(ENV.fetch("APP_HOST", "https://pricecom-pricecom-api.dzxtro.easypanel.host"))
-      options = { host: base.host, protocol: base.scheme }
-      options[:port] = base.port unless [ 80, 443 ].include?(base.port)
+      if registration.images.attached?
+        base = URI.parse(ENV.fetch("APP_HOST", "https://pricecom-pricecom-api.dzxtro.easypanel.host"))
+        options = { host: base.host, protocol: base.scheme }
+        options[:port] = base.port unless [ 80, 443 ].include?(base.port)
 
-      registration.images.map do |image|
-        Rails.application.routes.url_helpers.rails_blob_url(image, **options)
+        urls.concat(registration.images.map do |image|
+          Rails.application.routes.url_helpers.rails_blob_url(image, **options)
+        end)
       end
+
+      urls.compact.uniq
     end
 
-    def compensate_variation_value(client, variation_id, variation_value_id)
-      client.delete_variation_value(variation_id: variation_id, value_id: variation_value_id)
-    rescue => e
-      Rails.logger.warn(
-        "[YampiProductPublicationService] compensation failed variation_id=#{variation_id} " \
-        "value_id=#{variation_value_id}: #{e.message}"
-      )
+    def normalized_https_url(value)
+      url = value.to_s.strip
+      return nil unless url.match?(%r{\Ahttps://}i)
+
+      url
     end
 
-    def persist_listing!(created_sku, product_id)
+    def persist_listing!(remote_sku, product_id)
+      sku_id = remote_sku["id"] || publication.external_variant_id
+      raise PublicationError.new("remote_sku_missing_id", "A Yampi não retornou o ID do SKU.") if sku_id.blank?
+
       listing = ChannelProductListing.find_or_initialize_by(
         tenant: registration.tenant,
         channel_credential: credential,
-        external_id: created_sku.fetch("id").to_s
+        external_id: sku_id.to_s
       )
       listing.channel = "yampi"
       listing.product = registration.product
       listing.external_sku = registration.sku
-      listing.stock_qty = created_sku["total_in_stock"] || created_sku["availability"] || 0
-      listing.price = created_sku["price_sale"] || registration.price_cents.to_d.fdiv(100)
-      listing.raw_payload = created_sku
+      listing.stock_qty = remote_sku["total_in_stock"] || remote_sku["availability"] || 0
+      listing.price = remote_sku["price_sale"] || registration.price_cents.to_d.fdiv(100)
+      listing.raw_payload = remote_sku
       listing.synced_at = Time.current
       listing.external_product_id = product_id.to_s
-      listing.remote_status = "platform_blocked"
-      listing.remote_status_reason = "created_by_product_registration"
+      listing.remote_status = remote_sku["blocked_sale"] == false ? "selling" : "platform_blocked"
+      listing.remote_status_reason = "product_registration"
       listing.remote_status_metadata = { "source" => "mcp_product_registration" }
       listing.remote_status_synced_at = Time.current
-      listing.selling_status = "platform_blocked"
-      listing.selling_enabled = false
+      listing.selling_status = remote_sku["blocked_sale"] == false ? "selling" : "platform_blocked"
+      listing.selling_enabled = remote_sku["blocked_sale"] == false
       listing.replenishment_eligible = false
       listing.save!
     end

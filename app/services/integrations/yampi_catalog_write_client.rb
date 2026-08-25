@@ -14,8 +14,24 @@ module Integrations
       @credentials = credentials.to_h.with_indifferent_access
     end
 
+    def fetch_product(product_id)
+      unwrap_record(get(
+        "/catalog/products/#{product_id}",
+        include: "variations,skus",
+        skipCache: true
+      ))
+    end
+
+    def update_product(product_id, attributes)
+      unwrap_record(put("/catalog/products/#{product_id}", attributes))
+    end
+
     def fetch_sku(sku_id)
-      unwrap_record(get("/catalog/skus/#{sku_id}"))
+      unwrap_record(get("/catalog/skus/#{sku_id}", skipCache: true))
+    end
+
+    def update_sku(sku_id, attributes)
+      unwrap_record(put("/catalog/skus/#{sku_id}", attributes))
     end
 
     def product_skus(product_id)
@@ -27,6 +43,23 @@ module Integrations
       return nil if target.blank?
 
       product_skus(product_id).find { |row| row["sku"].to_s.casecmp?(target) }
+    end
+
+    def variations
+      paginate("/catalog/variations")
+    end
+
+    def find_or_create_variation(name:)
+      normalized_name = name.to_s.strip
+      raise ApiError, "Nome da variação não pode ficar em branco." if normalized_name.blank?
+
+      existing = variations.find do |row|
+        row["name"].to_s.strip.casecmp?(normalized_name)
+      end
+      return [ existing, false ] if existing
+
+      created = unwrap_record(post("/catalog/variations", { name: normalized_name }))
+      [ created, true ]
     end
 
     def variation_values(variation_id)
@@ -48,6 +81,22 @@ module Integrations
 
     def create_sku(attributes)
       unwrap_record(post("/catalog/skus", attributes))
+    end
+
+    def sku_images(sku_id)
+      body = get("/catalog/skus/#{sku_id}/images", skipCache: true)
+      Array(body.is_a?(Hash) ? body["data"] : body)
+    end
+
+    def create_sku_images(sku_id:, urls:, upload_option: "resize")
+      normalized_urls = Array(urls).map(&:to_s).map(&:strip).reject(&:blank?).uniq
+      return [] if normalized_urls.empty?
+
+      body = post("/catalog/skus/#{sku_id}/images", {
+        images: normalized_urls.map { |url| { url: url } },
+        upload_option: upload_option
+      })
+      Array(body.is_a?(Hash) ? body["data"] : body)
     end
 
     # Retorna :deleted ou :already_absent. DELETE /catalog/skus/{id} é o
@@ -83,7 +132,7 @@ module Integrations
       page = 1
 
       loop do
-        body = get(path, page: page, per_page: PER_PAGE)
+        body = get(path, page: page, per_page: PER_PAGE, skipCache: true)
         page_records = Array(body["data"])
         records.concat(page_records)
 
@@ -104,6 +153,14 @@ module Integrations
 
     def post(path, body)
       response = connection(BASE_URL).post(alias_path(path)) do |req|
+        apply_auth(req)
+        req.body = body
+      end
+      handle_response(response)
+    end
+
+    def put(path, body)
+      response = connection(BASE_URL).put(alias_path(path)) do |req|
         apply_auth(req)
         req.body = body
       end
