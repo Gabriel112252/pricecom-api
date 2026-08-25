@@ -2,16 +2,16 @@
 
 class PublicarCadastroProdutoTool < ApplicationTool
   description <<~DESC
-    Publica um cadastro já validado. Na Yampi, adiciona a variação/SKU ao
-    produto-base existente; se o mesmo SKU já existe no Pricecom em outro
-    canal, reutiliza esse Product. A publicação usa a imagem própria do SKU
-    resolvida no IDWorks, confirma que a Yampi recebeu imagem e devolve o
-    link de compra (purchase_url). AÇÃO DE ESCRITA — exige confirmar: true.
+    Publica um cadastro já validado. Com confirmar:false, atualiza a prévia
+    sem escrever na Yampi: reconsulta a imagem própria do SKU no IDWorks e
+    recalcula as validações. Com confirmar:true, adiciona a variação/SKU ao
+    produto-base da Yampi, reutilizando o mesmo Product do Pricecom quando o
+    SKU já existe em outro canal, e devolve purchase_url.
   DESC
 
   arguments do
     required(:cadastro_id).filled(:integer).description("ID do ProductRegistration")
-    required(:confirmar).filled(:bool).description("Precisa ser true para efetivar a publicação")
+    required(:confirmar).filled(:bool).description("Use false para prévia atualizada; true para efetivar a publicação")
   end
 
   def call(cadastro_id:, confirmar:)
@@ -31,13 +31,11 @@ class PublicarCadastroProdutoTool < ApplicationTool
     return owner_error if owner_error
 
     unless confirmar
+      registration = refresh_preview!(registration)
       return preview_payload(registration)
     end
 
-    registration = Products::ProductRegistrationService.new(
-      tenant: tenant,
-      user: current_user
-    ).publish!(registration)
+    registration = registration_service.publish!(registration)
 
     log_activity!(
       action: "product_registration.published",
@@ -60,17 +58,90 @@ class PublicarCadastroProdutoTool < ApplicationTool
 
   private
 
+  def registration_service
+    @registration_service ||= Products::ProductRegistrationService.new(
+      tenant: current_tenant,
+      user: current_user
+    )
+  end
+
   def ensure_same_creator(registration)
     return nil if registration.created_by_user_id.blank? || registration.created_by_user_id == current_user.id
 
     "Este cadastro foi preparado por outro usuário. Gere um novo rascunho no seu próprio contexto MCP."
   end
 
+  # Prévia é deliberadamente read-only para Yampi. A única escrita é no
+  # metadata/status do rascunho Pricecom, para registrar qual imagem foi
+  # encontrada no IDWorks e limpar validações antigas (como o antigo erro de
+  # SKU duplicado). Nenhum endpoint de escrita da Yampi é chamado aqui.
+  def refresh_preview!(registration)
+    if yampi_destination?(registration) && !registration.images.attached?
+      existing = existing_product_for_sku(registration)
+      result = Products::IdworksSkuImageResolverService.new(
+        tenant: current_tenant,
+        sku: registration.sku,
+        parent_product: registration.parent_product,
+        existing_product: existing
+      ).call
+
+      metadata = registration.metadata.merge(
+        "source_image_provider" => "idworks",
+        "source_image_resolved_at" => Time.current.iso8601,
+        "source_image_errors" => result.errors,
+        "source_image_urls" => result.found? ? result.image_urls : []
+      )
+
+      if result.found?
+        metadata.merge!(
+          "source_image_details" => result.images,
+          "source_image_idworks_id" => result.idworks_id,
+          "source_image_integration_id" => result.integration_id,
+          "source_image_integration_name" => result.integration_name
+        )
+      else
+        metadata = metadata.except(
+          "source_image_details",
+          "source_image_idworks_id",
+          "source_image_integration_id",
+          "source_image_integration_name"
+        )
+      end
+
+      registration.update!(metadata: metadata)
+    end
+
+    if registration.product_id.blank?
+      errors = registration_service.validation_messages(registration.reload)
+      registration.update!(
+        validation_errors: errors,
+        status: errors.empty? ? "ready" : "draft"
+      )
+    end
+
+    registration.reload
+  end
+
+  def yampi_destination?(registration)
+    registration.publications.any? { |publication| publication.channel == "yampi" }
+  end
+
+  def existing_product_for_sku(registration)
+    normalized = registration.sku.to_s.strip.downcase
+    return nil if normalized.blank?
+
+    current_tenant.products.where("LOWER(sku) = ?", normalized).first
+  end
+
   def preview_payload(registration)
     image_urls = Array(registration.metadata["source_image_urls"])
+    existing = existing_product_for_sku(registration)
+
     {
       confirmacao_necessaria: true,
-      mensagem: "Revise o resumo e chame novamente com confirmar: true. O Pricecom não criará Product duplicado para SKU já existente e a Yampi só será publicada se houver imagem própria da variação.",
+      mensagem: registration.validation_errors.empty? ?
+        "Prévia atualizada. Nada foi escrito na Yampi. Revise produto, preço, imagem e destino; depois chame novamente com confirmar:true." :
+        "Prévia atualizada, mas há bloqueios de validação. Nada foi escrito na Yampi.",
       cadastro_id: registration.id,
       status: registration.status,
       sku: registration.sku,
@@ -81,18 +152,25 @@ class PublicarCadastroProdutoTool < ApplicationTool
         sku: registration.parent_product.sku,
         nome: registration.parent_product.name
       },
-      produto_pricecom_atual: registration.product && {
-        id: registration.product.id,
-        sku: registration.product.sku,
-        nome: registration.product.name
+      produto_pricecom_existente: existing && {
+        id: existing.id,
+        sku: existing.sku,
+        nome: existing.name
       },
+      estrategia_pricecom: existing ? "reutilizar_produto_existente" : "criar_produto_local_na_publicacao",
       imagem_idworks: {
         encontrada: image_urls.any?,
         idworks_id: registration.metadata["source_image_idworks_id"],
-        urls: image_urls
-      },
+        integracao: registration.metadata["source_image_integration_name"],
+        urls: image_urls,
+        detalhes: registration.metadata["source_image_details"],
+        erros: registration.metadata["source_image_errors"]
+      }.compact,
       validacao: registration.validation_errors,
-      destinos: publication_payloads(registration)
+      destinos: publication_payloads(registration),
+      proximo_passo: registration.validation_errors.empty? ?
+        "Se estiver correto, chame PublicarCadastroProdutoTool novamente com cadastro_id=#{registration.id} e confirmar:true." :
+        "Não confirme a publicação até os bloqueios acima serem resolvidos."
     }
   end
 
