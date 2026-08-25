@@ -83,6 +83,11 @@ module Integrations
       unwrap_record(post("/catalog/skus", attributes))
     end
 
+    def sku_images(sku_id)
+      body = get("/catalog/skus/#{sku_id}/images", skipCache: true)
+      Array(body.is_a?(Hash) ? body["data"] : body)
+    end
+
     def create_sku_images(sku_id:, urls:, upload_option: "resize")
       normalized_urls = Array(urls).map(&:to_s).map(&:strip).reject(&:blank?).uniq
       return [] if normalized_urls.empty?
