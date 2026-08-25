@@ -8,13 +8,16 @@ module Products
   # Não existe `IDSkuCompanyStrict`; portanto filtramos com IDSkuCompany e
   # confirmamos igualdade exata no payload antes de consultar a galeria.
   #
-  # Para não confundir imagem herdada do produto-pai com arte própria da
-  # variação, comparamos as URLs da galeria do SKU alvo com a galeria do
-  # SKU-base e priorizamos somente URLs exclusivas do alvo.
+  # Primeiro tentamos a imagem própria da variação. Quando ela não existe,
+  # usamos a imagem do SKU-base como fallback explícito para as variações
+  # Yampi. O resultado informa source_sku/fallback_to_parent para que a prévia
+  # deixe claro de onde a imagem veio.
   class IdworksSkuImageResolverService
     Result = Struct.new(
       :found,
       :sku,
+      :source_sku,
+      :fallback_to_parent,
       :idworks_id,
       :integration_id,
       :integration_name,
@@ -37,23 +40,52 @@ module Products
 
     def call
       errors = []
+      integrations = candidate_integrations
 
-      candidate_integrations.each do |integration|
+      integrations.each do |integration|
         begin
-          result = resolve_from(integration)
+          result = resolve_from(
+            integration,
+            code: sku,
+            compare_with_parent: true,
+            fallback_to_parent: false
+          )
           return result if result
         rescue Integrations::AuthenticationError,
                Integrations::RateLimitError,
                Integrations::ApiError => e
-          errors << safe_error(integration, e)
+          errors << safe_error(integration, e, stage: "variation")
         rescue => e
-          errors << safe_error(integration, e)
+          errors << safe_error(integration, e, stage: "variation")
+        end
+      end
+
+      parent_code = parent_product&.sku.to_s.strip
+      if parent_code.present? && !parent_code.casecmp?(sku)
+        integrations.each do |integration|
+          begin
+            result = resolve_from(
+              integration,
+              code: parent_code,
+              compare_with_parent: false,
+              fallback_to_parent: true
+            )
+            return result if result
+          rescue Integrations::AuthenticationError,
+                 Integrations::RateLimitError,
+                 Integrations::ApiError => e
+            errors << safe_error(integration, e, stage: "parent_fallback")
+          rescue => e
+            errors << safe_error(integration, e, stage: "parent_fallback")
+          end
         end
       end
 
       Result.new(
         found: false,
         sku: sku,
+        source_sku: nil,
+        fallback_to_parent: false,
         image_urls: [],
         images: [],
         errors: errors
@@ -78,11 +110,11 @@ module Products
         .uniq(&:id)
     end
 
-    def resolve_from(integration)
+    def resolve_from(integration, code:, compare_with_parent:, fallback_to_parent:)
       client = Integrations::Idworks::BaseClient.new(integration.credentials)
       client.authenticate!
 
-      raw = find_exact_sku(client, sku)
+      raw = find_exact_sku(client, code)
       return nil unless raw
 
       idworks_id = first_present(raw, "IDSku", "IDSKU", "idSku", "id_sku", "SkuId", "skuId")
@@ -92,19 +124,25 @@ module Products
       target_images = gallery.select { |image| normalized_url(image["Url"]).present? }
       return nil if target_images.empty?
 
-      parent_urls = parent_gallery_urls(client, target_idworks_id: idworks_id)
-      own_images = choose_variant_images(target_images, parent_urls)
-      urls = own_images.filter_map { |image| normalized_url(image["Url"]) }.uniq
+      parent_urls = compare_with_parent ? parent_gallery_urls(
+        client,
+        target_idworks_id: idworks_id,
+        target_code: code
+      ) : []
+      chosen_images = choose_variant_images(target_images, parent_urls)
+      urls = chosen_images.filter_map { |image| normalized_url(image["Url"]) }.uniq
       return nil if urls.empty?
 
       Result.new(
         found: true,
         sku: sku,
+        source_sku: code,
+        fallback_to_parent: fallback_to_parent,
         idworks_id: idworks_id.to_s,
         integration_id: integration.id,
         integration_name: integration.name,
         image_urls: urls,
-        images: own_images.map { |image| safe_image_payload(image) },
+        images: chosen_images.map { |image| safe_image_payload(image) },
         errors: []
       )
     end
@@ -147,9 +185,9 @@ module Products
         .sort_by { |image| [ image["ImageOrder"].to_i, image["IDImage"].to_i ] }
     end
 
-    def parent_gallery_urls(client, target_idworks_id:)
+    def parent_gallery_urls(client, target_idworks_id:, target_code:)
       parent_code = parent_product&.sku.to_s.strip
-      return [] if parent_code.blank? || parent_code.casecmp?(sku)
+      return [] if parent_code.blank? || parent_code.casecmp?(target_code.to_s)
 
       parent_raw = find_exact_sku(client, parent_code)
       return [] unless parent_raw
@@ -235,10 +273,11 @@ module Products
       }.compact
     end
 
-    def safe_error(integration, error)
+    def safe_error(integration, error, stage:)
       {
         integration_id: integration.id,
         integration_name: integration.name,
+        stage: stage,
         error_class: error.class.name,
         message: error.message.to_s.first(300)
       }

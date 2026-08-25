@@ -3,10 +3,11 @@
 class PublicarCadastroProdutoTool < ApplicationTool
   description <<~DESC
     Publica um cadastro já validado. Com confirmar:false, atualiza a prévia
-    sem escrever na Yampi: reconsulta a imagem própria do SKU no IDWorks e
-    recalcula as validações. Com confirmar:true, adiciona a variação/SKU ao
-    produto-base da Yampi, reutilizando o mesmo Product do Pricecom quando o
-    SKU já existe em outro canal, e devolve purchase_url.
+    sem escrever na Yampi: tenta primeiro a imagem própria do SKU no IDWorks
+    e, se ela não existir, usa a imagem do produto-base como fallback. Com
+    confirmar:true, adiciona a variação/SKU ao produto-base da Yampi,
+    reutilizando o mesmo Product do Pricecom quando o SKU já existe em outro
+    canal, e devolve purchase_url.
   DESC
 
   arguments do
@@ -45,6 +46,8 @@ class PublicarCadastroProdutoTool < ApplicationTool
         sku: registration.sku,
         product_id: registration.product_id,
         reused_existing_product: registration.metadata["reused_existing_product"],
+        source_image_sku: registration.metadata["source_image_sku"],
+        source_image_fallback_to_parent: registration.metadata["source_image_fallback_to_parent"],
         channel_credential_ids: registration.publications.pluck(:channel_credential_id).compact
       }
     )
@@ -73,8 +76,8 @@ class PublicarCadastroProdutoTool < ApplicationTool
 
   # Prévia é deliberadamente read-only para Yampi. A única escrita é no
   # metadata/status do rascunho Pricecom, para registrar qual imagem foi
-  # encontrada no IDWorks e limpar validações antigas (como o antigo erro de
-  # SKU duplicado). Nenhum endpoint de escrita da Yampi é chamado aqui.
+  # encontrada no IDWorks e limpar validações antigas. Nenhum endpoint de
+  # escrita da Yampi é chamado aqui.
   def refresh_preview!(registration)
     if yampi_destination?(registration) && !registration.images.attached?
       existing = existing_product_for_sku(registration)
@@ -89,7 +92,9 @@ class PublicarCadastroProdutoTool < ApplicationTool
         "source_image_provider" => "idworks",
         "source_image_resolved_at" => Time.current.iso8601,
         "source_image_errors" => result.errors,
-        "source_image_urls" => result.found? ? result.image_urls : []
+        "source_image_urls" => result.found? ? result.image_urls : [],
+        "source_image_sku" => result.source_sku,
+        "source_image_fallback_to_parent" => result.fallback_to_parent == true
       )
 
       if result.found?
@@ -136,6 +141,7 @@ class PublicarCadastroProdutoTool < ApplicationTool
   def preview_payload(registration)
     image_urls = Array(registration.metadata["source_image_urls"])
     existing = existing_product_for_sku(registration)
+    fallback = registration.metadata["source_image_fallback_to_parent"] == true
 
     {
       confirmacao_necessaria: true,
@@ -160,6 +166,9 @@ class PublicarCadastroProdutoTool < ApplicationTool
       estrategia_pricecom: existing ? "reutilizar_produto_existente" : "criar_produto_local_na_publicacao",
       imagem_idworks: {
         encontrada: image_urls.any?,
+        sku_origem: registration.metadata["source_image_sku"],
+        fallback_produto_base: fallback,
+        observacao: fallback ? "A variação não tinha imagem própria; será usada a imagem do produto-base." : nil,
         idworks_id: registration.metadata["source_image_idworks_id"],
         integracao: registration.metadata["source_image_integration_name"],
         urls: image_urls,
@@ -175,6 +184,8 @@ class PublicarCadastroProdutoTool < ApplicationTool
   end
 
   def result_payload(registration)
+    fallback = registration.metadata["source_image_fallback_to_parent"] == true
+
     {
       cadastro_id: registration.id,
       status: registration.status,
@@ -186,6 +197,8 @@ class PublicarCadastroProdutoTool < ApplicationTool
       },
       imagem_idworks: {
         provider: registration.metadata["source_image_provider"],
+        sku_origem: registration.metadata["source_image_sku"],
+        fallback_produto_base: fallback,
         idworks_id: registration.metadata["source_image_idworks_id"],
         integracao: registration.metadata["source_image_integration_name"],
         urls: Array(registration.metadata["source_image_urls"])
