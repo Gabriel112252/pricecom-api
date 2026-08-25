@@ -33,6 +33,11 @@ module Products
 
       listing = parent_listing!
       client = Integrations::YampiCatalogWriteClient.new(credential.credentials)
+
+      # Se a chamada externa anterior concluiu mas a persistência local caiu
+      # depois, o ID externo já guardado permite retomar sem criar outro SKU.
+      return recover_existing_external!(client, listing) if publication.external_variant_id.present?
+
       parent_sku = client.fetch_sku(listing.external_id)
       product_id = remote_product_id(listing, parent_sku)
 
@@ -70,14 +75,11 @@ module Products
       sku_id = created_sku["id"]
       raise PublicationError.new("created_sku_missing_id", "A Yampi criou o SKU, mas não retornou o ID externo.") if sku_id.blank?
 
-      persist_listing!(created_sku, product_id)
+      # Persistir os IDs imediatamente após o POST reduz a janela em que um
+      # retry poderia não saber que a Yampi já criou o SKU.
       publication.update!(
-        status: "published",
         external_product_id: product_id.to_s,
         external_variant_id: sku_id.to_s,
-        error_code: nil,
-        error_message: nil,
-        published_at: Time.current,
         metadata: publication.metadata.merge(
           "purchase_url" => created_sku["purchase_url"],
           "variation_id" => variation_id,
@@ -88,6 +90,14 @@ module Products
           "created_blocked_sale" => true,
           "created_stock_qty" => 0
         ).compact
+      )
+
+      persist_listing!(created_sku, product_id)
+      publication.update!(
+        status: "published",
+        error_code: nil,
+        error_message: nil,
+        published_at: Time.current
       )
 
       publication
@@ -168,6 +178,28 @@ module Products
         "parent_listing_missing",
         "O produto-base não possui um SKU Yampi na loja #{credential.display_name}."
       )
+    end
+
+    def recover_existing_external!(client, parent_listing)
+      created_sku = client.fetch_sku(publication.external_variant_id)
+      product_id = publication.external_product_id.presence || created_sku["product_id"].presence
+      if product_id.blank?
+        raise PublicationError.new("parent_product_id_missing", "O SKU já criado não retornou product_id na recuperação.")
+      end
+
+      persist_listing!(created_sku, product_id)
+      publication.update!(
+        status: "published",
+        external_product_id: product_id.to_s,
+        error_code: nil,
+        error_message: nil,
+        published_at: publication.published_at || Time.current,
+        metadata: publication.metadata.merge(
+          "purchase_url" => publication.metadata["purchase_url"].presence || created_sku["purchase_url"],
+          "recovered_after_partial_persistence" => true
+        ).compact
+      )
+      publication
     end
 
     def remote_product_id(listing, parent_sku)
