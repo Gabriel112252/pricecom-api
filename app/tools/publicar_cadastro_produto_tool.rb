@@ -2,25 +2,28 @@
 
 class PublicarCadastroProdutoTool < ApplicationTool
   description <<~DESC
-    Publica um cadastro já validado. Com confirmar:false, atualiza a prévia
-    sem escrever na Yampi: tenta primeiro a imagem própria do SKU no IDWorks
-    e, se ela não existir, usa a imagem do produto-base como fallback. Com
-    confirmar:true, adiciona a variação/SKU ao produto-base da Yampi,
-    reutilizando o mesmo Product do Pricecom quando o SKU já existe em outro
-    canal, e devolve purchase_url.
+    Publica um cadastro já validado na Yampi. `modo_yampi=variacao` adiciona
+    um SKU ao produto-base. `modo_yampi=produto_simples` cria um NOVO produto
+    normal/sem variações na Yampi, mantendo o SKU informado (ex.: 2142_2).
+    Com confirmar:false apenas atualiza a prévia e não escreve na Yampi.
+    Com confirmar:true efetiva exatamente o modo escolhido e devolve purchase_url.
   DESC
 
   arguments do
     required(:cadastro_id).filled(:integer).description("ID do ProductRegistration")
     required(:confirmar).filled(:bool).description("Use false para prévia atualizada; true para efetivar a publicação")
+    optional(:modo_yampi).filled(:string).description("variacao (padrão) ou produto_simples para criar produto normal/avulso na Yampi")
   end
 
-  def call(cadastro_id:, confirmar:)
+  def call(cadastro_id:, confirmar:, modo_yampi: nil)
     admin_error = require_admin!
     return admin_error if admin_error
 
     tenant = current_tenant
     return "Usuário sem tenant associado." unless tenant
+
+    mode = normalize_mode(modo_yampi)
+    return mode if mode.is_a?(Hash)
 
     registration = ProductRegistration
       .where(tenant: tenant)
@@ -31,12 +34,22 @@ class PublicarCadastroProdutoTool < ApplicationTool
     owner_error = ensure_same_creator(registration)
     return owner_error if owner_error
 
+    mode_conflict = existing_remote_mode_conflict(registration, mode)
+    return mode_conflict if mode_conflict
+
     unless confirmar
       registration = refresh_preview!(registration)
-      return preview_payload(registration)
+      return preview_payload(registration, mode)
     end
 
-    registration = registration_service.publish!(registration)
+    registration = if mode == "produto_simples"
+      Products::YampiSimpleProductRegistrationService.new(
+        tenant: current_tenant,
+        user: current_user
+      ).publish!(registration)
+    else
+      registration_service.publish!(registration)
+    end
 
     log_activity!(
       action: "product_registration.published",
@@ -45,6 +58,7 @@ class PublicarCadastroProdutoTool < ApplicationTool
         source: "mcp",
         sku: registration.sku,
         product_id: registration.product_id,
+        modo_yampi: mode,
         reused_existing_product: registration.metadata["reused_existing_product"],
         source_image_sku: registration.metadata["source_image_sku"],
         source_image_fallback_to_parent: registration.metadata["source_image_fallback_to_parent"],
@@ -52,7 +66,7 @@ class PublicarCadastroProdutoTool < ApplicationTool
       }
     )
 
-    result_payload(registration.reload)
+    result_payload(registration.reload, mode)
   rescue Products::ProductRegistrationService::ValidationError => e
     { erro: "Cadastro não pode ser publicado", validacao: e.errors }
   rescue ActiveRecord::RecordInvalid => e
@@ -60,6 +74,20 @@ class PublicarCadastroProdutoTool < ApplicationTool
   end
 
   private
+
+  def normalize_mode(value)
+    normalized = value.to_s.strip.downcase
+    normalized = "variacao" if normalized.blank?
+
+    return "variacao" if %w[variacao variação variant].include?(normalized)
+    return "produto_simples" if %w[produto_simples produto-normal produto_normal normal simples avulso].include?(normalized)
+
+    {
+      erro: "modo_yampi inválido",
+      valores_aceitos: [ "variacao", "produto_simples" ],
+      dica: "Use produto_simples quando quiser criar um produto normal separado na Yampi, sem variations_values_ids."
+    }
+  end
 
   def registration_service
     @registration_service ||= Products::ProductRegistrationService.new(
@@ -74,10 +102,25 @@ class PublicarCadastroProdutoTool < ApplicationTool
     "Este cadastro foi preparado por outro usuário. Gere um novo rascunho no seu próprio contexto MCP."
   end
 
-  # Prévia é deliberadamente read-only para Yampi. A única escrita é no
-  # metadata/status do rascunho Pricecom, para registrar qual imagem foi
-  # encontrada no IDWorks e limpar validações antigas. Nenhum endpoint de
-  # escrita da Yampi é chamado aqui.
+  def existing_remote_mode_conflict(registration, mode)
+    publication = registration.publications.find do |item|
+      item.channel == "yampi" && item.external_variant_id.present?
+    end
+    return nil unless publication
+
+    existing_mode = publication.metadata["publication_mode"].presence || "variacao"
+    return nil if existing_mode == mode
+
+    {
+      erro: "O cadastro já possui publicação Yampi em outro modo.",
+      modo_existente: existing_mode,
+      modo_solicitado: mode,
+      acao: "Use DesfazerCadastroProdutoTool primeiro; depois publique novamente no modo desejado."
+    }
+  end
+
+  # Prévia é read-only para Yampi. Atualiza apenas metadata/status do rascunho
+  # no Pricecom para registrar imagem e validações atuais.
   def refresh_preview!(registration)
     if yampi_destination?(registration) && !registration.images.attached?
       existing = existing_product_for_sku(registration)
@@ -138,22 +181,27 @@ class PublicarCadastroProdutoTool < ApplicationTool
     current_tenant.products.where("LOWER(sku) = ?", normalized).first
   end
 
-  def preview_payload(registration)
+  def preview_payload(registration, mode)
     image_urls = Array(registration.metadata["source_image_urls"])
     existing = existing_product_for_sku(registration)
     fallback = registration.metadata["source_image_fallback_to_parent"] == true
+    simple_mode = mode == "produto_simples"
 
     {
       confirmacao_necessaria: true,
       mensagem: registration.validation_errors.empty? ?
-        "Prévia atualizada. Nada foi escrito na Yampi. Revise produto, preço, imagem e destino; depois chame novamente com confirmar:true." :
+        (simple_mode ?
+          "Prévia atualizada. Nada foi escrito na Yampi. Ao confirmar será criado um NOVO produto simples/normal, sem variations_values_ids." :
+          "Prévia atualizada. Nada foi escrito na Yampi. Ao confirmar o SKU será publicado como variação do produto-base.") :
         "Prévia atualizada, mas há bloqueios de validação. Nada foi escrito na Yampi.",
       cadastro_id: registration.id,
       status: registration.status,
+      modo_yampi: mode,
+      efeito_na_yampi: simple_mode ? "criar_novo_produto_simples" : "adicionar_variacao_ao_produto_base",
       sku: registration.sku,
       nome: registration.name,
       preco_centavos: registration.price_cents,
-      produto_base: {
+      produto_base_usado_como_referencia: {
         id: registration.parent_product.id,
         sku: registration.parent_product.sku,
         nome: registration.parent_product.name
@@ -175,20 +223,27 @@ class PublicarCadastroProdutoTool < ApplicationTool
         detalhes: registration.metadata["source_image_details"],
         erros: registration.metadata["source_image_errors"]
       }.compact,
+      seguranca_produto_simples: simple_mode ? {
+        active: true,
+        blocked_sale: true,
+        estoque_inicial: 0,
+        observacao: "O produto é criado normal e ativo no catálogo, mas o SKU nasce bloqueado para venda e sem estoque até revisão/configuração. O purchase_url ainda é retornado."
+      } : nil,
       validacao: registration.validation_errors,
       destinos: publication_payloads(registration),
       proximo_passo: registration.validation_errors.empty? ?
-        "Se estiver correto, chame PublicarCadastroProdutoTool novamente com cadastro_id=#{registration.id} e confirmar:true." :
+        "Se estiver correto, chame PublicarCadastroProdutoTool novamente com cadastro_id=#{registration.id}, modo_yampi=#{mode} e confirmar:true." :
         "Não confirme a publicação até os bloqueios acima serem resolvidos."
-    }
+    }.compact
   end
 
-  def result_payload(registration)
+  def result_payload(registration, requested_mode)
     fallback = registration.metadata["source_image_fallback_to_parent"] == true
 
     {
       cadastro_id: registration.id,
       status: registration.status,
+      modo_yampi_solicitado: requested_mode,
       reutilizou_produto_pricecom: registration.metadata["reused_existing_product"] == true,
       produto_pricecom: registration.product && {
         id: registration.product.id,
@@ -206,7 +261,7 @@ class PublicarCadastroProdutoTool < ApplicationTool
       destinos: publication_payloads(registration),
       observacao: external_status_message(registration),
       proximo_passo: registration.publications.any? { |publication| publication.status == "published" } ?
-        "O link de compra da Yampi está em destinos[].url_compra. Se precisar reverter o SKU criado por este fluxo, use DesfazerCadastroProdutoTool com este cadastro_id." :
+        "O link de compra da Yampi está em destinos[].url_compra. Se precisar reverter o que este fluxo criou, use DesfazerCadastroProdutoTool com este cadastro_id." :
         nil
     }.compact
   end
@@ -219,9 +274,11 @@ class PublicarCadastroProdutoTool < ApplicationTool
         credencial_canal_id: publication.channel_credential_id,
         loja: publication.channel_credential&.display_name,
         status: publication.status,
+        modo_publicacao: publication.metadata["publication_mode"],
         external_product_id: publication.external_product_id,
         external_variant_id: publication.external_variant_id,
         url_compra: publication.metadata["purchase_url"],
+        produto_remoto_criado_por_este_fluxo: publication.metadata["remote_product_created_by_registration"],
         sku_remoto_criado_por_este_fluxo: publication.metadata["remote_sku_created_by_registration"],
         produto_yampi_convertido_de_simples: publication.metadata["converted_product_from_simple"],
         valor_variacao: publication.metadata["variation_value_name"],

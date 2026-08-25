@@ -17,13 +17,27 @@ module Integrations
     def fetch_product(product_id)
       unwrap_record(get(
         "/catalog/products/#{product_id}",
-        include: "variations,skus",
+        include: "brand,categories,variations,skus,texts",
         skipCache: true
       ))
     end
 
+    def create_product(attributes)
+      unwrap_record(post("/catalog/products", attributes))
+    end
+
     def update_product(product_id, attributes)
       unwrap_record(put("/catalog/products/#{product_id}", attributes))
+    end
+
+    def delete_product(product_id)
+      response = connection(BASE_URL).delete(alias_path("/catalog/products/#{product_id}")) do |req|
+        apply_auth(req)
+      end
+      return :already_absent if response.status == 404
+
+      handle_response(response)
+      :deleted
     end
 
     def fetch_sku(sku_id)
@@ -38,11 +52,25 @@ module Integrations
       paginate("/catalog/products/#{product_id}/skus")
     end
 
+    def all_skus
+      paginate("/catalog/skus")
+    end
+
     def find_sku_by_code(product_id:, sku:)
       target = sku.to_s.strip
       return nil if target.blank?
 
       product_skus(product_id).find { |row| row["sku"].to_s.casecmp?(target) }
+    end
+
+    # A listagem global de SKUs não oferece filtro por código na documentação
+    # pública atual. Para evitar criar produto duplicado num retry, percorremos
+    # a paginação e exigimos igualdade exata localmente.
+    def find_sku_by_code_global(sku)
+      target = sku.to_s.strip
+      return nil if target.blank?
+
+      all_skus.find { |row| row["sku"].to_s.strip.casecmp?(target) }
     end
 
     def variations
