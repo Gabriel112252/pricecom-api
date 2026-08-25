@@ -13,7 +13,7 @@ module Api
 
       def index
         testimonials = apply_filters(
-          current_tenant.testimonials.includes(products: :integration)
+          current_tenant.testimonials.includes(:products)
         ).order(created_at: :desc)
 
         per   = [ [ params.fetch(:per_page, PER_PAGE_DEFAULT).to_i, 1 ].max, PER_PAGE_MAX ].min
@@ -161,12 +161,14 @@ module Api
         scope = scope.by_status(params[:status]) if params[:status].present?
         scope = scope.by_source_type(params[:source_type]) if params[:source_type].present?
 
-        # Hidrabene e Anasol continuam no mesmo tenant; a loja é derivada da
-        # Integration IDWorks do produto. Não duplicamos store_id no
-        # testimonial: filtramos pela relação testimonial -> product -> integration.
-        if params[:integration_id].present?
-          scope = scope.joins(:products)
-            .where(products: { integration_id: params[:integration_id] })
+        # Hidrabene e Anasol compartilham a mesma integração IDWorks. A loja
+        # é derivada do produto, usando a regra centralizada em Product.
+        if params[:loja].present?
+          return scope.none unless Product::STORE_KEYS.include?(params[:loja])
+
+          scope = scope
+            .joins(:products)
+            .where(products: { id: current_tenant.products.for_store(params[:loja]).select(:id) })
             .distinct
         end
 
@@ -195,8 +197,7 @@ module Api
               id: product.id,
               name: product.name,
               sku: product.sku,
-              integration_id: product.integration_id,
-              integration_name: product.integration&.name
+              store_key: product.store_key
             }
           end,
           rating: testimonial.rating,

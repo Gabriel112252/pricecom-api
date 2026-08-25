@@ -1,8 +1,11 @@
 class Product < ApplicationRecord
+  STORE_KEYS = %w[hidrabene anasol].freeze
+  ANASOL_NAME_PATTERN = "%anasol%".freeze
+
   belongs_to :tenant
-  # Loja (Hidrabene x Anasol): qual Integration idworks sincronizou esse
-  # produto por último — ver Integrations::Idworks::ProductCostSyncService
-  # e Idworks::DashboardStatsService. Nil até a primeira sync de custo.
+  # Qual integração de origem sincronizou dados deste produto. Hidrabene e
+  # Anasol usam a MESMA conta IDWorks, portanto integration_id não representa
+  # loja/marca e não deve ser usado para separar as duas operações.
   belongs_to :integration, optional: true
   has_many :order_items, dependent: :nullify
   has_many :pricing_rules, dependent: :destroy
@@ -31,6 +34,29 @@ class Product < ApplicationRecord
 
   validates :sku, presence: true, uniqueness: { scope: :tenant_id }
   validates :name, presence: true
+
+  # A operação compartilha tenant, Yampi e IDWorks. Hoje o catálogo Anasol é
+  # identificável pelo próprio nome do produto ("Anasol"); todo o restante
+  # pertence ao agrupamento Hidrabene. Centralizar a regra aqui evita que
+  # dashboard, depoimentos e relatórios inventem critérios diferentes.
+  scope :for_store, lambda { |store_key|
+    case store_key.to_s
+    when "anasol"
+      where("LOWER(products.name) LIKE ?", ANASOL_NAME_PATTERN)
+    when "hidrabene"
+      where.not("LOWER(products.name) LIKE ?", ANASOL_NAME_PATTERN)
+    else
+      none
+    end
+  }
+
+  def self.store_key_for(product_name)
+    product_name.to_s.downcase.include?("anasol") ? "anasol" : "hidrabene"
+  end
+
+  def store_key
+    self.class.store_key_for(name)
+  end
 
   # Physical stock (idworks' QtyAvailable, see qty_available's own comment
   # in the Fase 1 migration) not yet allocated to ANY sales channel —
