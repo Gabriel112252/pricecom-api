@@ -90,15 +90,16 @@ module Api
           }
         end
 
-        # Absolute URL (not the admin panel's rails_blob_path) — this is
-        # consumed cross-origin by a Shopify storefront, a relative path
-        # would resolve against the STORE's own domain, not ours. Points at
-        # the ORIGINAL file (video or image) — only the widget's modal
-        # should load this; the carousel card must use thumbnail_url below.
+        # Para mídia armazenada localmente, devolve URL absoluta da API.
+        # Avaliações importadas de marketplace podem preservar a foto pública
+        # original em external_image_url, evitando depender do filesystem do
+        # Sidekiq para servir uma imagem que a API não possui localmente.
         def media_url(testimonial)
-          return nil unless testimonial.media.attached?
+          if testimonial.media.attached?
+            return Rails.application.routes.url_helpers.rails_blob_url(testimonial.media, host: public_host)
+          end
 
-          Rails.application.routes.url_helpers.rails_blob_url(testimonial.media, host: public_host)
+          external_image_url(testimonial)
         end
 
         # Always an image, never a video — for image media this is just
@@ -116,6 +117,13 @@ module Api
 
         def video_media?(testimonial)
           testimonial.media.attached? && testimonial.media.content_type.start_with?("video/")
+        end
+
+        def external_image_url(testimonial)
+          metadata = testimonial.tiktok_metadata
+          return nil unless metadata.is_a?(Hash)
+
+          metadata["external_image_url"].presence
         end
 
         # In production this is APP_HOST (see config/environments/production.rb),
