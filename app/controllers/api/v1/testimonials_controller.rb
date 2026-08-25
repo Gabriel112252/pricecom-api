@@ -76,6 +76,7 @@ module Api
       # POST /api/v1/testimonials/bulk_import — ZIP com CSV + imagens.
       # image_filename pode estar vazio por linha; source_type/external_url
       # são opcionais e permitem preservar a origem pública da avaliação.
+      # image_url também é opcional e aponta para uma foto pública externa.
       # Todo testimonial nasce draft e exige curadoria antes de publicar.
       def bulk_import
         unless params[:file]
@@ -214,9 +215,18 @@ module Api
       end
 
       def media_url(testimonial)
-        return nil unless testimonial.media.attached?
+        if testimonial.media.attached?
+          return Rails.application.routes.url_helpers.rails_blob_path(testimonial.media, only_path: true)
+        end
 
-        Rails.application.routes.url_helpers.rails_blob_path(testimonial.media, only_path: true)
+        external_image_url(testimonial)
+      end
+
+      def external_image_url(testimonial)
+        metadata = testimonial.tiktok_metadata
+        return nil unless metadata.is_a?(Hash)
+
+        metadata["external_image_url"].presence
       end
 
       def bulk_import_json(bulk_import)

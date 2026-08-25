@@ -1,10 +1,17 @@
 require "csv"
+require "uri"
 
 module Testimonials
   # Cria dezenas/centenas de Testimonial de uma vez a partir de um ZIP:
   # um CSV (sku, customer_name, rating, quote_text, image_filename) na raiz
-  # + as imagens soltas, também na raiz, referenciadas pelo nome exato no
+  # + imagens opcionais, também na raiz, referenciadas pelo nome exato no
   # CSV. image_filename pode ficar vazio quando a avaliação não tem foto.
+  #
+  # Avaliações públicas de marketplaces também podem informar image_url.
+  # Nesse caso a URL da foto original é preservada em tiktok_metadata como
+  # external_image_url, evitando copiar o arquivo para o ActiveStorage local
+  # do Sidekiq (API e worker rodam em containers/volumes separados).
+  #
   # As colunas opcionais source_type e external_url preservam a origem real
   # (ex: mercadolivre) e o link público do conteúdo importado.
   #
@@ -116,12 +123,21 @@ module Testimonials
         raise RowError, "Imagem não encontrada no ZIP: #{image_filename}"
       end
 
+      image_url = row["image_url"].to_s.strip.presence
+      if image_url && !valid_http_url?(image_url)
+        raise RowError, "URL de imagem inválida: #{image_url}"
+      end
+
+      metadata = {}
+      metadata["external_image_url"] = image_url if image_url
+
       testimonial = @tenant.testimonials.new(
         customer_name: row["customer_name"].to_s.strip,
         rating: row["rating"].to_s.strip.presence&.to_i,
         quote_text: row["quote_text"].to_s.strip.presence,
         source_type: source_type,
         external_url: row["external_url"].to_s.strip.presence,
+        tiktok_metadata: metadata,
         status: "draft"
       )
       testimonial.product_ids = [ product.id ]
@@ -137,6 +153,13 @@ module Testimonials
       else
         testimonial.save!
       end
+    end
+
+    def valid_http_url?(value)
+      uri = URI.parse(value)
+      uri.is_a?(URI::HTTP) && uri.host.present?
+    rescue URI::InvalidURIError
+      false
     end
 
     def error_message(error)
