@@ -141,7 +141,8 @@ FastMcp.mount_in_rails(
       ConsultarCarrinhosTool,
       CriarEditarCredencialCanalTool,
       CriarCadastroProdutoTool,
-      PublicarCadastroProdutoTool
+      PublicarCadastroProdutoTool,
+      DesfazerCadastroProdutoTool
     ]
 
     server.register_tools(*tools)
