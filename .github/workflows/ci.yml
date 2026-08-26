@@ -36,3 +36,20 @@ jobs:
 
       - name: Lint code for consistent style
         run: bin/rubocop -f simple
+
+  smoke_mcp:
+    runs-on: ubuntu-latest
+    env:
+      RAILS_ENV: test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: .ruby-version
+          bundler-cache: true
+
+      - name: Boot Rails and register MCP tools
+        run: bundle exec rails runner 'puts FastMcp.server.tools.keys.inspect'
