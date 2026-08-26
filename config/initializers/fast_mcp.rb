@@ -115,7 +115,7 @@ end
 FastMcp.mount_in_rails(
   Rails.application,
   name: "pricecom",
-  version: "1.2.0",
+  version: "1.3.0",
   path_prefix: "/mcp",
   messages_route: "messages",
   sse_route: "sse",
@@ -123,10 +123,8 @@ FastMcp.mount_in_rails(
   auth_token: ->(token) { User.find_by(mcp_api_key: token) }
 ) do |server|
   Rails.application.config.after_initialize do
-    # Read tools remain available to every authenticated MCP user. The write
-    # tools enabled here are deliberately limited to the product-registration
-    # flow and store-connection setup; each one applies require_admin!, an
-    # explicit confirmar:true gate and UserActivityLog auditing.
+    # Consultas ao vivo ficam disponíveis para todo usuário autenticado.
+    # Escritas de catálogo exigem admin, prévia/confirmar:true e auditoria.
     tools = [
       CatalogoPricecomTool,
       ResumoFinanceiroTool,
@@ -134,12 +132,16 @@ FastMcp.mount_in_rails(
       ConsultarPedidoTool,
       BuscarProdutoTool,
       ConsultarProdutoDetalhadoTool,
+      ConsultarProdutoOmnichannelTool,
       ConsultarEstoqueTool,
       StatusSincronizacaoCanalTool,
       ConsultarIntegracoesTool,
       ConsultarOperacaoTool,
       ConsultarCarrinhosTool,
       CriarEditarCredencialCanalTool,
+      VincularProdutoCanalTool,
+      AlterarProdutoCanalTool,
+      ReplicarProdutoCanalTool,
       CriarCadastroProdutoTool,
       PublicarCadastroProdutoTool,
       DesfazerCadastroProdutoTool
