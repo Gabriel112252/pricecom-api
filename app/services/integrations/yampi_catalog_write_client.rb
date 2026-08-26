@@ -9,6 +9,7 @@ module Integrations
 
     BASE_URL = "https://api.dooki.com.br/v2/".freeze
     PER_PAGE = 50
+    MAX_PAGES = 500
 
     def initialize(credentials)
       @credentials = credentials.to_h.with_indifferent_access
@@ -60,17 +61,30 @@ module Integrations
       target = sku.to_s.strip
       return nil if target.blank?
 
-      product_skus(product_id).find { |row| row["sku"].to_s.casecmp?(target) }
+      product_skus(product_id).find { |row| row["sku"].to_s.strip.casecmp?(target) }
     end
 
-    # A listagem global de SKUs não oferece filtro por código na documentação
-    # pública atual. Para evitar criar produto duplicado num retry, percorremos
-    # a paginação e exigimos igualdade exata localmente.
-    def find_sku_by_code_global(sku)
+    def find_skus_by_code_global(sku)
       target = sku.to_s.strip
-      return nil if target.blank?
+      return [] if target.blank?
 
-      all_skus.find { |row| row["sku"].to_s.strip.casecmp?(target) }
+      all_skus.select { |row| row["sku"].to_s.strip.casecmp?(target) }
+    end
+
+    # Se houver duplicidade remota de tentativas antigas, prefere o SKU que
+    # realmente está vendável e possui estoque. Isso evita adotar um clone
+    # bloqueado/zerado quando já existe o produto correto na mesma loja.
+    def find_sku_by_code_global(sku)
+      matches = find_skus_by_code_global(sku)
+      return nil if matches.empty?
+
+      matches.min_by do |row|
+        [
+          row["blocked_sale"] == false ? 0 : 1,
+          row["total_in_stock"].to_i.positive? ? 0 : 1,
+          -row["id"].to_i
+        ]
+      end
     end
 
     def variations
@@ -127,6 +141,27 @@ module Integrations
       Array(body.is_a?(Hash) ? body["data"] : body)
     end
 
+    def sku_stocks(sku_id)
+      body = get("/catalog/skus/#{sku_id}/stocks", skipCache: true)
+      Array(body.is_a?(Hash) ? body["data"] : body)
+    end
+
+    def create_sku_stock(sku_id:, stock_id:, quantity:, min_quantity: 0)
+      unwrap_record(post("/catalog/skus/#{sku_id}/stocks", {
+        stock_id: stock_id,
+        quantity: quantity,
+        min_quantity: min_quantity
+      }))
+    end
+
+    def update_sku_stock(sku_id:, sku_stock_id:, stock_id:, quantity:, min_quantity: 0)
+      unwrap_record(put("/catalog/skus/#{sku_id}/stocks/#{sku_stock_id}", {
+        stock_id: stock_id,
+        quantity: quantity,
+        min_quantity: min_quantity
+      }))
+    end
+
     # Retorna :deleted ou :already_absent. DELETE /catalog/skus/{id} é o
     # rollback oficial da API Yampi; 404 é tratado como sucesso idempotente.
     def delete_sku(sku_id)
@@ -160,13 +195,31 @@ module Integrations
       page = 1
 
       loop do
-        body = get(path, page: page, per_page: PER_PAGE, skipCache: true)
-        page_records = Array(body["data"])
-        records.concat(page_records)
+        raise ApiError, "Paginação Yampi excedeu #{MAX_PAGES} páginas em #{path}." if page > MAX_PAGES
 
-        pagination = body.dig("meta", "pagination") || body.dig("meta", "meta", "pagination") || {}
+        body = get(path, page: page, per_page: PER_PAGE, skipCache: true)
+        page_records = Array(body.is_a?(Hash) ? body["data"] : body)
+        records.concat(page_records)
+        break if page_records.empty?
+
+        pagination = if body.is_a?(Hash)
+          body.dig("meta", "pagination") || body.dig("meta", "meta", "pagination") || {}
+        else
+          {}
+        end
         total_pages = pagination["total_pages"].to_i
-        break if page_records.empty? || total_pages <= page || total_pages.zero?
+        current_page = pagination["current_page"].to_i
+        next_link = pagination.dig("links", "next").to_s.strip
+
+        if total_pages.positive?
+          effective_page = current_page.positive? ? current_page : page
+          break if effective_page >= total_pages
+        elsif next_link.blank? && page_records.size < PER_PAGE
+          # Algumas respostas da Yampi não trazem total_pages. Nesse caso só
+          # encerramos quando a página vier incompleta; antes o client parava
+          # na primeira página e podia não enxergar SKUs já existentes.
+          break
+        end
 
         page += 1
       end

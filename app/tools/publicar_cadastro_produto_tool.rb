@@ -5,8 +5,11 @@ class PublicarCadastroProdutoTool < ApplicationTool
     Publica um cadastro já validado na Yampi. `modo_yampi=variacao` adiciona
     um SKU ao produto-base. `modo_yampi=produto_simples` cria um NOVO produto
     normal/sem variações na Yampi, mantendo o SKU informado (ex.: 2142_2).
-    Com confirmar:false apenas atualiza a prévia e não escreve na Yampi.
-    Com confirmar:true efetiva exatamente o modo escolhido e devolve purchase_url.
+    No modo produto_simples, o SKU alvo precisa existir no IDWorks; seus dados
+    físicos/estoque são usados na criação e a imagem pode vir do produto-base
+    como fallback. Com confirmar:false apenas atualiza a prévia e não escreve
+    na Yampi. Com confirmar:true efetiva exatamente o modo escolhido e devolve
+    purchase_url.
   DESC
 
   arguments do
@@ -38,7 +41,7 @@ class PublicarCadastroProdutoTool < ApplicationTool
     return mode_conflict if mode_conflict
 
     unless confirmar
-      registration = refresh_preview!(registration)
+      registration = refresh_preview!(registration, mode: mode)
       return preview_payload(registration, mode)
     end
 
@@ -120,8 +123,8 @@ class PublicarCadastroProdutoTool < ApplicationTool
   end
 
   # Prévia é read-only para Yampi. Atualiza apenas metadata/status do rascunho
-  # no Pricecom para registrar imagem e validações atuais.
-  def refresh_preview!(registration)
+  # no Pricecom para registrar imagem, SKU IDWorks e validações atuais.
+  def refresh_preview!(registration, mode:)
     if yampi_destination?(registration) && !registration.images.attached?
       existing = existing_product_for_sku(registration)
       result = Products::IdworksSkuImageResolverService.new(
@@ -159,8 +162,48 @@ class PublicarCadastroProdutoTool < ApplicationTool
       registration.update!(metadata: metadata)
     end
 
+    if mode == "produto_simples"
+      preferred = registration.product&.integration || registration.parent_product&.integration
+      snapshot = Products::IdworksSkuSnapshotService.new(
+        tenant: current_tenant,
+        sku: registration.sku,
+        preferred_integration: preferred
+      ).call
+
+      snapshot_payload = if snapshot.found?
+        {
+          "found" => true,
+          "idworks_id" => snapshot.idworks_id,
+          "integration_id" => snapshot.integration_id,
+          "integration_name" => snapshot.integration_name,
+          "type_product" => snapshot.type_product,
+          "name" => snapshot.name,
+          "quantity_available" => snapshot.quantity_available,
+          "cost_average" => snapshot.cost_average&.to_f,
+          "weight" => snapshot.weight&.to_f,
+          "height" => snapshot.height&.to_f,
+          "width" => snapshot.width&.to_f,
+          "length" => snapshot.length&.to_f,
+          "ncm" => snapshot.ncm,
+          "errors" => snapshot.errors
+        }.compact
+      else
+        {
+          "found" => false,
+          "errors" => snapshot.errors
+        }
+      end
+
+      registration.update!(
+        metadata: registration.metadata.merge("target_idworks_snapshot" => snapshot_payload)
+      )
+    end
+
     if registration.product_id.blank?
       errors = registration_service.validation_messages(registration.reload)
+      if mode == "produto_simples" && registration.metadata.dig("target_idworks_snapshot", "found") != true
+        errors = (errors + [ "O SKU #{registration.sku} precisa existir no IDWorks antes de criar o produto simples na Yampi." ]).uniq
+      end
       registration.update!(
         validation_errors: errors,
         status: errors.empty? ? "ready" : "draft"
@@ -186,12 +229,16 @@ class PublicarCadastroProdutoTool < ApplicationTool
     existing = existing_product_for_sku(registration)
     fallback = registration.metadata["source_image_fallback_to_parent"] == true
     simple_mode = mode == "produto_simples"
+    target_snapshot = registration.metadata["target_idworks_snapshot"] || {}
+    initial_stock = if simple_mode && target_snapshot["quantity_available"].present?
+      [ target_snapshot["quantity_available"].to_i, Products::YampiSimpleProductPublicationService::INITIAL_STOCK_CAP ].min
+    end
 
     {
       confirmacao_necessaria: true,
       mensagem: registration.validation_errors.empty? ?
         (simple_mode ?
-          "Prévia atualizada. Nada foi escrito na Yampi. Ao confirmar será criado um NOVO produto simples/normal, sem variations_values_ids." :
+          "Prévia atualizada. Nada foi escrito na Yampi. Ao confirmar será criado um NOVO produto simples/normal, sem variations_values_ids, usando o SKU exato do IDWorks." :
           "Prévia atualizada. Nada foi escrito na Yampi. Ao confirmar o SKU será publicado como variação do produto-base.") :
         "Prévia atualizada, mas há bloqueios de validação. Nada foi escrito na Yampi.",
       cadastro_id: registration.id,
@@ -212,22 +259,26 @@ class PublicarCadastroProdutoTool < ApplicationTool
         nome: existing.name
       },
       estrategia_pricecom: existing ? "reutilizar_produto_existente" : "criar_produto_local_na_publicacao",
+      sku_idworks_alvo: simple_mode ? target_snapshot : nil,
       imagem_idworks: {
         encontrada: image_urls.any?,
         sku_origem: registration.metadata["source_image_sku"],
         fallback_produto_base: fallback,
-        observacao: fallback ? "A variação não tinha imagem própria; será usada a imagem do produto-base." : nil,
+        observacao: fallback ? "O SKU alvo não tinha imagem própria; será usada a imagem do produto-base." : nil,
         idworks_id: registration.metadata["source_image_idworks_id"],
         integracao: registration.metadata["source_image_integration_name"],
         urls: image_urls,
         detalhes: registration.metadata["source_image_details"],
         erros: registration.metadata["source_image_errors"]
       }.compact,
-      seguranca_produto_simples: simple_mode ? {
+      criacao_produto_simples: simple_mode ? {
+        simple: true,
         active: true,
-        blocked_sale: true,
-        estoque_inicial: 0,
-        observacao: "O produto é criado normal e ativo no catálogo, mas o SKU nasce bloqueado para venda e sem estoque até revisão/configuração. O purchase_url ainda é retornado."
+        has_variations: false,
+        blocked_sale: false,
+        estoque_inicial: initial_stock,
+        estoque_fonte: "QtyAvailable do SKU exato no IDWorks (limitado a 9999 na criação)",
+        observacao: "O produto será criado vendável, com um único SKU independente. Marca/textos vêm do produto-base; peso/dimensões/custo/estoque vêm do SKU alvo no IDWorks."
       } : nil,
       validacao: registration.validation_errors,
       destinos: publication_payloads(registration),
@@ -286,6 +337,9 @@ class PublicarCadastroProdutoTool < ApplicationTool
         quantidade_imagens: publication.metadata["remote_image_count"],
         venda_bloqueada_para_revisao: publication.metadata["created_blocked_sale"],
         estoque_inicial: publication.metadata["created_stock_qty"],
+        remoto_pronto: publication.metadata["remote_ready_verified"],
+        resultado_estoque: publication.metadata["remote_stock_result"],
+        duplicados_encontrados: publication.metadata["duplicate_remote_candidates"],
         erro_codigo: publication.error_code,
         erro: publication.error_message
       }.compact
