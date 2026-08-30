@@ -54,6 +54,34 @@ module Idworks
       )
     end
 
+    # Receita, quantidade e ticket partem do mesmo conjunto de pedidos. O
+    # serviço base fazia SUM e COUNT separadamente e average_ticket chamava
+    # os dois métodos de novo, repetindo trabalho no banco. Aqui fazemos uma
+    # única agregação e reutilizamos o resultado nos três KPIs.
+    def pricecom_totals
+      @pricecom_totals ||= begin
+        count, revenue = scoped_orders
+          .joins(:channel)
+          .pick(
+            Arel.sql("COUNT(*)"),
+            Arel.sql("COALESCE(SUM(#{effective_revenue_sql}), 0)")
+          ) || [ 0, 0 ]
+
+        {
+          orders_count: count.to_i,
+          revenue_total: revenue.to_f.round(2)
+        }
+      end
+    end
+
+    def revenue_total
+      pricecom_totals[:revenue_total]
+    end
+
+    def orders_count
+      pricecom_totals[:orders_count]
+    end
+
     def revenue_by_loja
       result = Product::STORE_KEYS.index_with do |store_key|
         item_scope_for_store(item_scope_in_period, store_key)
