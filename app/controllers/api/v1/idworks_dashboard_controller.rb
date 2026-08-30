@@ -7,12 +7,25 @@ module Api
       def index
         period_from, period_to = period_params
 
-        result = Idworks::StoreAwareDashboardStatsService.call(
-          tenant: current_tenant,
-          period_from: period_from,
-          period_to: period_to,
-          loja: params[:loja]
-        )
+        # Esta tela dispara várias agregações grandes (orders/order_items/
+        # products + espelho idworks) no mesmo request. Em PostgreSQL dentro
+        # de container, planos paralelos podem abrir segmentos DSM em /dev/shm;
+        # com o shm padrão do Docker isso já derrubou a tela com PG::DiskFull
+        # ("could not resize shared memory segment ... No space left on device").
+        #
+        # Desabilitamos paralelismo SOMENTE para este request e dentro de uma
+        # transação. SET LOCAL volta automaticamente ao valor original no fim
+        # da transação, sem contaminar o pool de conexões nem o restante da API.
+        result = ApplicationRecord.transaction(requires_new: true) do
+          ActiveRecord::Base.connection.execute("SET LOCAL max_parallel_workers_per_gather = 0")
+
+          Idworks::StoreAwareDashboardStatsService.call(
+            tenant: current_tenant,
+            period_from: period_from,
+            period_to: period_to,
+            loja: params[:loja]
+          )
+        end
 
         render json: {
           period:             { from: period_from.iso8601, to: period_to.iso8601 },
