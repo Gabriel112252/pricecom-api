@@ -115,7 +115,7 @@ end
 FastMcp.mount_in_rails(
   Rails.application,
   name: "pricecom",
-  version: "1.3.0",
+  version: "1.4.0",
   path_prefix: "/mcp",
   messages_route: "messages",
   sse_route: "sse",
