@@ -2,6 +2,7 @@
 
 require "faraday"
 require "json"
+require "uri"
 
 module Integrations
   class YampiIdworksIntegratorClient
@@ -40,11 +41,24 @@ module Integrations
       request(:post, "/api/v1/operational_issues/reconcile_tracking", timeout: RECONCILIATION_TIMEOUT)
     end
 
+    def bling_dashboard(date_from: nil, date_to: nil)
+      request(:get, with_query("/api/v1/operational_issues/bling_dashboard", date_from:, date_to:))
+    end
+
+    def bling_operational_issues(date_from: nil, date_to: nil, limit: nil)
+      request(:get, with_query("/api/v1/operational_issues/bling", date_from:, date_to:, limit:))
+    end
+
     def reprocess(issue_id)
       request(:post, "/api/v1/operational_issues/#{issue_id}/reprocess")
     end
 
     private
+
+    def with_query(path, **params)
+      query = URI.encode_www_form(params.compact_blank)
+      query.present? ? "#{path}?#{query}" : path
+    end
 
     def request(method, path, timeout: TIMEOUT)
       raise Error, "Yampi/IDWorks integrator is not configured" unless configured?

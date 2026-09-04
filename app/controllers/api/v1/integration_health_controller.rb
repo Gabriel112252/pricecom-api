@@ -2,12 +2,90 @@ module Api
   module V1
     class IntegrationHealthController < ApplicationController
       def index
-        integrations = current_tenant.integrations.active.includes(:channel)
+        return render_bling_observability if params[:provider].to_s == "bling"
 
-        render json: integrations.map { |i| health_json(i) }
+        integrations = current_tenant.integrations.active.includes(:channel)
+        rows = integrations.map { |i| health_json(i) }
+
+        render json: rows + bling_operational_health_rows
       end
 
       private
+
+      def render_bling_observability
+        client = Integrations::YampiIdworksIntegratorClient.new
+        payload = if params[:view].to_s == "issues"
+          client.bling_operational_issues(
+            date_from: params[:date_from],
+            date_to: params[:date_to],
+            limit: params[:limit]
+          )
+        else
+          client.bling_dashboard(
+            date_from: params[:date_from],
+            date_to: params[:date_to]
+          )
+        end
+
+        render json: payload
+      rescue Integrations::YampiIdworksIntegratorClient::Error => error
+        render json: { error: error.message }, status: :bad_gateway
+      end
+
+      def bling_operational_health_rows
+        payload = Integrations::YampiIdworksIntegratorClient.new.bling_operational_issues(limit: 100)
+        Array(payload["issues"]).map { |issue| bling_issue_health_json(issue) }
+      rescue Integrations::YampiIdworksIntegratorClient::Error => error
+        Rails.logger.warn(
+          {
+            event: "pricecom.bling_observability.unavailable",
+            error_class: error.class.name,
+            error_message: error.message
+          }.to_json
+        )
+        []
+      end
+
+      def bling_issue_health_json(issue)
+        severity = issue["severity"].to_s
+        timestamp = issue["last_seen_at"] || issue["first_seen_at"]
+        critical = %w[critical high].include?(severity)
+        order = issue["yampi_number"].presence || issue["yampi_id"].presence
+        category = bling_category_label(issue["category"])
+        short_message = issue["message"].to_s.squish.truncate(90)
+
+        {
+          id: "bling-#{issue['id']}",
+          provider: "bling",
+          name: [ "Bling", order ? "Pedido #{order}" : nil, category, short_message ].compact.join(" · "),
+          status: critical ? "error" : "syncing",
+          channel_id: nil,
+          channel_name: "Yampi → Bling",
+          last_synced_at: nil,
+          last_event_at: timestamp,
+          last_event_error_at: critical ? timestamp : nil,
+          last_success_at: nil,
+          last_error_at: critical ? timestamp : nil,
+          events_pending_count: critical ? 0 : 1,
+          events_error_count: critical ? 1 : 0,
+          logs_success_last_24h: 0,
+          logs_error_last_24h: critical ? 1 : 0,
+          health_status: critical ? "error" : "pending",
+          operational_issue: issue
+        }
+      end
+
+      def bling_category_label(category)
+        {
+          "auth" => "OAuth",
+          "product" => "SKU/produto",
+          "validation" => "Validação",
+          "order_create" => "Criação do pedido",
+          "invoice" => "NF-e",
+          "tracking" => "Rastreio",
+          "status" => "Status"
+        }.fetch(category.to_s, category.to_s.presence || "Integração")
+      end
 
       def health_json(integration)
         since_24h = 24.hours.ago
