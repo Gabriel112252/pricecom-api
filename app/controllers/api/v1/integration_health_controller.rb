@@ -2,12 +2,34 @@ module Api
   module V1
     class IntegrationHealthController < ApplicationController
       def index
+        return render_bling_observability if params[:provider].to_s == "bling"
+
         integrations = current_tenant.integrations.active.includes(:channel)
 
         render json: integrations.map { |i| health_json(i) }
       end
 
       private
+
+      def render_bling_observability
+        client = Integrations::YampiIdworksIntegratorClient.new
+        payload = if params[:view].to_s == "issues"
+          client.bling_operational_issues(
+            date_from: params[:date_from],
+            date_to: params[:date_to],
+            limit: params[:limit]
+          )
+        else
+          client.bling_dashboard(
+            date_from: params[:date_from],
+            date_to: params[:date_to]
+          )
+        end
+
+        render json: payload
+      rescue Integrations::YampiIdworksIntegratorClient::Error => error
+        render json: { error: error.message }, status: :bad_gateway
+      end
 
       def health_json(integration)
         since_24h = 24.hours.ago
