@@ -27,6 +27,7 @@ module Integrations
             recorded_at: raw_order[:recorded_at],
             status_order: raw_order[:status_order].presence,
             id_status_order: raw_order[:id_status_order],
+            type_order: raw_order[:type_order].presence,
             sales_channel_slug: raw_order[:sales_channel_slug].presence,
             value_shipping: raw_order[:value_shipping],
             value_product: raw_order[:value_product],
