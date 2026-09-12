@@ -358,6 +358,7 @@ module Integrations
         recorded_at:        parse_timestamp(first_present(raw, "Recordtimestamp", "recordtimestamp")),
         status_order:       first_present(raw, "StatusOrder", "statusOrder")&.to_s,
         id_status_order:    first_present(raw, "IDStatusOrder", "IDSTATUSORDER", "idStatusOrder")&.to_i,
+        type_order:         first_present(raw, "TypeOrder", "typeOrder")&.to_s,
         value_shipping:     to_decimal(first_present(raw, "ValueShipping", "valueShipping", "ShippingValue", "shippingValue", "FreightValue", "freightValue")),
         value_product:      to_decimal(first_present(raw, "ValueProduct", "valueProduct")),
         value_order:        to_decimal(first_present(raw, "ValueOrder", "valueOrder")),
