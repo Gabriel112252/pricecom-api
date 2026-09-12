@@ -10,13 +10,13 @@ RSpec.describe Integrations::Idworks::OrderSnapshotService do
     raw_orders = [
       {
         idworks_order_id: "88001", order_ref: "555001", recorded_at: Time.utc(2026, 8, 1, 10),
-        status_order: "Fechado", id_status_order: 1, sales_channel_slug: "shopee",
+        status_order: "Fechado", id_status_order: 1, type_order: "Pedido de Venda", sales_channel_slug: "shopee",
         value_shipping: BigDecimal("10"), value_product: BigDecimal("90"),
         value_order: BigDecimal("100"), value_paid: BigDecimal("100")
       },
       {
         idworks_order_id: "88002", order_ref: "ERP-ONLY", recorded_at: Time.utc(2026, 8, 2, 10),
-        sales_channel_slug: "mercadolivre", value_order: BigDecimal("200")
+        type_order: "Pedido de Venda", sales_channel_slug: "mercadolivre", value_order: BigDecimal("200")
       }
     ]
 
@@ -26,13 +26,14 @@ RSpec.describe Integrations::Idworks::OrderSnapshotService do
 
     expect(IdworksOrder.find_by(external_id: "88002")).to have_attributes(
       order_number: "ERP-ONLY",
+      type_order: "Pedido de Venda",
       sales_channel_slug: "mercadolivre",
       value_order: BigDecimal("200")
     )
   end
 
   it "upserts a repeated IDWorks order without duplicating it" do
-    raw_order = { idworks_order_id: "88001", order_ref: "555001", value_order: BigDecimal("100") }
+    raw_order = { idworks_order_id: "88001", order_ref: "555001", type_order: "Pedido de Venda", value_order: BigDecimal("100") }
 
     described_class.persist!(integration, [raw_order], seen_at: Time.utc(2026, 8, 1))
     described_class.persist!(integration, [raw_order.merge(value_order: BigDecimal("120"))], seen_at: Time.utc(2026, 8, 2))
