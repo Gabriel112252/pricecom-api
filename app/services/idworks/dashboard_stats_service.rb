@@ -24,6 +24,8 @@ module Idworks
     LOJAS = %w[hidrabene anasol].freeze
     UNMAPPED_LOJA_KEY = "nao_identificado".freeze
     TOP_PRODUCTS_LIMIT = 10
+    IDWORKS_RETURN_TYPE = "Devolução".freeze
+    IDWORKS_CANCELLED_STATUS = "Cancelado".freeze
 
     # Pricecom's channel_breakdown (só nesta aba — as outras continuam via
     # channels.platform, a integração própria do Pricecom, que não cobre
@@ -101,11 +103,24 @@ module Idworks
         .merge(Order.sales_and_refunds)
     end
 
+    # IDWorks /orders also returns non-sale movements. Production payload
+    # confirmed 2026-09-12 that TypeOrder="Devolução" can carry a positive
+    # ValueOrder and even an emitted NF, so treating every ERP row as revenue
+    # inflates faturamento. Cancelled rows are excluded independently too.
+    # NULL is intentionally allowed for historical rows until they are
+    # refreshed/backfilled with the new type_order snapshot field.
+    def idworks_orders_base_scope
+      tenant.idworks_orders
+        .where(recorded_at: period_from.beginning_of_day..period_to.end_of_day)
+        .where("idworks_orders.type_order IS NULL OR idworks_orders.type_order NOT ILIKE ?", IDWORKS_RETURN_TYPE)
+        .where("idworks_orders.status_order IS NULL OR idworks_orders.status_order NOT ILIKE ?", IDWORKS_CANCELLED_STATUS)
+    end
+
     # The IDWorks side is intentionally independent from Pricecom::Order.
     # An ERP order can exist without an imported marketplace order or mapping;
-    # it still belongs in the comparison dashboard.
+    # it still belongs in the comparison dashboard when it is a sale.
     def idworks_orders_scope
-      scope = tenant.idworks_orders.where(recorded_at: period_from.beginning_of_day..period_to.end_of_day)
+      scope = idworks_orders_base_scope
       return scope if loja.blank?
 
       integration = integration_for_loja(loja)
@@ -183,8 +198,7 @@ module Idworks
     end
 
     def idworks_revenue_by_loja
-      rows = tenant.idworks_orders
-        .where(recorded_at: period_from.beginning_of_day..period_to.end_of_day)
+      rows = idworks_orders_base_scope
         .group(:integration_id)
         .pluck(:integration_id, Arel.sql("SUM(#{idworks_revenue_sql})"))
       revenue_by_integration_id = rows.each_with_object({}) do |(integration_id, revenue), hash|
