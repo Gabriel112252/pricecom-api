@@ -26,6 +26,10 @@ module Integrations
       request(:get, "/api/v1/operational_issues")
     end
 
+    def operational_runtime
+      request(:get, "/api/v1/operational_issues/runtime")
+    end
+
     def daily_operational_issues(date: nil)
       path = "/api/v1/operational_issues/daily"
       path = "#{path}?date=#{date}" if date.present?
