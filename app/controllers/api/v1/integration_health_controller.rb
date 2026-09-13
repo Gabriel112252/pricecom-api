@@ -83,12 +83,42 @@ module Api
       private
 
       def operational_runtime
+        captured_at = Time.current
+        local_processing = local_sidekiq_processing(captured_at)
+        integrator_runtime = fetch_integrator_runtime
+        integrator_processing = normalize_integrator_processing(integrator_runtime)
+
+        all_queues = Array(local_processing[:queues]) + Array(integrator_processing[:queues])
+
+        {
+          captured_at: captured_at,
+          processing: {
+            available: local_processing[:available] != false || integrator_processing[:available] != false,
+            total_enqueued: local_processing[:total_enqueued].to_i + integrator_processing[:total_enqueued].to_i,
+            retry_count: local_processing[:retry_count].to_i + integrator_processing[:retry_count].to_i,
+            dead_count: local_processing[:dead_count].to_i + integrator_processing[:dead_count].to_i,
+            scheduled_count: local_processing[:scheduled_count].to_i + integrator_processing[:scheduled_count].to_i,
+            processes: local_processing[:processes].to_i + integrator_processing[:processes].to_i,
+            concurrency: local_processing[:concurrency].to_i + integrator_processing[:concurrency].to_i,
+            busy: local_processing[:busy].to_i + integrator_processing[:busy].to_i,
+            queues: all_queues.sort_by { |queue| -queue[:size].to_i },
+            sources: {
+              pricecom: local_processing.except(:queues),
+              yampi_idworks_integrator: integrator_processing.except(:queues)
+            }
+          },
+          incidents: INCIDENT_CATALOG
+        }
+      end
+
+      def local_sidekiq_processing(captured_at)
         queues = sidekiq_queues
         previous = Rails.cache.read(snapshot_cache_key)
-        captured_at = Time.current
 
         queues.each do |queue|
           queue[:growth_per_minute] = queue_growth_per_minute(queue, previous, captured_at)
+          queue[:source] = "pricecom"
+          queue[:source_label] = "Pricecom"
         end
 
         Rails.cache.write(
@@ -101,38 +131,82 @@ module Api
         )
 
         processes = Sidekiq::ProcessSet.new.to_a
-        busy = Sidekiq::WorkSet.new.size
 
         {
-          captured_at: captured_at,
-          processing: {
-            total_enqueued: queues.sum { |queue| queue[:size] },
-            retry_count: Sidekiq::RetrySet.new.size,
-            dead_count: Sidekiq::DeadSet.new.size,
-            scheduled_count: Sidekiq::ScheduledSet.new.size,
-            processes: processes.size,
-            concurrency: processes.sum { |process| process["concurrency"].to_i },
-            busy: busy,
-            queues: queues
-          },
-          incidents: INCIDENT_CATALOG
+          available: true,
+          total_enqueued: queues.sum { |queue| queue[:size] },
+          retry_count: Sidekiq::RetrySet.new.size,
+          dead_count: Sidekiq::DeadSet.new.size,
+          scheduled_count: Sidekiq::ScheduledSet.new.size,
+          processes: processes.size,
+          concurrency: processes.sum { |process| process["concurrency"].to_i },
+          busy: Sidekiq::WorkSet.new.size,
+          queues: queues
         }
-      rescue RedisClient::Error, Sidekiq::RedisConnectionError => error
+      rescue StandardError => error
+        Rails.logger.error(
+          event: "integration_health.local_sidekiq_failed",
+          error_class: error.class.name,
+          error_message: error.message
+        )
+
+        empty_processing(error.message)
+      end
+
+      def fetch_integrator_runtime
+        client = Integrations::YampiIdworksIntegratorClient.new
+        return nil unless client.configured?
+
+        client.operational_runtime
+      rescue Integrations::YampiIdworksIntegratorClient::Error => error
+        Rails.logger.warn(
+          event: "integration_health.integrator_runtime_failed",
+          error_class: error.class.name,
+          error_message: error.message
+        )
+        { "processing" => empty_processing(error.message).stringify_keys }
+      end
+
+      def normalize_integrator_processing(runtime)
+        return empty_processing("Yampi/Bling/Stokki integrator is not configured") unless runtime.is_a?(Hash)
+
+        raw = runtime["processing"] || runtime[:processing] || {}
+        queues = Array(raw["queues"] || raw[:queues]).map do |queue|
+          q = queue.respond_to?(:symbolize_keys) ? queue.symbolize_keys : queue
+          q.merge(
+            source: "yampi_idworks_integrator",
+            source_label: "Yampi/Bling/Stokki"
+          )
+        end
+
         {
-          captured_at: Time.current,
-          processing: {
-            available: false,
-            error: error.message,
-            total_enqueued: 0,
-            retry_count: 0,
-            dead_count: 0,
-            scheduled_count: 0,
-            processes: 0,
-            concurrency: 0,
-            busy: 0,
-            queues: []
-          },
-          incidents: INCIDENT_CATALOG
+          available: raw.fetch("available", raw.fetch(:available, true)),
+          error: raw["error"] || raw[:error],
+          total_enqueued: raw["total_enqueued"] || raw[:total_enqueued] || 0,
+          retry_count: raw["retry_count"] || raw[:retry_count] || 0,
+          dead_count: raw["dead_count"] || raw[:dead_count] || 0,
+          scheduled_count: raw["scheduled_count"] || raw[:scheduled_count] || 0,
+          processes: raw["processes"] || raw[:processes] || 0,
+          concurrency: raw["concurrency"] || raw[:concurrency] || 0,
+          busy: raw["busy"] || raw[:busy] || 0,
+          queues: queues
+        }
+      rescue StandardError => error
+        empty_processing(error.message)
+      end
+
+      def empty_processing(error = nil)
+        {
+          available: false,
+          error: error,
+          total_enqueued: 0,
+          retry_count: 0,
+          dead_count: 0,
+          scheduled_count: 0,
+          processes: 0,
+          concurrency: 0,
+          busy: 0,
+          queues: []
         }
       end
 
@@ -179,7 +253,7 @@ module Api
 
         previous_at = Time.zone.parse(previous[:captured_at].to_s) rescue nil
         previous_size = previous.dig(:queues, queue[:name])
-        return nil unless previous_at && previous_size
+        return nil unless previous_at && !previous_size.nil?
 
         minutes = (captured_at - previous_at) / 60.0
         return nil if minutes <= 0
@@ -194,43 +268,39 @@ module Api
       def health_json(integration)
         since_24h = 24.hours.ago
 
-        events_scope = current_tenant.integration_events
-                         .where(integration_id: integration.id)
-        logs_scope   = current_tenant.integration_sync_logs
-                         .where(integration_id: integration.id)
+        events_scope = current_tenant.integration_events.where(integration_id: integration.id)
+        logs_scope = current_tenant.integration_sync_logs.where(integration_id: integration.id)
 
-        last_event_at         = events_scope.maximum(:created_at)
-        last_event_error_at   = events_scope.where(status: "error").maximum(:updated_at)
-        last_success_at       = logs_scope.where(status: "success").maximum(:finished_at)
-        last_error_at         = logs_scope.where(status: "error").maximum(:finished_at)
-        events_pending_count  = events_scope.where(status: "pending").count
-        events_error_count    = events_scope.where(status: "error").count
-        logs_success_last_24h = logs_scope.where(status: "success")
-                                          .where("created_at >= ?", since_24h).count
-        logs_error_last_24h   = logs_scope.where(status: "error")
-                                          .where("created_at >= ?", since_24h).count
+        last_event_at = events_scope.maximum(:created_at)
+        last_event_error_at = events_scope.where(status: "error").maximum(:updated_at)
+        last_success_at = logs_scope.where(status: "success").maximum(:finished_at)
+        last_error_at = logs_scope.where(status: "error").maximum(:finished_at)
+        events_pending_count = events_scope.where(status: "pending").count
+        events_error_count = events_scope.where(status: "error").count
+        logs_success_last_24h = logs_scope.where(status: "success").where("created_at >= ?", since_24h).count
+        logs_error_last_24h = logs_scope.where(status: "error").where("created_at >= ?", since_24h).count
 
         {
-          id:                    integration.id,
-          provider:              integration.provider,
-          name:                  integration.name,
-          status:                integration.status,
-          channel_id:            integration.channel_id,
-          channel_name:          integration.channel&.name,
-          last_synced_at:        integration.last_synced_at,
-          last_event_at:         last_event_at,
-          last_event_error_at:   last_event_error_at,
-          last_success_at:       last_success_at,
-          last_error_at:         last_error_at,
-          events_pending_count:  events_pending_count,
-          events_error_count:    events_error_count,
+          id: integration.id,
+          provider: integration.provider,
+          name: integration.name,
+          status: integration.status,
+          channel_id: integration.channel_id,
+          channel_name: integration.channel&.name,
+          last_synced_at: integration.last_synced_at,
+          last_event_at: last_event_at,
+          last_event_error_at: last_event_error_at,
+          last_success_at: last_success_at,
+          last_error_at: last_error_at,
+          events_pending_count: events_pending_count,
+          events_error_count: events_error_count,
           logs_success_last_24h: logs_success_last_24h,
-          logs_error_last_24h:   logs_error_last_24h,
-          health_status:         resolve_health_status(
+          logs_error_last_24h: logs_error_last_24h,
+          health_status: resolve_health_status(
             events_pending_count: events_pending_count,
-            last_success_at:      last_success_at,
-            last_error_at:        last_error_at,
-            last_event_error_at:  last_event_error_at
+            last_success_at: last_success_at,
+            last_error_at: last_error_at,
+            last_event_error_at: last_event_error_at
           )
         }
       end
