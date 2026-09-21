@@ -96,7 +96,7 @@ module Integrations
         :log, :retry_after
 
       def incremental_cursor_from
-        [ previous_cursor_at - INCREMENTAL_OVERLAP, cursor_to - INCREMENTAL_CREATED_AT_LOOKBACK_DAYS.days ].min
+        [ previous_cursor_at - INCREMENTAL_OVERLAP, cursor_to - INCREMENTAL_CREATED_AT_LOOKBACK_DAYS.days ].max
       end
 
       def initialize_counters
