@@ -90,7 +90,13 @@ module Integrations
         :log, :retry_after
 
       def incremental_cursor_from
-        [ previous_cursor_at - INCREMENTAL_OVERLAP, cursor_to - INCREMENTAL_CREATED_AT_LOOKBACK_DAYS.days ].min
+        # Incremental polling must start from the most recent safe boundary.
+        # Using .min here forced every 5-minute poll to re-read the full
+        # 3-day lookback, re-normalize thousands of orders and issue DB
+        # lookups for each one. Under Sidekiq concurrency this can saturate
+        # PostgreSQL/CPU. The overlap is enough for the cursor-based poll;
+        # webhooks remain the real-time path for older order updates.
+        [ previous_cursor_at - INCREMENTAL_OVERLAP, cursor_to - INCREMENTAL_CREATED_AT_LOOKBACK_DAYS.days ].max
       end
 
       def initialize_counters
