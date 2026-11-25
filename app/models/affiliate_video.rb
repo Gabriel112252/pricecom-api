@@ -3,6 +3,8 @@ class AffiliateVideo < ApplicationRecord
   # A queued/downloading row older than this is treated as abandoned (worker
   # restarted mid-download, job lost) and becomes eligible to be queued again.
   STALE_DOWNLOAD_AFTER = 1.hour
+  # How long a link from #download_link works.
+  DOWNLOAD_LINK_TTL = 24.hours
   # Orderings over the list endpoint's metrics as stored: "gmv" is
   # {"amount" => "103143.37", "currency" => "BRL"}, "views" a number. A
   # missing or non-numeric value sorts last.
@@ -39,6 +41,32 @@ class AffiliateVideo < ApplicationRecord
 
   def downloaded?
     download_status == "downloaded" && file.attached?
+  end
+
+  # Signed link to the downloaded file, valid for ttl; nil while the file is
+  # not in the Pricecom yet.
+  def download_link(ttl: DOWNLOAD_LINK_TTL)
+    return nil unless downloaded?
+
+    blob = file.blob
+    Rails.application.routes.url_helpers.rails_service_blob_url(
+      blob.signed_id(expires_in: ttl), blob.filename.to_s, host: self.class.link_host
+    )
+  end
+
+  # Queues the file download unless it is already there or on its way.
+  # Returns :downloaded, :in_progress or :queued.
+  def request_download!
+    return :downloaded if downloaded?
+    return :in_progress if download_in_progress?
+
+    update!(download_status: "queued", download_error: nil)
+    Integrations::Tiktok::AffiliateVideoDownloadJob.perform_later(id)
+    :queued
+  end
+
+  def self.link_host
+    Rails.application.routes.default_url_options[:host].presence || ENV["APP_HOST"].presence || "http://localhost:3000"
   end
 
   def download_in_progress?

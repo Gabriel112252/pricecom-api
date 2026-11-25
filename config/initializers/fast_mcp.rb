@@ -115,7 +115,7 @@ end
 FastMcp.mount_in_rails(
   Rails.application,
   name: "pricecom",
-  version: "1.5.0",
+  version: "1.6.0",
   path_prefix: "/mcp",
   messages_route: "messages",
   sse_route: "sse",
@@ -146,9 +146,11 @@ FastMcp.mount_in_rails(
       PublicarCadastroProdutoTool,
       DesfazerCadastroProdutoTool,
       # Vídeos das afiliadas com colaboração direcionada (TikTok Shop):
-      # listar/baixar para todo usuário autenticado; sincronizar exige admin.
+      # listar/baixar (um ou em lote) para todo usuário autenticado;
+      # sincronizar exige admin.
       ListarVideosAfiliadasTool,
       BaixarVideoAfiliadaTool,
+      BaixarVideosAfiliadasEmLoteTool,
       SincronizarVideosAfiliadasTool
     ]
 
