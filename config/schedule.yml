@@ -1,56 +1,62 @@
+# POR ENQUANTO SÓ A SYNC DE VÍDEOS DAS AFILIADAS (2026-11-25): a pedido, os
+# outros crons estão comentados para não sobrecarregar o servidor. Para
+# religar um, descomente a entrada e faça o deploy do pricecom-sidekiq. O
+# sidekiq-cron 2.x carrega este arquivo no boot com load_from_hash!, então
+# uma entrada tirada daqui também sai do Redis no boot seguinte.
+
 # Loaded by sidekiq-cron — see config/initializers/sidekiq.rb.
 # Runs the dispatcher every 15 minutes; it fans out one ProductSyncJob per
 # active ChannelCredential (see Integrations::ScheduleProductSyncsJob).
-product_sync_dispatch:
-  cron: "*/15 * * * *"
-  class: "Integrations::ScheduleProductSyncsJob"
-  queue: integrations
+# product_sync_dispatch:
+#   cron: "*/15 * * * *"
+#   class: "Integrations::ScheduleProductSyncsJob"
+#   queue: integrations
 
-yampi_order_polling_dispatch:
-  cron: "*/5 * * * *"
-  class: "Integrations::Yampi::OrdersPollingSchedulerJob"
-  queue: integrations
+# yampi_order_polling_dispatch:
+#   cron: "*/5 * * * *"
+#   class: "Integrations::Yampi::OrdersPollingSchedulerJob"
+#   queue: integrations
 
 # Abandoned carts move slower than orders (a cart only matters after the
 # customer walked away), so 15min is enough; the cart.reminder webhook
 # covers real-time capture between polls.
-yampi_cart_polling_dispatch:
-  cron: "*/15 * * * *"
-  class: "Integrations::Yampi::CartsPollingSchedulerJob"
-  queue: integrations
+# yampi_cart_polling_dispatch:
+#   cron: "*/15 * * * *"
+#   class: "Integrations::Yampi::CartsPollingSchedulerJob"
+#   queue: integrations
 
-shopee_order_polling_dispatch:
-  cron: "*/15 * * * *"
-  class: "Integrations::Shopee::OrdersPollingSchedulerJob"
-  queue: integrations
+# shopee_order_polling_dispatch:
+#   cron: "*/15 * * * *"
+#   class: "Integrations::Shopee::OrdersPollingSchedulerJob"
+#   queue: integrations
 
 # Shopee: access_token dura ~4h e o refresh_token (30 dias) é rotativo.
 # Rodando a cada 3h com a folga de EXPIRY_LEEWAY do job, o token é sempre
 # renovado com >= 30min de margem antes de expirar.
-shopee_token_refresh_dispatch:
-  cron: "0 */3 * * *"
-  class: "Integrations::Shopee::TokenRefreshSchedulerJob"
-  queue: integrations
+# shopee_token_refresh_dispatch:
+#   cron: "0 */3 * * *"
+#   class: "Integrations::Shopee::TokenRefreshSchedulerJob"
+#   queue: integrations
 
-tiktok_order_polling_dispatch:
-  cron: "*/15 * * * *"
-  class: "Integrations::Tiktok::OrdersPollingSchedulerJob"
-  queue: integrations
+# tiktok_order_polling_dispatch:
+#   cron: "*/15 * * * *"
+#   class: "Integrations::Tiktok::OrdersPollingSchedulerJob"
+#   queue: integrations
 
 # Proxy de carrinho abandonado do TikTok Shop (não existe carrinho
 # pré-checkout na API): varre pedidos UNPAID e materializa em orders
 # (status unpaid, fora do faturamento) + carts (mesmo gadget do Yampi).
-tiktok_unpaid_orders_sync_dispatch:
-  cron: "*/20 * * * *"
-  class: "Integrations::Tiktok::UnpaidOrdersSyncSchedulerJob"
-  queue: integrations
+# tiktok_unpaid_orders_sync_dispatch:
+#   cron: "*/20 * * * *"
+#   class: "Integrations::Tiktok::UnpaidOrdersSyncSchedulerJob"
+#   queue: integrations
 
 # Desfecho dos pedidos unpaid: converteu (PAID+), cancelou ou, após 5 dias
 # sem resposta determinável, status_unknown (para de reconsultar).
-tiktok_unpaid_reconciliation_dispatch:
-  cron: "*/30 * * * *"
-  class: "Integrations::Tiktok::UnpaidReconciliationSchedulerJob"
-  queue: integrations
+# tiktok_unpaid_reconciliation_dispatch:
+#   cron: "*/30 * * * *"
+#   class: "Integrations::Tiktok::UnpaidReconciliationSchedulerJob"
+#   queue: integrations
 
 # Ativado definitivamente (2026-07-24): o backfill por statements fechou em
 # ~65,7% de cobertura nos últimos 30 dias — o resto são pedidos que ainda não
@@ -58,10 +64,10 @@ tiktok_unpaid_reconciliation_dispatch:
 # pequeno (ver PendingFinancialSyncSchedulerJob::SCHEDULED_BATCH_SIZE) com
 # backoff por pedido; o enqueue pós-ingestão continua existindo, este é o
 # caminho garantido.
-tiktok_pending_financial_sync_dispatch:
-  cron: "*/15 * * * *"
-  class: "Integrations::Tiktok::PendingFinancialSyncSchedulerJob"
-  queue: integrations
+# tiktok_pending_financial_sync_dispatch:
+#   cron: "*/15 * * * *"
+#   class: "Integrations::Tiktok::PendingFinancialSyncSchedulerJob"
+#   queue: integrations
 
 # Motivo/status de devolução (Search Returns 202309 — Return and Refund
 # API, separada da Order API e do Finance API já usados pelos crons acima).
@@ -118,117 +124,117 @@ tiktok_affiliate_video_sync_dispatch:
 # comments). Product cost changes infrequently, so a 6h full sync is
 # enough; freight needs to reflect new orders promptly, so it polls every
 # 15min with a 2h incremental window (overlap is intentional/idempotent).
-idworks_product_cost_sync_dispatch:
-  cron: "0 */6 * * *"
-  class: "Integrations::Idworks::ScheduleProductCostSyncsJob"
-  queue: integrations
+# idworks_product_cost_sync_dispatch:
+#   cron: "0 */6 * * *"
+#   class: "Integrations::Idworks::ScheduleProductCostSyncsJob"
+#   queue: integrations
 
-idworks_order_sync_dispatch:
-  cron: "*/15 * * * *"
-  class: "Integrations::Idworks::ScheduleOrderSyncsJob"
-  queue: integrations
+# idworks_order_sync_dispatch:
+#   cron: "*/15 * * * *"
+#   class: "Integrations::Idworks::ScheduleOrderSyncsJob"
+#   queue: integrations
 
 # Stock going negative (overselling) is urgent in a way cost drift isn't,
 # so this polls every 20min instead of riding the 6h cost-sync cadence —
 # same /sku endpoint and HTTP call as idworks_product_cost_sync_dispatch,
 # just a separate DataSourceConfig gate ("stock") and a separate service
 # (Integrations::Idworks::StockSyncService).
-idworks_stock_sync_dispatch:
-  cron: "*/20 * * * *"
-  class: "Integrations::Idworks::ScheduleStockSyncsJob"
-  queue: integrations
+# idworks_stock_sync_dispatch:
+#   cron: "*/20 * * * *"
+#   class: "Integrations::Idworks::ScheduleStockSyncsJob"
+#   queue: integrations
 
 # Compara quantidade vendida por SKU (Pricecom) x faturada (idworks NF) da
 # última semana corrida. O fetch real de itens/NFs já está implementado; o
 # dispatcher continua condicionado ao DataSourceConfig "order_reconciliation".
-idworks_order_reconciliation_dispatch:
-  cron: "0 6 * * 1"
-  class: "Integrations::Idworks::ScheduleOrderReconciliationJob"
-  queue: integrations
+# idworks_order_reconciliation_dispatch:
+#   cron: "0 6 * * 1"
+#   class: "Integrations::Idworks::ScheduleOrderReconciliationJob"
+#   queue: integrations
 
 # LucroFrete: custo real de frete via pedidos ja casados pelo parceiro
 # (/api/reports/orders). O polling antigo de /api/logs fica disponivel
 # apenas para analise de cotacoes brutas, nao para real_freight_cost.
-lucrofrete_orders_sync_dispatch:
-  cron: "*/15 * * * *"
-  class: "Integrations::Lucrofrete::OrdersSyncSchedulerJob"
-  queue: integrations
+# lucrofrete_orders_sync_dispatch:
+#   cron: "*/15 * * * *"
+#   class: "Integrations::Lucrofrete::OrdersSyncSchedulerJob"
+#   queue: integrations
 
-pagarme_payable_sync:
-  cron: "*/30 * * * *"
-  class: "Financials::PagarmePayableSyncJob"
-  queue: integrations
+# pagarme_payable_sync:
+#   cron: "*/30 * * * *"
+#   class: "Financials::PagarmePayableSyncJob"
+#   queue: integrations
 
 # Detecta queda anormal de pedidos e de unidades vendidas por SKU usando a
 # mesma janela de 60 minutos nas 4 semanas anteriores como baseline. Roda
 # alguns minutos depois dos pollings dos canais para reduzir falso positivo
 # por atraso de ingestao e fecha o alerta automaticamente quando normaliza.
-operational_sales_anomaly_detection:
-  cron: "4,19,34,49 * * * *"
-  class: "OperationalAlerts::SalesAnomalyDetectionJob"
-  queue: integrations
+# operational_sales_anomaly_detection:
+#   cron: "4,19,34,49 * * * *"
+#   class: "OperationalAlerts::SalesAnomalyDetectionJob"
+#   queue: integrations
 
 # Snapshot leve das pendencias de rastreio já detectadas pelo integrador.
 # Roda durante o dia para resolver rapidamente o alerta quando o rastreio
 # aparece ou quando o pedido deixa o status Em transporte.
-yampi_idworks_tracking_operational_issues:
-  cron: "6,21,36,51 * * * *"
-  class: "OperationalAlerts::YampiIdworksTrackingIssuesSyncJob"
-  queue: integrations
+# yampi_idworks_tracking_operational_issues:
+#   cron: "6,21,36,51 * * * *"
+#   class: "OperationalAlerts::YampiIdworksTrackingIssuesSyncJob"
+#   queue: integrations
 
 # O integrador executa a varredura pesada às 04:30 de São Paulo. Quinze
 # minutos depois o Pricecom lê o resultado fechado, registra as contagens no
 # log e materializa o que restou como pendência crítica na aba Rastreio.
-yampi_idworks_tracking_daily_reconciliation:
-  cron: "45 4 * * * America/Sao_Paulo"
-  class: "OperationalAlerts::YampiIdworksTrackingDailyReconciliationJob"
-  queue: integrations
+# yampi_idworks_tracking_daily_reconciliation:
+#   cron: "45 4 * * * America/Sao_Paulo"
+#   class: "OperationalAlerts::YampiIdworksTrackingDailyReconciliationJob"
+#   queue: integrations
 
 # Garantia diária de fechamento: às 05:30 de São Paulo, valida 100% dos
 # order.paid do dia anterior contra OrderMapping.idworks_id. Qualquer pedido
 # sem IDWorks vira pendência crítica na Operação, independentemente do estado
 # antigo do WA Upsell. O integrador calcula a janela D-1 em America/Sao_Paulo.
-yampi_idworks_daily_reconciliation:
-  cron: "30 5 * * * America/Sao_Paulo"
-  class: "OperationalAlerts::YampiIdworksDailyReconciliationJob"
-  queue: integrations
+# yampi_idworks_daily_reconciliation:
+#   cron: "30 5 * * * America/Sao_Paulo"
+#   class: "OperationalAlerts::YampiIdworksDailyReconciliationJob"
+#   queue: integrations
 
 # Consulta a fonte de verdade do integrador Yampi->IDWorks. Só materializa
 # na Operação pedidos pagos há mais de 2h que continuam realmente sem
 # OrderMapping; esperas legítimas do WA Upsell ficam suprimidas na origem,
 # mas nunca por mais de 5h após o pagamento.
 # A ausência numa consulta completa resolve automaticamente a pendência.
-yampi_idworks_operational_issues:
-  cron: "1,16,31,46 * * * *"
-  class: "OperationalAlerts::YampiIdworksIssuesSyncJob"
-  queue: integrations
+# yampi_idworks_operational_issues:
+#   cron: "1,16,31,46 * * * *"
+#   class: "OperationalAlerts::YampiIdworksIssuesSyncJob"
+#   queue: integrations
 
 # Envia por WhatsApp apenas a transicao relevante: cada conflito/alerta de
 # estoque e cada falha nova de integracao e deduplicado no Redis. O cron roda
 # a cada 5 min, deslocado dos minutos cheios e normalmente depois da deteccao/
 # reconciliacao operacional, reduzindo o risco de avisar algo que acabou de
 # se resolver. WAHA nunca entra no caminho critico das integracoes.
-operational_whatsapp_notifications:
-  cron: "3,8,13,18,23,28,33,38,43,48,53,58 * * * *"
-  class: "OperationalAlerts::WhatsappNotificationJob"
-  queue: integrations
+# operational_whatsapp_notifications:
+#   cron: "3,8,13,18,23,28,33,38,43,48,53,58 * * * *"
+#   class: "OperationalAlerts::WhatsappNotificationJob"
+#   queue: integrations
 
 # Fecha o ciclo das pendencias operacionais: depois que os pollings acima
 # atualizam o estado local, revalida somente conflitos ainda abertos e resolve
 # automaticamente os que deixaram de existir. Roda deslocado dos minutos
 # cheios para dar tempo dos syncs externos terminarem. Pendencias de custo e
 # reconciliacao IDWorks podem disparar refresh extraordinario, limitado a 1x/h.
-operational_conflicts_reconciliation:
-  cron: "7,22,37,52 * * * *"
-  class: "Audits::ReconcileOpenConflictsJob"
-  queue: integrations
+# operational_conflicts_reconciliation:
+#   cron: "7,22,37,52 * * * *"
+#   class: "Audits::ReconcileOpenConflictsJob"
+#   queue: integrations
 
 # Safety net, not the primary trigger — see StockAlerts::ReconcileAlertsJob's
 # own comment. Stock alerts fire event-driven (order deduction, channel
 # sync, idworks sync); this just catches whatever slips past those. Slow
 # cadence on purpose — a tight one would make this the de facto primary
 # path, which is exactly what it's not meant to be.
-stock_alerts_reconciliation:
-  cron: "0 */3 * * *"
-  class: "StockAlerts::ReconcileAlertsJob"
-  queue: integrations
+# stock_alerts_reconciliation:
+#   cron: "0 */3 * * *"
+#   class: "StockAlerts::ReconcileAlertsJob"
+#   queue: integrations
