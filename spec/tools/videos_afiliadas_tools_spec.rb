@@ -48,6 +48,17 @@ RSpec.describe "Ferramentas MCP de vídeos de afiliadas" do
       expect(by_date[:videos].map { |v| v[:id] }).to eq(%w[2])
     end
 
+    it "orders by GMV or views when asked, newest first by default, and rejects an unknown order" do
+      create_video("1", posted_at: Time.zone.parse("2026-11-20 10:00"), metrics: { "gmv" => { "amount" => "10.00", "currency" => "BRL" }, "views" => 900 })
+      create_video("2", posted_at: Time.zone.parse("2026-11-01 10:00"), metrics: { "gmv" => { "amount" => "2500.00", "currency" => "BRL" }, "views" => 50 })
+      create_video("3", posted_at: Time.zone.parse("2026-11-10 10:00"))
+
+      expect(described_class.new.call(ordem: "gmv")[:videos].map { |v| v[:id] }).to eq(%w[2 1 3])
+      expect(described_class.new.call(ordem: "views")[:videos].map { |v| v[:id] }).to eq(%w[1 2 3])
+      expect(described_class.new.call[:videos].map { |v| v[:id] }).to eq(%w[1 3 2])
+      expect(described_class.new.call(ordem: "aleatorio")).to match(/Ordem inválida/)
+    end
+
     it "rejects a malformed date" do
       expect(described_class.new.call(from: "2026-13-45")).to match(/Data inválida/)
     end

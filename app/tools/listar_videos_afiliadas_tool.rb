@@ -3,10 +3,12 @@
 class ListarVideosAfiliadasTool < ApplicationTool
   description "Lista os vídeos que criadoras afiliadas com colaboração direcionada postaram para a loja no TikTok Shop, " \
     "com métricas, produtos e status do download do arquivo. Se a lista vier vazia ou desatualizada, " \
-    "rode sincronizar_videos_afiliadas antes. Para pegar o arquivo de um vídeo, use baixar_video_afiliada com o id."
+    "rode sincronizar_videos_afiliadas antes. Para pegar o arquivo de um vídeo, use baixar_video_afiliada com o id. " \
+    "Use ordem gmv para ver primeiro os que mais venderam (as métricas são do período em metricas_do_periodo)."
 
   RESULT_LIMIT = 50
   DEFAULT_LIMIT = 25
+  ORDERS = { "recentes" => :newest_first, "gmv" => :top_gmv_first, "views" => :most_viewed_first }.freeze
 
   arguments do
     optional(:criadora).filled(:string).description("@ ou nome da criadora (busca parcial, sem diferenciar maiúsculas)")
@@ -14,12 +16,16 @@ class ListarVideosAfiliadasTool < ApplicationTool
     optional(:from).filled(:string).description("Postados a partir de (YYYY-MM-DD)")
     optional(:to).filled(:string).description("Postados até (YYYY-MM-DD)")
     optional(:somente_baixados).filled(:bool).description("true = só vídeos com o arquivo já baixado")
+    optional(:ordem).filled(:string).description("recentes (padrão, postados mais novos primeiro), gmv (mais vendas primeiro) ou views (mais vistos primeiro)")
     optional(:limite).filled(:integer).description("Máximo de vídeos (padrão 25, máx 50)")
   end
 
-  def call(criadora: nil, produto: nil, from: nil, to: nil, somente_baixados: false, limite: nil)
+  def call(criadora: nil, produto: nil, from: nil, to: nil, somente_baixados: false, ordem: nil, limite: nil)
     tenant = current_tenant
     return "Usuário sem tenant associado." unless tenant
+
+    order_key = ordem.to_s.strip.downcase.presence || "recentes"
+    return "Ordem inválida. Use recentes, gmv ou views." unless ORDERS.key?(order_key)
 
     scope = tenant.affiliate_videos
     if criadora.present?
@@ -34,9 +40,7 @@ class ListarVideosAfiliadasTool < ApplicationTool
     scope = scope.downloaded if somente_baixados
 
     limit = limite.to_i.positive? ? [ limite.to_i, RESULT_LIMIT ].min : DEFAULT_LIMIT
-    videos = scope.includes(file_attachment: :blob)
-      .order(Arel.sql("affiliate_videos.posted_at DESC NULLS LAST, affiliate_videos.id DESC"))
-      .limit(limit)
+    videos = scope.includes(file_attachment: :blob).public_send(ORDERS.fetch(order_key)).limit(limit)
 
     {
       total_no_filtro: scope.count,

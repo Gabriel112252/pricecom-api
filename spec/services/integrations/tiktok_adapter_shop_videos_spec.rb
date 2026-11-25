@@ -42,11 +42,11 @@ RSpec.describe Integrations::TiktokAdapter, "shop videos" do
         .with { |request| captured_request = request }
         .to_return(status: 200, body: list_body, headers: json_headers)
 
-      data = adapter.fetch_shop_videos(date_from: Date.new(2026, 10, 1), date_to: Date.new(2026, 11, 24), page_token: "abc")
+      data = adapter.fetch_shop_videos(date_from: Date.new(2026, 10, 26), date_to: Date.new(2026, 11, 24), page_token: "abc")
 
       query = Rack::Utils.parse_query(captured_request.uri.query)
       expect(query).to include(
-        "start_date_ge" => "2026-10-01",
+        "start_date_ge" => "2026-10-26",
         "end_date_lt" => "2026-11-25",
         "account_type" => "AFFILIATE_ACCOUNTS",
         "page_size" => "100",
@@ -71,10 +71,12 @@ RSpec.describe Integrations::TiktokAdapter, "shop videos" do
       expect(Rack::Utils.parse_query(captured_request.uri.query)).not_to have_key("page_token")
     end
 
-    it "refuses a window wider than 60 days before calling TikTok" do
+    # Production rejects > 30 days with code 28001022, even though the
+    # reference says 60.
+    it "refuses a window wider than 30 days before calling TikTok" do
       expect {
-        adapter.fetch_shop_videos(date_from: Date.new(2026, 1, 1), date_to: Date.new(2026, 3, 2))
-      }.to raise_error(ArgumentError, /60 dias/)
+        adapter.fetch_shop_videos(date_from: Date.new(2026, 1, 1), date_to: Date.new(2026, 1, 31))
+      }.to raise_error(ArgumentError, /30 dias/)
     end
 
     it "raises AuthenticationError with a scope hint when the analytics scope isn't granted" do
@@ -118,14 +120,14 @@ RSpec.describe Integrations::TiktokAdapter, "shop videos" do
 
       videos = adapter.fetch_shop_video_details(
         video_ids: [ "7300000000000000001", 7300000000000000002 ],
-        date_from: Date.new(2026, 9, 26),
+        date_from: Date.new(2026, 10, 26),
         date_to: Date.new(2026, 11, 24)
       )
 
       query = Rack::Utils.parse_query(captured_request.uri.query)
       expect(query).to include(
         "video_ids" => "[7300000000000000001,7300000000000000002]",
-        "start_date_ge" => "2026-09-26",
+        "start_date_ge" => "2026-10-26",
         "end_date_lt" => "2026-11-25",
         "granularity" => "ALL",
         "shop_cipher" => "GCP_cipher"
