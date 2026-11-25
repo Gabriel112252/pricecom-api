@@ -53,7 +53,18 @@ RSpec.describe Integrations::Tiktok::AffiliateVideoDownloadService do
     expect(video.file.filename.to_s).to eq("criadora_a-7300000000000000001.mp4")
     expect(video.thumbnail_url).to eq("https://cdn.example.com/t/abc.jpg")
     expect(adapter).to have_received(:fetch_shop_video_details)
-      .with(video_ids: [ "7300000000000000001" ], date_from: Date.current - 59, date_to: Date.current)
+      .with(video_ids: [ "7300000000000000001" ], date_from: Date.current - 29, date_to: Date.current)
+  end
+
+  it "asks for the details in the window the sync last saw the video in" do
+    video.update!(metrics: { "window" => { "from" => (Date.current - 59).iso8601, "to" => (Date.current - 30).iso8601 } })
+    allow(adapter).to receive(:fetch_shop_video_details).and_return([ details_entry ])
+    stub_request(:get, play_url).to_return(status: 200, body: video_bytes, headers: { "Content-Type" => "video/mp4" })
+
+    described_class.call(video)
+
+    expect(adapter).to have_received(:fetch_shop_video_details)
+      .with(video_ids: [ "7300000000000000001" ], date_from: Date.current - 59, date_to: Date.current - 30)
   end
 
   it "follows a redirect from the play_url" do

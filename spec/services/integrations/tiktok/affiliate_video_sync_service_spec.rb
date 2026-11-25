@@ -56,12 +56,12 @@ RSpec.describe Integrations::Tiktok::AffiliateVideoSyncService do
   end
 
   it "keeps only videos from target-collaboration creators, across pages, and queues their downloads" do
-    stub_window(today - 59, today, [
+    stub_window(today - 29, today, [
       [ video_payload("111", open_id: "uTARGET", user_name: "criadora_a"), video_payload("222", open_id: "uOTHER", user_name: "outra") ],
       [ video_payload("333", open_id: "uTARGET", user_name: "criadora_a") ]
     ])
 
-    result = described_class.call(credential, days_back: 60, today: today, auto_download: true)
+    result = described_class.call(credential, days_back: 30, today: today, auto_download: true)
 
     expect(result.success?).to eq(true)
     expect(AffiliateVideo.pluck(:video_id)).to contain_exactly("111", "333")
@@ -83,30 +83,30 @@ RSpec.describe Integrations::Tiktok::AffiliateVideoSyncService do
   end
 
   it "matches a creator by username when the open_id differs" do
-    stub_window(today - 59, today, [ [ video_payload("444", open_id: "uDIFFERENT", user_name: "criadora_a") ] ])
+    stub_window(today - 29, today, [ [ video_payload("444", open_id: "uDIFFERENT", user_name: "criadora_a") ] ])
 
-    described_class.call(credential, days_back: 60, today: today, auto_download: false)
+    described_class.call(credential, days_back: 30, today: today, auto_download: false)
 
     expect(AffiliateVideo.find_by(video_id: "444").affiliate_creator).to eq(target_creator)
   end
 
-  it "walks days_back in 60-day windows, newest first, keeping the newest window's metrics" do
-    stub_window(today - 59, today, [ [ video_payload("555", open_id: "uTARGET", user_name: "criadora_a", overrides: { "views" => 10 }) ] ])
-    stub_window(today - 89, today - 60, [ [ video_payload("555", open_id: "uTARGET", user_name: "criadora_a", overrides: { "views" => 999 }) ] ])
+  it "walks days_back in 30-day windows, newest first, keeping the newest window's metrics" do
+    stub_window(today - 29, today, [ [ video_payload("555", open_id: "uTARGET", user_name: "criadora_a", overrides: { "views" => 10 }) ] ])
+    stub_window(today - 59, today - 30, [ [ video_payload("555", open_id: "uTARGET", user_name: "criadora_a", overrides: { "views" => 999 }) ] ])
 
-    described_class.call(credential, days_back: 90, today: today, auto_download: false)
+    described_class.call(credential, days_back: 60, today: today, auto_download: false)
 
     video = AffiliateVideo.find_by(video_id: "555")
     expect(video.metrics["views"]).to eq(10)
-    expect(video.metrics["window"]).to eq("from" => (today - 59).iso8601, "to" => today.iso8601)
+    expect(video.metrics["window"]).to eq("from" => (today - 29).iso8601, "to" => today.iso8601)
     expect(adapter).to have_received(:fetch_shop_videos).twice
   end
 
   it "updates an existing video instead of duplicating it and doesn't re-queue a downloaded one" do
     existing = channel.affiliate_videos.create!(tenant: tenant, video_id: "111", download_status: "downloaded")
-    stub_window(today - 59, today, [ [ video_payload("111", open_id: "uTARGET", user_name: "criadora_a", overrides: { "views" => 7 }) ] ])
+    stub_window(today - 29, today, [ [ video_payload("111", open_id: "uTARGET", user_name: "criadora_a", overrides: { "views" => 7 }) ] ])
 
-    described_class.call(credential, days_back: 60, today: today, auto_download: true)
+    described_class.call(credential, days_back: 30, today: today, auto_download: true)
 
     expect(AffiliateVideo.count).to eq(1)
     expect(existing.reload.metrics["views"]).to eq(7)
@@ -118,7 +118,7 @@ RSpec.describe Integrations::Tiktok::AffiliateVideoSyncService do
     target_creator.update!(target_collaboration_id: nil)
     allow(adapter).to receive(:fetch_shop_videos)
 
-    result = described_class.call(credential, days_back: 60, today: today)
+    result = described_class.call(credential, days_back: 30, today: today)
 
     expect(result.skipped?).to eq(true)
     expect(adapter).not_to have_received(:fetch_shop_videos)
@@ -128,17 +128,30 @@ RSpec.describe Integrations::Tiktok::AffiliateVideoSyncService do
   it "records a missing analytics scope as an error without disabling the credential" do
     allow(adapter).to receive(:fetch_shop_videos).and_raise(Integrations::AuthenticationError, "sem permissão/escopo")
 
-    result = described_class.call(credential, days_back: 60, today: today)
+    result = described_class.call(credential, days_back: 30, today: today)
 
     expect(result.error?).to eq(true)
     expect(credential.reload.status).to eq("active")
     expect(IntegrationSyncLog.find_by(action: described_class::ACTION).status).to eq("error")
   end
 
+  it "records a TikTok business error and stops instead of raising (no Sidekiq retry)" do
+    allow(adapter).to receive(:fetch_shop_videos)
+      .and_raise(Integrations::ApiError, "TiktokAdapter: date range cannot exceed 30 days (code 28001022)")
+
+    result = nil
+    expect { result = described_class.call(credential, days_back: 30, today: today) }.not_to raise_error
+
+    expect(result.error?).to eq(true)
+    log = IntegrationSyncLog.find_by(action: described_class::ACTION)
+    expect(log.status).to eq("error")
+    expect(log.error_message).to include("28001022")
+  end
+
   it "re-raises a rate limit after closing the log" do
     allow(adapter).to receive(:fetch_shop_videos).and_raise(Integrations::RateLimitError.new("slow down", retry_after: 30))
 
-    expect { described_class.call(credential, days_back: 60, today: today) }.to raise_error(Integrations::RateLimitError)
+    expect { described_class.call(credential, days_back: 30, today: today) }.to raise_error(Integrations::RateLimitError)
     expect(IntegrationSyncLog.find_by(action: described_class::ACTION).status).to eq("error")
   end
 end

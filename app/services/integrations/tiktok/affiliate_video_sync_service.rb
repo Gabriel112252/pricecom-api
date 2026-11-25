@@ -9,8 +9,9 @@ module Integrations
     # AffiliateSyncService last synced — run that first (AffiliateVideoSyncJob
     # does) or the filter has nothing to match against.
     #
-    # The API caps each call at 60 days, so days_back is walked in 60-day
-    # windows, newest first. A video showing up in more than one window keeps
+    # The API caps each call at WINDOW_DAYS (30 in production, whatever the
+    # reference says), so days_back is walked in windows of that size, newest
+    # first. A video showing up in more than one window keeps
     # the metrics of the newest window it appeared in (first one seen in the
     # run).
     #
@@ -27,7 +28,7 @@ module Integrations
       MAX_DAYS_BACK = 365
       WINDOW_DAYS = Integrations::TiktokAdapter::SHOP_VIDEOS_MAX_RANGE_DAYS
       # Safety net against a next_page_token that never ends — 50 pages of
-      # 100 is 5k videos in one 60-day window, far more than any real shop.
+      # 100 is 5k videos in one window, far more than any real shop.
       MAX_PAGES_PER_WINDOW = 50
       MAX_DOWNLOADS_ENQUEUED_PER_RUN = Integer(ENV.fetch("TIKTOK_AFFILIATE_VIDEO_DOWNLOADS_PER_RUN", "50"))
       METRIC_KEYS = %w[
@@ -77,6 +78,12 @@ module Integrations
         # Unlike the order/affiliate syncs, a missing analytics scope must not
         # flip the whole credential to "error" — orders keep syncing fine
         # without this optional feature. The log carries the scope hint.
+        finish_log("error", e.message)
+        result(:error, e.message)
+      rescue Integrations::ApiError => e
+        # A business error from TikTok (bad params, unsupported filter) fails
+        # the same way on every retry — record it and stop, instead of letting
+        # Sidekiq re-run the whole job (creator refresh included) ~25 times.
         finish_log("error", e.message)
         result(:error, e.message)
       rescue Integrations::RateLimitError => e

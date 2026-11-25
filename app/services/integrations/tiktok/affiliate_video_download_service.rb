@@ -98,12 +98,8 @@ module Integrations
 
       def fetch_details_entry(credential)
         adapter = Integrations::TiktokAdapter.new(credential.credentials)
-        today = Date.current
-        entries = adapter.fetch_shop_video_details(
-          video_ids: [ video.video_id ],
-          date_from: today - (DETAILS_LOOKBACK_DAYS - 1),
-          date_to: today
-        )
+        date_from, date_to = details_window
+        entries = adapter.fetch_shop_video_details(video_ids: [ video.video_id ], date_from: date_from, date_to: date_to)
         entry = entries.find { |e| e["video_id"].to_s == video.video_id || e.dig("video", "id").to_s == video.video_id }
 
         if entry.nil?
@@ -113,6 +109,27 @@ module Integrations
           entry = nil
         end
         entry
+      end
+
+      # The window the sync last saw this video in (metrics["window"]). One
+      # details call covers at most DETAILS_LOOKBACK_DAYS, so a video only seen
+      # in an older window (31-60 days back) is asked for in that window rather
+      # than in the last 30 days, where it may have no data. Falls back to the
+      # last DETAILS_LOOKBACK_DAYS days.
+      def details_window
+        today = Date.current
+        window = video.metrics.is_a?(Hash) && video.metrics["window"].is_a?(Hash) ? video.metrics["window"] : {}
+        from = parse_date(window["from"])
+        to = parse_date(window["to"])
+        return [ today - (DETAILS_LOOKBACK_DAYS - 1), today ] unless from && to && from <= to && to <= today
+
+        [ [ from, to - (DETAILS_LOOKBACK_DAYS - 1) ].max, to ]
+      end
+
+      def parse_date(value)
+        Date.iso8601(value.to_s)
+      rescue ArgumentError
+        nil
       end
 
       def remember_metadata(meta)

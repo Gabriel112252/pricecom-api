@@ -63,11 +63,13 @@ module Integrations
     # (get-shop-video-performance-list-202605 and
     # get-shop-videos-performance-details-202609), NOT yet confirmed against
     # a real Hidrabene call — see #fetch_shop_videos/#fetch_shop_video_details.
-    # Both are GETs with every filter in the query string; both reject a date
-    # range wider than 60 days.
+    # Both are GETs with every filter in the query string. The reference says
+    # a range may span 60 days, but production (Hidrabene, 2026-11-25) rejects
+    # anything over 30 with code 28001022 "date range cannot exceed 30 days" —
+    # 30 it is, for both.
     SHOP_VIDEOS_PERFORMANCE_PATH = "/analytics/202605/shop_videos/performance".freeze
     SHOP_VIDEOS_BATCH_PERFORMANCE_PATH = "/analytics/202609/shop_videos/batch_performance".freeze
-    SHOP_VIDEOS_MAX_RANGE_DAYS = 60
+    SHOP_VIDEOS_MAX_RANGE_DAYS = 30
     SHOP_VIDEOS_PAGE_SIZE = 100
     # Affiliate Seller API — paths and schemas CONFIRMED via the Partner
     # Center API Testing Tool against the real Hidrabene credential
@@ -764,7 +766,7 @@ module Integrations
     end
 
     # Both shop-videos endpoints take the same pair of dates and reject a
-    # range over 60 days — checked here so a caller bug fails fast with a
+    # range over SHOP_VIDEOS_MAX_RANGE_DAYS — checked here so a caller bug fails fast with a
     # clear message instead of a TikTok error code.
     def shop_videos_date_range(date_from, date_to)
       from = date_from.to_date
