@@ -1,0 +1,9 @@
+# Queues this app enqueues to. Without this file, plain `bundle exec sidekiq`
+# (Dockerfile.sidekiq's CMD) listens only to "default" — but almost every job
+# (Integrations::*, Testimonials::*) uses `queue_as :integrations`, so they pile
+# up unprocessed. Weighted so "default" (mailers, Active Storage analysis) is
+# never starved by a big integrations backlog.
+:concurrency: <%= ENV.fetch("SIDEKIQ_CONCURRENCY", 5) %>
+:queues:
+  - [integrations, 2]
+  - [default, 1]
