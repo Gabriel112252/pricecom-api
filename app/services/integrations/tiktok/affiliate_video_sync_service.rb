@@ -15,8 +15,8 @@ module Integrations
     # the metrics of the newest window it appeared in (first one seen in the
     # run).
     #
-    # New videos are queued for download (AffiliateVideoDownloadJob) unless
-    # TIKTOK_AFFILIATE_VIDEO_AUTO_DOWNLOAD=false, at most
+    # New videos are queued for download (AffiliateVideoDownloadJob), highest
+    # GMV first, unless TIKTOK_AFFILIATE_VIDEO_AUTO_DOWNLOAD=false, at most
     # MAX_DOWNLOADS_ENQUEUED_PER_RUN per run so a first sync over a big
     # backlog doesn't fill the disk in one go; the rest stay pending and go
     # out on the next runs (or on demand, via the baixar_video_afiliada MCP
@@ -27,9 +27,12 @@ module Integrations
       DEFAULT_DAYS_BACK = 60
       MAX_DAYS_BACK = 365
       WINDOW_DAYS = Integrations::TiktokAdapter::SHOP_VIDEOS_MAX_RANGE_DAYS
-      # Safety net against a next_page_token that never ends — 50 pages of
-      # 100 is 5k videos in one window, far more than any real shop.
-      MAX_PAGES_PER_WINDOW = 50
+      # The list comes sorted by GMV, highest first, and it is big: Hidrabene
+      # had ~137k affiliate videos with activity in 30 days (2026-11-25), and
+      # GMV is down to ~R$2k by the 2nd page. So this keeps the top
+      # MAX_PAGES_PER_WINDOW x 100 videos by GMV per window instead of walking
+      # ~1,400 pages; a window cut short is counted in windows_capped.
+      MAX_PAGES_PER_WINDOW = Integer(ENV.fetch("TIKTOK_AFFILIATE_VIDEO_MAX_PAGES_PER_WINDOW", "50"))
       MAX_DOWNLOADS_ENQUEUED_PER_RUN = Integer(ENV.fetch("TIKTOK_AFFILIATE_VIDEO_DOWNLOADS_PER_RUN", "50"))
       METRIC_KEYS = %w[
         views likes comments shares new_followers items_sold sku_orders avg_customers
@@ -127,6 +130,7 @@ module Integrations
           page_token = data["next_page_token"].presence
           break if page_token.nil?
         end
+        counts["windows_capped"] += 1 if page_token
       end
 
       def process_video(raw, window_from, window_to)
@@ -181,7 +185,7 @@ module Integrations
 
       def enqueue_downloads
         channel.affiliate_videos.where(tenant: tenant).awaiting_download
-          .order(posted_at: :desc).limit(MAX_DOWNLOADS_ENQUEUED_PER_RUN).each do |video|
+          .top_gmv_first.limit(MAX_DOWNLOADS_ENQUEUED_PER_RUN).each do |video|
           video.update!(download_status: "queued", download_error: nil)
           AffiliateVideoDownloadJob.perform_later(video.id)
           counts["downloads_enqueued"] += 1

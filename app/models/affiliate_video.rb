@@ -3,6 +3,14 @@ class AffiliateVideo < ApplicationRecord
   # A queued/downloading row older than this is treated as abandoned (worker
   # restarted mid-download, job lost) and becomes eligible to be queued again.
   STALE_DOWNLOAD_AFTER = 1.hour
+  # Orderings over the list endpoint's metrics as stored: "gmv" is
+  # {"amount" => "103143.37", "currency" => "BRL"}, "views" a number. A
+  # missing or non-numeric value sorts last.
+  GMV_SQL = "CASE WHEN affiliate_videos.metrics -> 'gmv' ->> 'amount' ~ '^[0-9]+(\\.[0-9]+)?$' " \
+    "THEN (affiliate_videos.metrics -> 'gmv' ->> 'amount')::numeric END".freeze
+  VIEWS_SQL = "CASE WHEN affiliate_videos.metrics ->> 'views' ~ '^[0-9]+$' " \
+    "THEN (affiliate_videos.metrics ->> 'views')::numeric END".freeze
+  NEWEST_FIRST_SQL = "affiliate_videos.posted_at DESC NULLS LAST, affiliate_videos.id DESC".freeze
 
   belongs_to :tenant
   belongs_to :channel
@@ -19,6 +27,9 @@ class AffiliateVideo < ApplicationRecord
     where(download_status: "pending")
       .or(where(download_status: %w[queued downloading]).where(updated_at: ...STALE_DOWNLOAD_AFTER.ago))
   }
+  scope :newest_first, -> { order(Arel.sql(NEWEST_FIRST_SQL)) }
+  scope :top_gmv_first, -> { order(Arel.sql("#{GMV_SQL} DESC NULLS LAST, #{NEWEST_FIRST_SQL}")) }
+  scope :most_viewed_first, -> { order(Arel.sql("#{VIEWS_SQL} DESC NULLS LAST, #{NEWEST_FIRST_SQL}")) }
 
   def tiktok_url
     return nil if username.blank? || video_id.blank?

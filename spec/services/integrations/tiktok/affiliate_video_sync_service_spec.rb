@@ -102,6 +102,35 @@ RSpec.describe Integrations::Tiktok::AffiliateVideoSyncService do
     expect(adapter).to have_received(:fetch_shop_videos).twice
   end
 
+  it "stops a window at MAX_PAGES_PER_WINDOW pages and counts it as capped" do
+    stub_const("#{described_class}::MAX_PAGES_PER_WINDOW", 1)
+    stub_window(today - 29, today, [
+      [ video_payload("111", open_id: "uTARGET", user_name: "criadora_a") ],
+      [ video_payload("222", open_id: "uTARGET", user_name: "criadora_a") ]
+    ])
+
+    result = described_class.call(credential, days_back: 30, today: today, auto_download: false)
+
+    expect(AffiliateVideo.pluck(:video_id)).to eq(%w[111])
+    expect(result.metadata["windows_capped"]).to eq(1)
+    expect(adapter).to have_received(:fetch_shop_videos).once
+  end
+
+  it "queues the downloads highest GMV first when the per-run limit cuts the list" do
+    stub_const("#{described_class}::MAX_DOWNLOADS_ENQUEUED_PER_RUN", 1)
+    stub_window(today - 29, today, [ [
+      video_payload("111", open_id: "uTARGET", user_name: "criadora_a",
+        overrides: { "gmv" => { "amount" => "50.00", "currency" => "BRL" }, "video_post_time" => "2026-11-24 10:00:00" }),
+      video_payload("222", open_id: "uTARGET", user_name: "criadora_a",
+        overrides: { "gmv" => { "amount" => "9000.50", "currency" => "BRL" }, "video_post_time" => "2026-10-01 10:00:00" })
+    ] ])
+
+    described_class.call(credential, days_back: 30, today: today, auto_download: true)
+
+    expect(AffiliateVideo.find_by(video_id: "222").download_status).to eq("queued")
+    expect(AffiliateVideo.find_by(video_id: "111").download_status).to eq("pending")
+  end
+
   it "updates an existing video instead of duplicating it and doesn't re-queue a downloaded one" do
     existing = channel.affiliate_videos.create!(tenant: tenant, video_id: "111", download_status: "downloaded")
     stub_window(today - 29, today, [ [ video_payload("111", open_id: "uTARGET", user_name: "criadora_a", overrides: { "views" => 7 }) ] ])
