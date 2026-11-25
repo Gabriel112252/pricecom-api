@@ -100,6 +100,18 @@ tiktok_pending_financial_sync_dispatch:
 #   class: "Integrations::Tiktok::AffiliateSyncSchedulerJob"
 #   queue: integrations
 
+# Vídeos das afiliadas com colaboração direcionada (Get Shop Video
+# Performance List 202605 + download via play_url/yt-dlp — ver
+# AffiliateVideoSyncService). DESLIGADO DE PROPÓSITO (2026-11-25), mesma
+# regra do sync de criadoras acima: o shape veio da documentação, não de uma
+# chamada real. Rodar 1x pela tool MCP sincronizar_videos_afiliadas (ou
+# Integrations::Tiktok::AffiliateVideoSyncJob.perform_later(credential_id))
+# e conferir o IntegrationSyncLog antes de ligar. 1x/dia basta.
+# tiktok_affiliate_video_sync_dispatch:
+#   cron: "0 7 * * *"
+#   class: "Integrations::Tiktok::AffiliateVideoSyncSchedulerJob"
+#   queue: integrations
+
 # idworks (ERP) has no webhooks — polling is the only option (see
 # Integrations::Idworks::OrderSyncService/ProductCostSyncService class
 # comments). Product cost changes infrequently, so a 6h full sync is

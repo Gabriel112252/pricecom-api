@@ -14,6 +14,7 @@ class Channel < ApplicationRecord
   has_many :affiliate_creators, dependent: :destroy
   has_many :affiliate_campaigns, dependent: :destroy
   has_many :affiliate_daily_snapshots, dependent: :destroy
+  has_many :affiliate_videos, dependent: :destroy
 
   PLATFORMS = %w[tiktok shopify yampi mercadolivre shopee].freeze
 

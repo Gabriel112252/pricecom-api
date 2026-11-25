@@ -5,9 +5,12 @@ on:
   push:
     branches: [ main ]
 
+# ubuntu-latest moved to 26.04, which has no prebuilt Ruby 3.2.2 for
+# ruby/setup-ruby ("Unavailable version 3.2.2 for ruby on ubuntu-26.04") —
+# every job failed at "Set up Ruby" since then. Pinned to 24.04.
 jobs:
   scan_ruby:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout code
@@ -23,7 +26,7 @@ jobs:
         run: bin/brakeman --no-pager
 
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -34,6 +37,61 @@ jobs:
           ruby-version: .ruby-version
           bundler-cache: true
 
+      # -f github only shows 10 annotations per step, without file paths in
+      # the log; -f progress adds the full "path:line:col" list to the log.
       - name: Lint code for consistent style
-        run: bin/rubocop -f github
+        run: bin/rubocop -f github -f progress
+
+  # rspec against real Postgres/Redis. config/database.yml's test env points
+  # at postgres/postgres on localhost:5433, hence the port mapping. The
+  # schema comes from db:prepare (load db/schema.rb + run any newer
+  # migration), the same path bin/docker-entrypoint takes in production.
+  test:
+    runs-on: ubuntu-24.04
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      RAILS_ENV: test
+      REDIS_URL: redis://localhost:6379/0
+
+    steps:
+      - name: Install system packages
+        run: sudo apt-get update -qq && sudo apt-get install --no-install-recommends -y libpq-dev libvips ffmpeg
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: .ruby-version
+          bundler-cache: true
+
+      - name: Prepare database
+        run: bin/rails db:prepare
+
+      - name: Run tests
+        run: bundle exec rspec
 
