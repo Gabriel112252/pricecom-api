@@ -202,6 +202,12 @@ Rails.application.routes.draw do
       post "affiliates/creators/:id/messages", to: "affiliates#send_message"
       resources :affiliate_campaigns, only: [ :index, :create, :show ]
 
+      # Vídeos das afiliadas com colaboração direcionada (aba Vídeos da
+      # página Afiliados): assistir pelo TikTok, baixar pelo Pricecom.
+      get  "affiliate_videos",              to: "affiliate_videos#index"
+      get  "affiliate_videos/:id",          to: "affiliate_videos#show"
+      post "affiliate_videos/:id/download", to: "affiliate_videos#download"
+
       # TV Mode token (admin only) — regenerating invalidates the previous link
       get    "tv_token", to: "tv_tokens#show"
       post   "tv_token", to: "tv_tokens#create"
