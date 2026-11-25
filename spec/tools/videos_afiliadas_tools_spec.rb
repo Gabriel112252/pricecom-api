@@ -66,7 +66,10 @@ RSpec.describe "Ferramentas MCP de vídeos de afiliadas" do
       expect(result[:status]).to eq("baixado")
       expect(result[:link_download]).to include("/rails/active_storage/blobs/redirect/")
       expect(result[:link_download]).to end_with("/criadora_a-7300000000000000001.mp4")
-      expect(ActiveJob::Base.queue_adapter.enqueued_jobs).to be_empty
+      # Attaching the file enqueues Active Storage's own AnalyzeJob; what
+      # matters is that no second download was queued.
+      enqueued = ActiveJob::Base.queue_adapter.enqueued_jobs.map { |job| job[:job] }
+      expect(enqueued).not_to include(Integrations::Tiktok::AffiliateVideoDownloadJob)
     end
 
     it "queues the download when the file isn't there yet, keeping the previous error for context" do
