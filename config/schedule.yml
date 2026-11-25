@@ -102,15 +102,16 @@ tiktok_pending_financial_sync_dispatch:
 
 # Vídeos das afiliadas com colaboração direcionada (Get Shop Video
 # Performance List 202605 + download via play_url/yt-dlp — ver
-# AffiliateVideoSyncService). DESLIGADO DE PROPÓSITO (2026-11-25), mesma
-# regra do sync de criadoras acima: o shape veio da documentação, não de uma
-# chamada real. Rodar 1x pela tool MCP sincronizar_videos_afiliadas (ou
-# Integrations::Tiktok::AffiliateVideoSyncJob.perform_later(credential_id))
-# e conferir o IntegrationSyncLog antes de ligar. 1x/dia basta.
-# tiktok_affiliate_video_sync_dispatch:
-#   cron: "0 7 * * *"
-#   class: "Integrations::Tiktok::AffiliateVideoSyncSchedulerJob"
-#   queue: integrations
+# AffiliateVideoSyncService). Ligado em 2026-11-25, depois da 1ª execução
+# real na Hidrabene (100 páginas, 3.682 vídeos salvos, 50 downloads ok).
+# 1x/dia às 7h de São Paulo: o job atualiza as criadoras (se a última
+# atualização tem mais de 6h) e depois os vídeos dos últimos 60 dias, em
+# janelas de 30 dias (os 5 mil de maior GMV em cada), e enfileira até 50
+# downloads por execução, maior GMV primeiro (~0,5 GB/dia em disco).
+tiktok_affiliate_video_sync_dispatch:
+  cron: "0 7 * * * America/Sao_Paulo"
+  class: "Integrations::Tiktok::AffiliateVideoSyncSchedulerJob"
+  queue: integrations
 
 # idworks (ERP) has no webhooks — polling is the only option (see
 # Integrations::Idworks::OrderSyncService/ProductCostSyncService class

@@ -1,9 +1,9 @@
 module Integrations
   module Tiktok
     # Dispatcher for config/schedule.yml's tiktok_affiliate_video_sync_dispatch
-    # (commented out until the first manual run is checked against Hidrabene —
-    # same rule as the affiliate creator sync). One AffiliateVideoSyncJob per
-    # active TikTok credential.
+    # (daily at 7:00 São Paulo since 2026-11-25, after the first real run on
+    # Hidrabene came out clean). One AffiliateVideoSyncJob per active TikTok
+    # credential.
     class AffiliateVideoSyncSchedulerJob < ApplicationJob
       queue_as :integrations
 
