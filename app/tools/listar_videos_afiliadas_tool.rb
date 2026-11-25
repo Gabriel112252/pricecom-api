@@ -1,14 +1,17 @@
 # frozen_string_literal: true
 
 class ListarVideosAfiliadasTool < ApplicationTool
+  include AffiliateVideoFilters
+
   description "Lista os vídeos que criadoras afiliadas com colaboração direcionada postaram para a loja no TikTok Shop, " \
-    "com métricas, produtos e status do download do arquivo. Se a lista vier vazia ou desatualizada, " \
-    "rode sincronizar_videos_afiliadas antes. Para pegar o arquivo de um vídeo, use baixar_video_afiliada com o id. " \
-    "Use ordem gmv para ver primeiro os que mais venderam (as métricas são do período em metricas_do_periodo)."
+    "com métricas, produtos e status do download do arquivo. Cada vídeo já baixado vem com link_download (vale 24 " \
+    "horas). Para gerar o link dos que ainda não foram baixados, use BaixarVideosAfiliadasEmLoteTool com o mesmo " \
+    "filtro. Se a lista vier vazia ou desatualizada, rode sincronizar_videos_afiliadas antes. Use ordem gmv para ver " \
+    "primeiro os que mais venderam (as métricas são do período em metricas_do_periodo) e pagina para percorrer a " \
+    "lista inteira."
 
   RESULT_LIMIT = 50
   DEFAULT_LIMIT = 25
-  ORDERS = { "recentes" => :newest_first, "gmv" => :top_gmv_first, "views" => :most_viewed_first }.freeze
 
   arguments do
     optional(:criadora).filled(:string).description("@ ou nome da criadora (busca parcial, sem diferenciar maiúsculas)")
@@ -17,38 +20,35 @@ class ListarVideosAfiliadasTool < ApplicationTool
     optional(:to).filled(:string).description("Postados até (YYYY-MM-DD)")
     optional(:somente_baixados).filled(:bool).description("true = só vídeos com o arquivo já baixado")
     optional(:ordem).filled(:string).description("recentes (padrão, postados mais novos primeiro), gmv (mais vendas primeiro) ou views (mais vistos primeiro)")
-    optional(:limite).filled(:integer).description("Máximo de vídeos (padrão 25, máx 50)")
+    optional(:limite).filled(:integer).description("Máximo de vídeos por página (padrão 25, máx 50)")
+    optional(:pagina).filled(:integer).description("Página da lista (1, 2, 3...), para percorrer todos os vídeos do filtro")
   end
 
-  def call(criadora: nil, produto: nil, from: nil, to: nil, somente_baixados: false, ordem: nil, limite: nil)
+  def call(criadora: nil, produto: nil, from: nil, to: nil, somente_baixados: false, ordem: nil, limite: nil, pagina: nil)
     tenant = current_tenant
     return "Usuário sem tenant associado." unless tenant
 
-    order_key = ordem.to_s.strip.downcase.presence || "recentes"
-    return "Ordem inválida. Use recentes, gmv ou views." unless ORDERS.key?(order_key)
+    order_scope = affiliate_video_order(ordem)
+    return INVALID_ORDER unless order_scope
 
-    scope = tenant.affiliate_videos
-    if criadora.present?
-      term = "%#{ActiveRecord::Base.sanitize_sql_like(criadora.to_s.delete_prefix("@").downcase)}%"
-      scope = scope.where("LOWER(affiliate_videos.username) LIKE :term OR LOWER(affiliate_videos.nickname) LIKE :term", term: term)
-    end
-    if produto.present?
-      scope = scope.where("affiliate_videos.products::text ILIKE ?", "%#{ActiveRecord::Base.sanitize_sql_like(produto.to_s)}%")
-    end
-    scope = scope.where("affiliate_videos.posted_at >= ?", Date.parse(from).beginning_of_day) if from.present?
-    scope = scope.where("affiliate_videos.posted_at <= ?", Date.parse(to).end_of_day) if to.present?
+    scope = filter_affiliate_videos(tenant.affiliate_videos, criadora: criadora, produto: produto, from: from, to: to)
     scope = scope.downloaded if somente_baixados
 
     limit = limite.to_i.positive? ? [ limite.to_i, RESULT_LIMIT ].min : DEFAULT_LIMIT
-    videos = scope.includes(file_attachment: :blob).public_send(ORDERS.fetch(order_key)).limit(limit)
+    page = [ pagina.to_i, 1 ].max
+    total = scope.count
+    videos = scope.includes(file_attachment: :blob).public_send(order_scope).offset((page - 1) * limit).limit(limit)
 
     {
-      total_no_filtro: scope.count,
+      total_no_filtro: total,
+      pagina: page,
+      paginas: (total.to_f / limit).ceil,
       ultima_sincronizacao: last_sync_summary(tenant),
+      links_expiram_em: AffiliateVideo::DOWNLOAD_LINK_TTL.from_now.iso8601,
       videos: videos.map { |video| video_summary(video) }
     }
   rescue Date::Error, ArgumentError
-    "Data inválida. Use o formato YYYY-MM-DD."
+    INVALID_DATE
   end
 
   private
@@ -70,6 +70,7 @@ class ListarVideosAfiliadasTool < ApplicationTool
       metricas_do_periodo: metrics["window"],
       link_tiktok: video.tiktok_url,
       download: video.downloaded? ? "baixado" : video.download_status,
+      link_download: video.download_link,
       erro_download: video.download_status == "failed" ? video.download_error : nil
     }.compact
   end
