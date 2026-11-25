@@ -35,6 +35,7 @@ class Tenant < ApplicationRecord
   has_many :affiliate_creators, dependent: :destroy
   has_many :affiliate_campaigns, dependent: :destroy
   has_many :affiliate_daily_snapshots, dependent: :destroy
+  has_many :affiliate_videos, dependent: :destroy
   has_many :user_activity_logs, dependent: :destroy
 
   validates :name, presence: true

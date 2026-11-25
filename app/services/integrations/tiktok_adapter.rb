@@ -57,6 +57,18 @@ module Integrations
     ORDER_STATEMENT_TRANSACTIONS_PATH = "/finance/202501/orders".freeze
     RETURN_SEARCH_PATH = "/return_refund/202309/returns/search".freeze
     SHOP_PERFORMANCE_PATH = "/analytics/202405/shop/performance".freeze
+    # Shop videos (Analytics module, scope data.shop_analytics.public.read —
+    # "TikTok Shop Analytics", the same package Get Shop Performance uses).
+    # Shapes taken from the Partner Center API reference on 2026-11-25
+    # (get-shop-video-performance-list-202605 and
+    # get-shop-videos-performance-details-202609), NOT yet confirmed against
+    # a real Hidrabene call — see #fetch_shop_videos/#fetch_shop_video_details.
+    # Both are GETs with every filter in the query string; both reject a date
+    # range wider than 60 days.
+    SHOP_VIDEOS_PERFORMANCE_PATH = "/analytics/202605/shop_videos/performance".freeze
+    SHOP_VIDEOS_BATCH_PERFORMANCE_PATH = "/analytics/202609/shop_videos/batch_performance".freeze
+    SHOP_VIDEOS_MAX_RANGE_DAYS = 60
+    SHOP_VIDEOS_PAGE_SIZE = 100
     # Affiliate Seller API — paths and schemas CONFIRMED via the Partner
     # Center API Testing Tool against the real Hidrabene credential
     # (2026-08-04), not inferred. Version 202508 was the newest observed
@@ -110,6 +122,8 @@ module Integrations
       FINANCIAL_STATEMENTS_PATH,
       RETURN_SEARCH_PATH,
       SHOP_PERFORMANCE_PATH,
+      SHOP_VIDEOS_PERFORMANCE_PATH,
+      SHOP_VIDEOS_BATCH_PERFORMANCE_PATH,
       AFFILIATE_TARGET_COLLABORATIONS_SEARCH_PATH,
       AFFILIATE_CONVERSATIONS_PATH,
       AFFILIATE_UNREAD_MESSAGES_PATH
@@ -423,6 +437,52 @@ module Integrations
       body["data"] || {}
     end
 
+    # Get Shop Video Performance List 202605 — one page of the videos that
+    # promoted this shop's products in [date_from, date_to] (both
+    # INCLUSIVE here; end_date_lt is sent as the next day, same convention
+    # as #fetch_shop_analytics). account_type narrows by who posted:
+    # ALL, OFFICIAL_ACCOUNTS, MARKETING_ACCOUNTS or AFFILIATE_ACCOUNTS.
+    # Returns the `data` envelope: videos[] (id, title, username, duration,
+    # video_post_time "YYYY-MM-DD HH:MM:SS", creator{open_id, user_name,
+    # nick_name, author_type}, products[]{id, name} and the metrics),
+    # next_page_token (blank = last page), total_count, latest_available_date.
+    def fetch_shop_videos(date_from:, date_to:, account_type: "AFFILIATE_ACCOUNTS", page_token: nil, page_size: SHOP_VIDEOS_PAGE_SIZE)
+      query_params = shop_videos_date_range(date_from, date_to).merge(
+        account_type: account_type,
+        page_size: page_size,
+        page_token: page_token.presence,
+        currency: "LOCAL"
+      ).compact
+
+      body = get(SHOP_VIDEOS_PERFORMANCE_PATH, query_params: query_params)
+      body["data"] || {}
+    end
+
+    # Get Shop Videos Performance Details 202609 — the only shop-videos
+    # endpoint that returns the video file itself: each videos[] entry has
+    # video_id, video{id, play_url, thumbnail_url, duration, title, username,
+    # video_post_time (unix seconds as a string)} and, for an id TikTok
+    # rejects, error{code, message} instead. video_ids is a []int sent the
+    # way the reference example does it: `video_ids=[id1,id2]` in the query.
+    # The date range only scopes the metrics (performance), not the video
+    # metadata. Returns the videos[] array.
+    def fetch_shop_video_details(video_ids:, date_from:, date_to:)
+      ids = Array(video_ids).map { |id| id.to_s.strip }.reject(&:blank?)
+      raise ArgumentError, "TiktokAdapter#fetch_shop_video_details: informe ao menos um video_id" if ids.empty?
+      unless ids.all? { |id| id.match?(/\A\d+\z/) }
+        raise ArgumentError, "TiktokAdapter#fetch_shop_video_details: video_ids precisam ser numéricos"
+      end
+
+      query_params = shop_videos_date_range(date_from, date_to).merge(
+        video_ids: "[#{ids.join(',')}]",
+        granularity: "ALL",
+        currency: "LOCAL"
+      )
+
+      body = get(SHOP_VIDEOS_BATCH_PERFORMANCE_PATH, query_params: query_params)
+      Array(body.dig("data", "videos"))
+    end
+
     # Finance API 202501. Returns the complete statement-transactions
     # envelope; the financial sync service validates `code` and persists the
     # complete `data` payload for auditability.
@@ -701,6 +761,20 @@ module Integrations
         raise ApiError,
           "TiktokAdapter Finance API: data.#{collection_key} inválido"
       end
+    end
+
+    # Both shop-videos endpoints take the same pair of dates and reject a
+    # range over 60 days — checked here so a caller bug fails fast with a
+    # clear message instead of a TikTok error code.
+    def shop_videos_date_range(date_from, date_to)
+      from = date_from.to_date
+      to = date_to.to_date
+      raise ArgumentError, "TiktokAdapter: date_from depois de date_to" if from > to
+      if (to - from).to_i + 1 > SHOP_VIDEOS_MAX_RANGE_DAYS
+        raise ArgumentError, "TiktokAdapter: a API de vídeos aceita no máximo #{SHOP_VIDEOS_MAX_RANGE_DAYS} dias por chamada"
+      end
+
+      { start_date_ge: from.iso8601, end_date_lt: (to + 1.day).iso8601 }
     end
 
     def post(path, body, query_params: {})

@@ -37,3 +37,56 @@ jobs:
       - name: Lint code for consistent style
         run: bin/rubocop -f github
 
+  # rspec against real Postgres/Redis. config/database.yml's test env points
+  # at postgres/postgres on localhost:5433, hence the port mapping. The
+  # schema comes from db:prepare (load db/schema.rb + run any newer
+  # migration), the same path bin/docker-entrypoint takes in production.
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      RAILS_ENV: test
+      REDIS_URL: redis://localhost:6379/0
+
+    steps:
+      - name: Install system packages
+        run: sudo apt-get update -qq && sudo apt-get install --no-install-recommends -y libpq-dev libvips ffmpeg
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: .ruby-version
+          bundler-cache: true
+
+      - name: Prepare database
+        run: bin/rails db:prepare
+
+      - name: Run tests
+        run: bundle exec rspec
+
